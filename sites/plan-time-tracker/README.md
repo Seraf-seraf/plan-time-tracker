@@ -1,22 +1,26 @@
 # Plan Time Tracker for ChatGPT Sites
 
-A private-Site application prototype for recording plan execution time. The browser UI, Worker API/MCP handler, and source-of-truth schema are intended to live inside ChatGPT Sites. GitHub is read-only external data; no separate backend is used.
+A private Site app for recording plan execution time. The browser UI, Worker API/MCP handler, and source-of-truth schema run inside ChatGPT Sites. GitHub is optional read-only source data; there is no separate backend.
 
 ## Current implementation
 
-- Owner-scoped plans, plan date distinct from server registration/start, immutable plan event history, server-timed half-open work intervals, idempotent commands, and a one-RUNNING-plan constraint.
-- Explicit Start, Pause, Resume, Finish; time continues across nights and weekends until Pause/Finish.
+- Owner-scoped plans, immutable plan event history, server-timed half-open work intervals, idempotent commands, and a one-RUNNING-plan constraint.
+- Explicit Start, Pause, Resume, Finish; time continues across nights and weekends until Pause or Finish.
 - UI for plan creation, lifecycle controls, plan/date/repository filters, interval/event history, explicit Finish confirmation, branch/ref selection, commit status and conflict review, analytics sample details, timezone, private-cache controls, and owner JSON export.
 - Shared API/MCP command processor. MCP schemas and calls use the same command types, receipts, owner identity, and D1 data model.
 - Read-only GitHub REST adapter with bounded retries/Retry-After, durable page checkpoints/resume, full-ref reconciliation, commit de-duplication, exact Plan-ID conflict review, explicit owner exclusions, revoke/cache handling, and time-overlap candidates. It requires a Site runtime `GITHUB_TOKEN` and is disabled when absent.
 
-## Normative sources and verification status
+## Published Site and verification
 
-The exact full requirement and plan files are in `../../docs/originals/`. Their checksums and the task-by-task mapping to source code and evidence are recorded in `../../docs/G1-G6-status.md`, `../../docs/A01-A24-status.md`, and `../../docs/plan-traceability.md`. The mapped local implementation is not a completed or published Site: mandatory runtime gates and acceptance scenarios remain open.
+The existing owner-private Site is live at https://plan-time-tracker.seraf-k.chatgpt.site (version 1). It uses the existing Site identity and owner-only allowlist. Its `.openai/hosting.json` declares `"d1": "DB"`; the publish succeeded and the live database overview reports binding `DB` with 13 application tables. The initial schema is `drizzle/0001_initial.sql`.
+
+The source snapshot was based on GitHub `main` commit `3943ff928a919cb8e035bd754f787eb200b0127d`. The Site source repository contains deployment commit `8d0639abf461cd9abc9145fd68fad923220d6d63`. The complete original requirements and plan remain unabridged in `../../docs/originals/`; checksums and traceability are in `../../docs/`.
+
+Local verification: `npm test` passed 44/44, `npm run build`, `npm run validate`, and `node --check worker/index.js` passed. A live MCP lifecycle smoke test on the published Site created, started, replayed, paused, resumed, and finished a QA plan, then returned analytics; that QA record remains in the database. This is not a full G1–G6 or A01–A24 pass.
 
 ## Local development
 
-Requires Node.js 22+ (the tests use built-in `node:sqlite`). From this directory:
+Requires Node.js 22+ (tests use built-in `node:sqlite`). From this directory:
 
 ```sh
 npm test
@@ -25,12 +29,8 @@ npm run validate
 node --check worker/index.js
 ```
 
-`npm test` runs the SQLite-backed local behavioral suite. It exercises schema triggers and atomic statement rollback, but it does not emulate Cloudflare D1 concurrency or Site identity middleware. `npm run build` creates `dist/`; `npm run validate` checks the Worker ESM artifact.
+The local SQLite adapter exercises schema constraints and atomic statement rollback; it does not emulate Cloudflare D1 concurrency or Sites identity middleware.
 
-## Site runtime requirements and blockers
+## Remaining gates
 
-The Worker expects a Site D1 binding named `DB` and the authenticated-user headers `oai-authenticated-user-id` and optional `oai-authenticated-user-email`. The `.openai/hosting.json` contains the known Site project ID and declares MCP capability, but the D1 binding shape and migration-attachment workflow could not be confirmed from the available Sites tooling. The manifest therefore has `d1: null`; it is **not deploy-ready**. The GitHub chat connector does not provide this Worker with GitHub access. No GitHub token, OAuth grant, or secret has been created; private repository sync returns an explicit unavailable error until an approved Site runtime integration is configured.
-
-The private Site exists but has no deployment. No public URL, live MCP endpoint, hosted D1 behavior, or real Site auth behavior has been verified. A local Chromium/Playwright preview exercised UI/API flows against SQLite and test identity headers; this does not establish hosted rendering or Sites behavior. Do not present this local prototype as a working published Site or connected skill.
-
-Before any deployment, resolve the Site D1 binding/migration configuration and supported runtime GitHub integration, then run G1–G6 against the actual private Site and the full A01–A24 acceptance suite. Deployment/publication, credential creation, and permission changes are intentionally outside this local implementation.
+The browser QA currently reaches the Site's ChatGPT sign-in screen. Owner sign-in was not completed because the flow requires a one-time authenticator code; do not claim UI identity middleware or cross-owner browser denial was tested. Hosted D1 concurrency and the full A01–A24 acceptance suite remain unverified. GitHub repository sync remains explicitly disabled until the owner configures a supported Site runtime integration and `GITHUB_TOKEN`; the ChatGPT GitHub connector does not supply runtime access. No GitHub runtime secret or OAuth grant is present.
