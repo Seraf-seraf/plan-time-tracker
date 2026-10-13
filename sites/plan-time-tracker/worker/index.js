@@ -25,15 +25,35 @@ function canonical(value) {
   return JSON.stringify(value);
 }
 
-export async function payloadHash(envelope) {
-  const value = canonical({
+function commandHashInput(envelope) {
+  return {
     schemaVersion: envelope.schemaVersion,
     commandType: envelope.commandType,
     expectedVersion: envelope.expectedVersion == null ? null : envelope.expectedVersion,
     payload: envelope.payload,
-  });
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  };
+}
+
+async function hashCommandInput(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(canonical(value)));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export async function payloadHash(envelope) {
+  const value = commandHashInput(envelope);
+  if (envelope.commandType === "CreatePlan" && envelope.sourceReference !== undefined) value.sourceReference = envelope.sourceReference;
+  return hashCommandInput(value);
+}
+
+async function receiptMatchesCommand(receipt, envelope, hash) {
+  if (envelope.commandType === "CreatePlan") {
+    const storedPayload = parseColumn(receipt.payload_json, {});
+    const sourceReference = envelope.sourceReference === undefined ? envelope.payload.sourceReference : envelope.sourceReference;
+    if (storedPayload.sourceReference !== sourceReference) return false;
+  }
+  if (receipt.payload_hash === hash) return true;
+  if (envelope.commandType !== "CreatePlan" || receipt.payload_hash !== await hashCommandInput(commandHashInput(envelope))) return false;
+  return true;
 }
 
 export function checkTimeZone(timeZone) {
@@ -218,10 +238,11 @@ function mapDbError(error) {
 export async function executeCommand(db, identity, envelope, channel, nowMs) {
   validateEnvelope(envelope);
   const hash = await payloadHash(envelope);
-  if (envelope.payloadHash && envelope.payloadHash !== hash) throw appError("VALIDATION_ERROR", "payloadHash не совпадает с конвертом.");
   let receipt = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=?", identity.ownerId, envelope.commandId);
+  const matchesReceipt = receipt && await receiptMatchesCommand(receipt, envelope, hash);
+  if (envelope.payloadHash && envelope.payloadHash !== hash && !(matchesReceipt && envelope.payloadHash === receipt.payload_hash)) throw appError("VALIDATION_ERROR", "payloadHash не совпадает с конвертом.");
   if (receipt) {
-    if (receipt.payload_hash !== hash) throw appError("IDEMPOTENCY_KEY_REUSED", messageFor("IDEMPOTENCY_KEY_REUSED"), 409);
+    if (!matchesReceipt) throw appError("IDEMPOTENCY_KEY_REUSED", messageFor("IDEMPOTENCY_KEY_REUSED"), 409);
     return resultFromReceipt(receipt, true);
   }
 
@@ -290,7 +311,7 @@ export async function executeCommand(db, identity, envelope, channel, nowMs) {
   } catch (error) { throw mapDbError(error); }
   receipt = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=?", identity.ownerId, envelope.commandId);
   if (!receipt) throw appError("INTERNAL_ERROR", "Не удалось сохранить результат команды.", 500);
-  if (receipt.payload_hash !== hash) throw appError("IDEMPOTENCY_KEY_REUSED", messageFor("IDEMPOTENCY_KEY_REUSED"), 409);
+  if (!await receiptMatchesCommand(receipt, envelope, hash)) throw appError("IDEMPOTENCY_KEY_REUSED", messageFor("IDEMPOTENCY_KEY_REUSED"), 409);
   return resultFromReceipt(receipt, false);
 }
 

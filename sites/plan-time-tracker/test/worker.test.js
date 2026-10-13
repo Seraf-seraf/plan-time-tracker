@@ -1251,6 +1251,32 @@ test("request payload owner and hostile external origin are not trusted", async 
 });
 
 
+test("sourceReference changes reject command ID reuse and legacy receipts retain safe replay", async () => {
+  for (const legacy of [false, true]) {
+    const c = context();
+    const envelope = { schemaVersion: 1, commandId: commandId(), commandType: "CreatePlan", sourceReference: "source-A",
+      payload: { planId: PLAN_A, title: "Source reference", planCreatedAt: { precision: "dateOnly", on: "2026-10-08", timeZone: "UTC" } } };
+    const first = await call(c.worker, c.db, "/api/commands", { method: "POST", body: JSON.stringify(envelope) });
+    assert.equal(first.response.status, 200);
+    let savedHash = first.body.payloadHash;
+    if (legacy) {
+      const legacyEnvelope = { ...envelope }; delete legacyEnvelope.sourceReference;
+      savedHash = await payloadHash(legacyEnvelope);
+      await c.db.prepare("UPDATE command_receipts SET payload_hash=? WHERE owner_id=? AND command_id=?")
+        .bind(savedHash, OWNER, envelope.commandId).run();
+    }
+    const replay = await call(c.worker, c.db, "/api/commands", { method: "POST", body: JSON.stringify({ ...envelope, payloadHash: savedHash }) });
+    assert.equal(replay.response.status, 200); assert.equal(replay.body.replayed, true); assert.equal(replay.body.payloadHash, savedHash);
+    for (const sourceReference of ["source-B", undefined]) {
+      const changed = await call(c.worker, c.db, "/api/commands", { method: "POST", body: JSON.stringify({ ...envelope, sourceReference }) });
+      assert.equal(changed.response.status, 409); assert.equal(changed.body.error.code, "IDEMPOTENCY_KEY_REUSED");
+    }
+    assert.equal(c.db.sqlite.prepare("SELECT count(*) AS n FROM plan_events").get().n, 1);
+    assert.equal(c.db.sqlite.prepare("SELECT source_reference FROM plans").get().source_reference, "source-A");
+    c.db.sqlite.close();
+  }
+});
+
 test("rejected commit review leaves all links, conflicts, history and versions unchanged", async () => {
   for (const status of ["excluded", "confirmed"]) {
     const c = context(); await call(c.worker, c.db, "/api/whoami");
