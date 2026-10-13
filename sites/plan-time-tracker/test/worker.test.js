@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { Script } from "node:vm";
 import {
@@ -20,7 +20,9 @@ import {
   syncRepository,
 } from "../worker/index.js";
 
-const schema = readFileSync(new URL("../drizzle/0001_initial.sql", import.meta.url), "utf8");
+const migrationsDirectory = new URL("../drizzle/", import.meta.url);
+const schema = readdirSync(migrationsDirectory).filter((name) => name.endsWith(".sql")).sort()
+  .map((name) => readFileSync(new URL(name, migrationsDirectory), "utf8")).join("\n");
 
 class SqliteStatement {
   constructor(database, sql, args = []) { this.database = database; this.sql = sql; this.args = args; }
@@ -34,9 +36,9 @@ class SqliteStatement {
 }
 
 class SqliteD1 {
-  constructor() {
+  constructor(migrationSql = schema) {
     this.sqlite = new DatabaseSync(":memory:");
-    this.sqlite.exec(schema);
+    this.sqlite.exec(migrationSql);
   }
   prepare(sql) { return new SqliteStatement(this, sql); }
   async batch(statements) {
@@ -1246,4 +1248,40 @@ test("request payload owner and hostile external origin are not trusted", async 
     headers: { "oai-authenticated-user-id": OWNER, origin: "https://evil.example" },
   }), { DB: c.db });
   assert.equal(bad.status, 403);
+});
+
+
+test("rejected commit review leaves all links, conflicts, history and versions unchanged", async () => {
+  for (const status of ["excluded", "confirmed"]) {
+    const c = context(); await call(c.worker, c.db, "/api/whoami");
+    await c.db.prepare("INSERT INTO repositories(owner_id,repository_id,full_name,is_private,default_branch,access_state,selected,updated_at) VALUES(?,'42','fixture/review',0,'main','available',1,?)").bind(OWNER,c.now()).run();
+    await createPlan(c.worker,c.db,PLAN_A,"Stale review",OWNER,{repositoryIds:["42"]});
+    const sha = "a".repeat(40);
+    await c.db.prepare("INSERT INTO commits(owner_id,repository_id,sha,observed_at,message,url) VALUES(?,'42',?,?,'probe','https://github.com/fixture/review')").bind(OWNER,sha,c.now()).run();
+    await c.db.prepare("INSERT INTO plan_commit_links(owner_id,plan_id,repository_id,sha,status,basis,reviewed_by,reviewed_at) VALUES(?,?,'42',?,'candidate','time',?,?)").bind(OWNER,PLAN_A,sha,OWNER,c.now()).run();
+    await c.db.prepare("INSERT INTO commit_attribution_conflicts(owner_id,repository_id,sha,marker_plan_ids_json,reason,detected_at) VALUES(?,'42',?,'[]','probe',?)").bind(OWNER,sha,c.now()).run();
+    await executeCommand(c.db,{ownerId:OWNER},{schemaVersion:1,commandId:commandId(),commandType:"UpdatePlanMetadata",expectedVersion:0,payload:{planId:PLAN_A,title:"Changed"}},"ui",c.now());
+    const snapshot = () => ["plans", "plan_events", "plan_commit_links", "commit_attribution_conflicts"].map(table => c.db.sqlite.prepare("SELECT * FROM "+table).all());
+    const before = snapshot();
+    for (const [planId, expectedVersion, code] of [[PLAN_A,0,"VERSION_CONFLICT"],[PLAN_B,0,"PLAN_NOT_FOUND"]]) {
+      await assert.rejects(() => executeCommand(c.db,{ownerId:OWNER},{schemaVersion:1,commandId:commandId(),commandType:"ReviewCommitLink",expectedVersion,payload:{planId,repositoryId:"42",sha,status,reason:"Rejected review"}},"ui",c.now()), error => error.code===code);
+      assert.deepEqual(snapshot(), before);
+    }
+    c.db.sqlite.close();
+  }
+});
+
+test("command guard migration preserves existing plans, events and receipt replay", async () => {
+  const db=new SqliteD1(readFileSync(new URL("0001_initial.sql",migrationsDirectory),"utf8"));
+  const worker=createWorker(()=>1000);
+  const envelope={schemaVersion:1,commandId:commandId(),commandType:"CreatePlan",payload:{planId:PLAN_A,title:"Existing plan",planCreatedAt:{precision:"dateOnly",on:"2026-10-08",timeZone:"Europe/Moscow"}}};
+  const created=await call(worker,db,"/api/commands",{method:"POST",body:JSON.stringify(envelope)});assert.equal(created.response.status,200);
+  const before=["plans","plan_events","command_receipts"].map(table=>db.sqlite.prepare("SELECT * FROM "+table).all());
+  for (const name of readdirSync(migrationsDirectory).filter(name=>name.endsWith(".sql")&&name!=="0001_initial.sql").sort()) {
+    db.sqlite.exec(readFileSync(new URL(name,migrationsDirectory),"utf8"));
+  }
+  assert.deepEqual(["plans","plan_events","command_receipts"].map(table=>db.sqlite.prepare("SELECT * FROM "+table).all()),before);
+  const replay=await executeCommand(db,{ownerId:OWNER},envelope,"ui",2000);
+  assert.equal(replay.replayed,true);assert.deepEqual(replay.result,created.body.result);
+  db.sqlite.close();
 });
