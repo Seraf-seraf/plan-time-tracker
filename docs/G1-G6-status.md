@@ -32,3 +32,7 @@ The deployment workflow passed `npm test` (44/44), `npm run build`, `npm run val
 2. Run D1 concurrency and the remaining hosted acceptance scenarios.
 3. Configure GitHub runtime access only after a supported Site integration is approved; do not reuse chat connector credentials or invent a raw/private URL.
 4. Run operational load and recovery checks before claiming full production readiness.
+
+## Source integrity and UI regression update (2026-10-13)
+
+The repository's truncated Worker, tests, migration, traceability, and original input files were restored from Site source commit `64a02657669668c11764443387d2d4f4c2d77c6e`. Fresh local checks passed 47/47 tests (44 behavioral and 3 UI regressions), build, artifact validation, and Worker syntax validation. The UI regressions cover embedded script compilation, responsive forms, keyboard dialog safeguards, duplicate-submit prevention, and unavailable GitHub sync controls. These checks are local, not hosted acceptance or CI results. Existing deployment evidence above is retained; the GitHub source repair does not deploy or modify D1.

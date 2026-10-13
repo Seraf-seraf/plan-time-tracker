@@ -29,4 +29,29 @@
 | GITHUB: GITHUB-T1 repository; T2 sync; T3 attribution и полный UUID/exclusion/rebase правила, 651–693 | GitHubRestAdapter/syncRepository поддерживает bounded retry/Retry-After, page checkpoint/resume, ref reconciliation, marker conflict review, explicit exclusion, unique confirmed link и revoke/cache policy. Mock tests pass; live runtime/rebase E2E не проверены, G3 blocked. |
 | ANALYTICS: AN-T1–T4, метрики/интерпретация и DoD, 695–732 | Completed count отдельно от measured sample; N/small-sample/asOf, inactive PLANNED/PAUSED и repo/date filters реализованы. Локальные Worker tests проходят; Sites runtime не проверен. |
 | UI: UI-T1–T4, artifacts/accessibility/DoD, 734–777 | Responsive UI, filters, Finish confirmation, commit tabs/conflict review, ref selection и private-cache actions реализованы. Локальный Chromium preview прошёл keyboard lifecycle на 360/768/1440 без overflow; это не Sites runtime и не полный A20. |
-| SKILL: SKILL-T1–T3, protocol/client/errors/DoD, 779–819 | Draft skill и MCP schemas/route есть. Нет двух клиентов, live Sites MCP или доказательства r
+| SKILL: SKILL-T1–T3, protocol/client/errors/DoD, 779–819 | Draft skill и MCP schemas/route есть. Нет двух клиентов, live Sites MCP или доказательства runtime access; G4 NOT RUN. |
+| ACCEPTANCE: все этапы и A01–A24, 821–835; полная трассировка, 837–865 | Все полные A-тексты в нормативном файле, строки 285–313. Сводный статус в docs/A01-A24-status.md. Локальные 24 теста не являются 24 полными A E2E кейсами; acceptance NOT RUN целиком. |
+| Риски и решения для каждого из восьми рисков, 868–915 | G1–G6-status.md и таблица выше фиксируют неизвестные runtime и локальные меры. Части обязательного MVP не урезаны; при невозможности нужен поддерживаемый путь или отдельное согласование scope. |
+
+## Практическое приложение: каждый этап реализации
+
+| Полный пункт приложения и исходные строки | Код / локальная проверка / статус |
+|---|---|
+| Назначение дополнения, порядок G1–G6 и FAIL, 917–979 | Все положения сохранены в оригинале; gates выше. FAIL G3/G4 не снимает требования. |
+| Практический статус G1–G6, 981–995 | Полные gate артефакты и статус в docs/G1-G6-status.md. Ни один hosted gate не PASS. |
+| G2 atomicity, PASS/FAIL, 996–1040 | SQLite тесты моделируют один successful Start и конфликт; требуемые параллельные запросы к Site D1 не запускались. |
+| G2 idempotency, 1042–1069 | Local command receipt tests проходят; cross-client Site D1/lost response не проверен. |
+| DATA-001, T1–T5: Owner, Plan, WorkInterval, PlanEvent/CommandReceipt и GitHub entities, 1071–1163 | drizzle/0001_initial.sql плюс Worker; composite owner FKs, commit owner scope, ref memberships, unique confirmed link/exclusion guard локально тестируются. Hosted migration not run. |
+| CMD-001, T1–T3: весь command list, envelope incl sourceReference, полный error list, 1165–1230 | Shared API/MCP service и envelope sourceReference реализованы; receipt/error contract локально тестируется. Живой UI+MCP integration untested. |
+| TIME-001, T1–T3: transitions, Active/Calendar/Paused, DST/UTC/serverNow, 1232–1287 | Local calculation/lifecycle tests pass. Site clock, D1 transaction и analytics asOf contract не проверены. |
+| GITHUB-001, T1–T3: repo, pagination/checkpoint/retry/rate limit, confirmed/candidate/excluded и исключение выше marker, 1289–1343 | Mock fixtures cover committerAt, retry/Retry-After, checkpoint/resume, ref reconciliation, conflicts/exclusion and revoke/cache. Rebase and live GitHub remain unproven. |
+| SECURITY-001, T1–T4: owner/direct access, secret scan, recovery, export incl private metadata policy, 1345–1427 | API tests покрывают spoof/foreign denial/receipt; export owner scoping проверяется. Нет G1/G5/G6 runtime, bundle/log scan, restore. Экспорт private GitHub metadata нуждается в явной policy сверке. |
+| UI-001, T1–T3: обзор, план, настройки, accessibility/DoD, 1429–1488 | uiHtml() has filters, Finish confirmation, tabs, conflict resolution, refs and revoked-cache actions. A20 PARTIAL: локальный Chromium проверил keyboard lifecycle, confirmation, focus и ширины; полный/hosted QA не выполнен. |
+| SKILL-001, T1–T2: schema/commands/errors и полный lifecycle, 1490–1539 | Skill draft и local MCP schema. A22/G4 не run. |
+| ANALYTICS-001: активное время, completed, median, list, запрет рейтинга/скорости/качества, 1541–1569 | Completed count and median sample are separate; N, small-sample, asOf, inactive list and date/repository filters are implemented and locally tested. Hosted evidence is absent. |
+| G6-A и остальные load/recovery/limits criteria, 1571–1610 | Тестовый профиль и пороги не запускались; G6 NOT RUN, производительность не заявляется. |
+| Полная трассировка A01–A24 и финальный DoD, 1611–1661 | A01-A24-status.md плюс полный нормативный текст. Весь проект DoD не выполнен; не все A прошли и нет G1–G6 PASS. |
+
+## Проверенный локальный результат
+
+В sites/plan-time-tracker выполнено: npm test — 44 passed, 0 failed; npm run build — passed; npm run validate — passed; node --check worker/index.js — passed. Owner-scoped composite plan keys, expiring sync leases/recovery, and stable numeric GitHub author-ID candidate filters are covered locally. Mocked GitHub fixtures distinguish author/committer identities and times and cover retry/checkpoint/reconciliation/conflict/revoke. Это не hosted verification. Site deploy, credential/grant, push, merge и PR не выполнялись.

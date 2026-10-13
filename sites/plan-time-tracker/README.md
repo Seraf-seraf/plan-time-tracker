@@ -14,9 +14,9 @@ A private Site app for recording plan execution time. The browser UI, Worker API
 
 The existing owner-private Site is live at https://plan-time-tracker.seraf-k.chatgpt.site (version 1). It uses the existing Site identity and owner-only allowlist. Its `.openai/hosting.json` declares `"d1": "DB"`; the publish succeeded and the live database overview reports binding `DB` with 13 application tables. The initial schema is `drizzle/0001_initial.sql`.
 
-The source snapshot was based on GitHub `main` commit `3943ff928a919cb8e035bd754f787eb200b0127d`. The Site source repository contains deployment commit `8d0639abf461cd9abc9145fd68fad923220d6d63`. The complete original requirements and plan remain unabridged in `../../docs/originals/`; checksums and traceability are in `../../docs/`.
+The original deployment used Site source commit `8d0639abf461cd9abc9145fd68fad923220d6d63`. The complete source and responsive/accessibility improvements were restored to this repository from Site source commit `64a02657669668c11764443387d2d4f4c2d77c6e` on 2026-10-13. Restoring repository source does not by itself deploy that revision. The complete original requirements and plan remain unabridged in `../../docs/originals/`; checksums and traceability are in `../../docs/`.
 
-Local verification: `npm test` passed 44/44, `npm run build`, `npm run validate`, and `node --check worker/index.js` passed. A live MCP lifecycle smoke test on the published Site created, started, replayed, paused, resumed, and finished a QA plan, then returned analytics; that QA record remains in the database. This is not a full G1–G6 or A01–A24 pass.
+Local verification (2026-10-13): `npm test` passed 47/47, `npm run build`, `npm run validate`, and `node --check worker/index.js` passed. A live MCP lifecycle smoke test on the published Site created, started, replayed, paused, resumed, and finished a QA plan, then returned analytics; that QA record remains in the database. This is not a full G1–G6 or A01–A24 pass.
 
 ## Local development
 
