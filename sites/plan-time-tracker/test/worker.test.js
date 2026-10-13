@@ -667,6 +667,55 @@ test("GitHub adapter retries transient GET failures and honors Retry-After", asy
   assert.equal(rateCalls, 1);
 });
 
+test("GitHub default fetch is bound to the runtime global receiver", async () => {
+  const originalFetch = globalThis.fetch;
+  const receivers = [];
+  globalThis.fetch = function runtimeFetch(_url, options) {
+    receivers.push(this);
+    assert.equal(this, globalThis);
+    assert.equal(new Headers(options.headers).has("authorization"), false);
+    return Promise.resolve(new Response(JSON.stringify({ id: 801, full_name: "fixture/receiver", private: false }), { status: 200 }));
+  };
+  try {
+    const adapter = new GitHubRestAdapter(null, undefined, { maxAttempts: 1 });
+    assert.equal((await adapter.repository("fixture", "receiver")).id, 801);
+    assert.deepEqual(receivers, [globalThis]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("GitHub fetch failures expose only safe invocation or network classifications", async () => {
+  const invocationSentinel = "raw invocation details must stay private";
+  let invocationCalls = 0;
+  const invocation = new GitHubRestAdapter(null, function injectedFetch() {
+    invocationCalls += 1;
+    throw new TypeError(invocationSentinel);
+  }, { maxAttempts: 3, sleep: async () => assert.fail("invocation failures must not retry") });
+  await assert.rejects(() => invocation.repository("fixture", "invocation"), (error) => {
+    assert.equal(error.code, "SOURCE_UNAVAILABLE");
+    assert.equal(error.details.failureKind, "invocation");
+    assert.equal(error.details.retryable, false);
+    assert(!JSON.stringify({ message: error.message, details: error.details }).includes(invocationSentinel));
+    return true;
+  });
+  assert.equal(invocationCalls, 1);
+
+  let networkCalls = 0;
+  const network = new GitHubRestAdapter(null, async () => {
+    networkCalls += 1;
+    throw new TypeError("raw network details must stay private");
+  }, { maxAttempts: 2, sleep: async () => undefined });
+  await assert.rejects(() => network.repository("fixture", "network"), (error) => {
+    assert.equal(error.code, "SOURCE_UNAVAILABLE");
+    assert.equal(error.details.failureKind, "network");
+    assert.equal(error.details.retryable, true);
+    assert(!JSON.stringify({ message: error.message, details: error.details }).includes("raw network details"));
+    return true;
+  });
+  assert.equal(networkCalls, 2);
+});
+
 test("sync API returns durable partial progress and Retry-After instead of hiding it as a failure", async () => {
   const c = context();
   const originalFetch = globalThis.fetch;

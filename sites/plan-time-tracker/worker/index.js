@@ -401,7 +401,7 @@ export class GitHubRestAdapter {
   constructor(token, fetchImpl, options) {
     this.token = typeof token === "string" && token.trim() ? token.trim() : null;
     this.authenticated = Boolean(this.token);
-    this.fetchImpl = fetchImpl || fetch;
+    this.fetchImpl = fetchImpl || globalThis.fetch.bind(globalThis);
     this.maxAttempts = Math.max(1, Math.min(4, options && options.maxAttempts || 3));
     this.now = options && options.now || (() => Date.now());
     this.sleep = options && options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -421,16 +421,23 @@ export class GitHubRestAdapter {
   async request(url) {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       let response;
+      let fetchPromise;
       try {
         const headers = {
           accept: "application/vnd.github+json",
           "x-github-api-version": "2022-11-28", "user-agent": "plan-time-tracker-site",
         };
         if (this.token) headers.authorization = "Bearer " + this.token;
-        response = await this.fetchImpl(url, { headers });
-      } catch (error) {
+        fetchPromise = this.fetchImpl(url, { headers });
+      } catch {
+        throw appError("SOURCE_UNAVAILABLE", "Не удалось запустить запрос к GitHub.", 502,
+          { retryable: false, attempts: attempt, failureKind: "invocation" });
+      }
+      try {
+        response = await fetchPromise;
+      } catch {
         if (attempt >= this.maxAttempts) throw appError("SOURCE_UNAVAILABLE", "GitHub network request failed after bounded retries.", 502,
-          { retryable: true, attempts: attempt });
+          { retryable: true, attempts: attempt, failureKind: "network" });
         await this.sleep(Math.min(400, 100 * 2 ** (attempt - 1)));
         continue;
       }
@@ -586,6 +593,7 @@ export async function syncRepository(db, ownerId, fullName, cursor, requestedRef
     repositoryId: repositoryId, fullName: info.full_name, ref: ref, imported: imported,
     completeness: complete ? "complete" : "partial", nextPage: complete ? null : page,
     error: lastError, errorMessage: lastErrorMessage,
+    failureKind: lastErrorDetails && lastErrorDetails.failureKind || null,
     retryAfter: lastErrorDetails && lastErrorDetails.retryAfter != null ? lastErrorDetails.retryAfter : null,
     retryAt: lastErrorDetails && lastErrorDetails.retryAt != null ? lastErrorDetails.retryAt : null,
     reconciliation: fullRescan ? "full" : "incremental",
@@ -700,7 +708,7 @@ export async function executeSyncCommand(db, identity, envelope, channel, token,
         await db.prepare("INSERT INTO repository_sync_state(owner_id,repository_id,ref,last_successful_sync_at,cursor,completeness,last_error_code,reconciliation_id) VALUES(?,?,?,NULL,?,'partial',?,NULL) ON CONFLICT(owner_id,repository_id,ref) DO UPDATE SET cursor=COALESCE(repository_sync_state.cursor,excluded.cursor),completeness='partial',last_error_code=excluded.last_error_code")
           .bind(identity.ownerId, saved.repository_id, ref, saved.cursor || "1", errorCode).run();
       }
-      result = { repositoryId: saved && saved.repository_id || null, fullName: payload.fullName, ref: payload.ref || saved && saved.default_branch || null, completeness: "partial", nextPage: saved && saved.cursor || "1", error: errorCode, errorMessage: error.message || "Не удалось загрузить данные из GitHub.", retryAfter: error.details && error.details.retryAfter != null ? error.details.retryAfter : null, retryAt: error.details && error.details.retryAt || null };
+      result = { repositoryId: saved && saved.repository_id || null, fullName: payload.fullName, ref: payload.ref || saved && saved.default_branch || null, completeness: "partial", nextPage: saved && saved.cursor || "1", error: errorCode, errorMessage: error.message || "Не удалось загрузить данные из GitHub.", failureKind: error.details && error.details.failureKind || null, retryAfter: error.details && error.details.retryAfter != null ? error.details.retryAfter : null, retryAt: error.details && error.details.retryAt || null };
     } else {
       outcome = errorCode;
       result = { error: outcome, message: error.message, details: error.details || null };
