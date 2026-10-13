@@ -1271,6 +1271,48 @@ test("rejected commit review leaves all links, conflicts, history and versions u
   }
 });
 
+test("sync recovery fences old repository, page, error and receipt writes", async () => {
+  for (const phase of ["repository", "page", "error", "write", "finalize"]) {
+    const c = context();await call(c.worker,c.db,"/api/whoami");
+    const envelope={schemaVersion:1,commandId:commandId(),commandType:"SyncRepository",payload:{fullName:"fixture/fence",fullRescan:true}};
+    let release, entered;const gate=new Promise(resolve=>{release=resolve;});const blocked=new Promise(resolve=>{entered=resolve;});
+    const batch=c.db.batch.bind(c.db);
+    c.db.batch=async statements=>{
+      const oldLease=statements[0].sql.includes("sync_execution_guards") && statements[0].args[2]===c.now()+300000;
+      if(oldLease && (phase==="write" && statements.some(statement=>statement.sql.startsWith("INSERT INTO commits")) || phase==="finalize" && statements.some(statement=>statement.sql.startsWith("UPDATE command_receipts SET outcome_code")))) {
+        entered();await gate;
+      }
+      return batch(statements);
+    };
+    const info={id:42,full_name:"fixture/fence",private:false,default_branch:"main"};
+    const item=letter=>({sha:letter.repeat(40),commit:{message:"probe",committer:{date:"2026-10-09T13:00:00Z"}},parents:[]});
+    const oldAdapter={repository:async()=>{if(phase==="repository"){entered();await gate;}return info;},commitPage:async()=>{if(phase==="page"||phase==="error"){entered();await gate;}if(phase==="error")throw new AppError("SOURCE_UNAVAILABLE","Old request failed",502);return {data:[item("a")],links:{}};}};
+    const newAdapter={repository:async()=>info,commitPage:async()=>({data:[item("b")],links:{}})};
+    const oldRun=executeSyncCommand(c.db,{ownerId:OWNER},envelope,"ui",null,c.now(),oldAdapter);
+    // Attach immediately so a fenced rejection cannot become unhandled.
+    const oldResult=oldRun.then(value=>({value}),error=>({error}));
+    await blocked;
+    const recovered=await executeSyncCommand(c.db,{ownerId:OWNER},envelope,"ui",null,c.now()+300001,newAdapter);
+    assert.equal(recovered.outcome,"OK");
+    const snapshot=()=>["repositories","commits","repository_ref_commits","repository_sync_state","command_receipts"].map(table=>c.db.sqlite.prepare("SELECT * FROM "+table).all());
+    const before=snapshot();release();const old=await oldResult;assert.equal(old.error,undefined);assert.equal(old.value.replayed,true);assert.deepEqual(snapshot(),before);
+    assert.equal(c.db.sqlite.prepare("SELECT count(*) AS n FROM sync_execution_guards").get().n,0);
+    const replay=await executeSyncCommand(c.db,{ownerId:OWNER},envelope,"ui",null,c.now()+300002,newAdapter);
+    assert.equal(replay.replayed,true);assert.deepEqual(replay.result,recovered.result);
+    c.db.sqlite.close();
+  }
+});
+
+test("GitHub requests abort on timeout with a safe retryable error", async () => {
+  let signal;
+  const adapter=new GitHubRestAdapter(null,(_url,options)=>{
+    assert(options.signal instanceof AbortSignal);signal=options.signal;
+    return new Promise((_resolve,reject)=>signal.addEventListener("abort",()=>reject(signal.reason),{once:true}));
+  },{maxAttempts:1,requestTimeoutMs:5});
+  await assert.rejects(()=>adapter.repository("fixture","timeout"),error=>error.code==="SOURCE_UNAVAILABLE"&&error.details.retryable===true&&error.details.failureKind==="timeout");
+  assert.equal(signal.aborted,true);
+});
+
 test("command guard migration preserves existing plans, events and receipt replay", async () => {
   const db=new SqliteD1(readFileSync(new URL("0001_initial.sql",migrationsDirectory),"utf8"));
   const worker=createWorker(()=>1000);
@@ -1284,4 +1326,36 @@ test("command guard migration preserves existing plans, events and receipt repla
   const replay=await executeCommand(db,{ownerId:OWNER},envelope,"ui",2000);
   assert.equal(replay.replayed,true);assert.deepEqual(replay.result,created.body.result);
   db.sqlite.close();
+});
+
+test("failed sync page batch rolls back its commit writes and cleans up its execution guard", async () => {
+  const c=context();await call(c.worker,c.db,"/api/whoami");
+  c.db.sqlite.exec("CREATE TRIGGER fail_sync_page BEFORE INSERT ON commits BEGIN SELECT RAISE(ABORT,'PAGE_WRITE_FAILED'); END;");
+  const envelope={schemaVersion:1,commandId:commandId(),commandType:"SyncRepository",payload:{fullName:"fixture/rollback"}};
+  const adapter={repository:async()=>({id:42,full_name:"fixture/rollback",private:false,default_branch:"main"}),commitPage:async()=>({data:[{sha:"a".repeat(40),commit:{message:"probe"},parents:[]}],links:{}})};
+  await assert.rejects(()=>executeSyncCommand(c.db,{ownerId:OWNER},envelope,"ui",null,c.now(),adapter),error=>error instanceof AppError);
+  for(const table of ["commits","repository_ref_commits","sync_execution_guards"])assert.equal(c.db.sqlite.prepare("SELECT count(*) AS n FROM "+table).get().n,0);
+  c.db.sqlite.close();
+});
+
+test("an old sync cannot finalize the receipt while its replacement still runs", async () => {
+  const c=context();await call(c.worker,c.db,"/api/whoami");
+  const envelope={schemaVersion:1,commandId:commandId(),commandType:"SyncRepository",payload:{fullName:"fixture/pending"}};
+  const info={id:42,full_name:"fixture/pending",private:false,default_branch:"main"};
+  let releaseOld,enterOld,releaseNew,enterNew;
+  const oldGate=new Promise(resolve=>{releaseOld=resolve;});const oldEntered=new Promise(resolve=>{enterOld=resolve;});
+  const newGate=new Promise(resolve=>{releaseNew=resolve;});const newEntered=new Promise(resolve=>{enterNew=resolve;});
+  const oldAdapter={repository:async()=>{enterOld();await oldGate;return info;},commitPage:async()=>assert.fail("old lease must stop before requesting a page")};
+  const newAdapter={repository:async()=>info,commitPage:async()=>{enterNew();await newGate;return {data:[],links:{}};}};
+  const oldRun=executeSyncCommand(c.db,{ownerId:OWNER},envelope,"ui",null,c.now(),oldAdapter);
+  const oldResult=oldRun.then(value=>({value}),error=>({error}));
+  await oldEntered;
+  const newRun=executeSyncCommand(c.db,{ownerId:OWNER},envelope,"ui",null,c.now()+300001,newAdapter);
+  await newEntered;
+  const before=c.db.sqlite.prepare("SELECT * FROM command_receipts").get();
+  releaseOld();const old=await oldResult;
+  assert.equal(old.error.code,"INTERNAL_ERROR");assert.equal(old.error.status,409);assert.equal(old.error.details.retryable,true);
+  assert.deepEqual(c.db.sqlite.prepare("SELECT * FROM command_receipts").get(),before);
+  assert.equal(c.db.sqlite.prepare("SELECT count(*) AS n FROM sync_execution_guards").get().n,0);
+  releaseNew();assert.equal((await newRun).outcome,"OK");c.db.sqlite.close();
 });

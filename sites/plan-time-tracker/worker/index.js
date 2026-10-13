@@ -1,5 +1,6 @@
 const BODY_LIMIT = 128 * 1024;
 const PAGE_LIMIT = 10;
+const GITHUB_REQUEST_TIMEOUT_MS = 15000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA = /^[0-9a-f]{40}$/i;
 const WRITE_COMMANDS = new Set(["CreatePlan", "StartPlan", "PausePlan", "ResumePlan", "FinishPlan", "UpdatePlanMetadata", "ReviewCommitLink"]);
@@ -406,6 +407,7 @@ export class GitHubRestAdapter {
     this.now = options && options.now || (() => Date.now());
     this.sleep = options && options.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.maxInlineWaitMs = options && options.maxInlineWaitMs != null ? options.maxInlineWaitMs : 1500;
+    this.requestTimeoutMs = options && Number.isFinite(options.requestTimeoutMs) && options.requestTimeoutMs > 0 ? options.requestTimeoutMs : GITHUB_REQUEST_TIMEOUT_MS;
   }
   retryAfterMs(response) {
     const retryAfter = response.headers.get("retry-after");
@@ -420,60 +422,71 @@ export class GitHubRestAdapter {
   }
   async request(url) {
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
-      let response;
-      let fetchPromise;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
       try {
-        const headers = {
-          accept: "application/vnd.github+json",
-          "x-github-api-version": "2022-11-28", "user-agent": "plan-time-tracker-site",
-        };
-        if (this.token) headers.authorization = "Bearer " + this.token;
-        fetchPromise = this.fetchImpl(url, { headers });
-      } catch {
-        throw appError("SOURCE_UNAVAILABLE", "Не удалось запустить запрос к GitHub.", 502,
-          { retryable: false, attempts: attempt, failureKind: "invocation" });
-      }
-      try {
-        response = await fetchPromise;
-      } catch {
-        if (attempt >= this.maxAttempts) throw appError("SOURCE_UNAVAILABLE", "GitHub network request failed after bounded retries.", 502,
-          { retryable: true, attempts: attempt, failureKind: "network" });
-        await this.sleep(Math.min(400, 100 * 2 ** (attempt - 1)));
-        continue;
-      }
-      let errorBody = null;
-      if (!response.ok && [401, 403, 404, 422].includes(response.status)) {
-        try { errorBody = await response.clone().json(); } catch { errorBody = null; }
-      }
-      const rateLimited = response.status === 429 || response.status === 403 && (
-        response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after") ||
-        /rate limit/i.test(String(errorBody && errorBody.message || ""))
-      );
-      const transient = [500, 502, 503, 504].includes(response.status);
-      if (rateLimited || transient) {
-        const waitMs = this.retryAfterMs(response);
-        if (attempt < this.maxAttempts && (waitMs == null || waitMs <= this.maxInlineWaitMs)) {
-          await this.sleep(waitMs == null ? Math.min(400, 100 * 2 ** (attempt - 1)) : waitMs);
+        let response;
+        let fetchPromise;
+        try {
+          const headers = {
+            accept: "application/vnd.github+json",
+            "x-github-api-version": "2022-11-28", "user-agent": "plan-time-tracker-site",
+          };
+          if (this.token) headers.authorization = "Bearer " + this.token;
+          fetchPromise = this.fetchImpl(url, { headers, signal: controller.signal });
+        } catch {
+          throw appError("SOURCE_UNAVAILABLE", "Не удалось запустить запрос к GitHub.", 502,
+            { retryable: false, attempts: attempt, failureKind: "invocation" });
+        }
+        try {
+          response = await fetchPromise;
+        } catch {
+          if (attempt >= this.maxAttempts) throw appError("SOURCE_UNAVAILABLE", "GitHub network request failed after bounded retries.", 502,
+            { retryable: true, attempts: attempt, failureKind: "network" });
+          await this.sleep(Math.min(400, 100 * 2 ** (attempt - 1)));
           continue;
         }
-        if (rateLimited) {
-          throw appError("RATE_LIMITED", this.authenticated
-            ? "GitHub временно ограничил запросы. Повторите позже."
-            : "GitHub ограничил запросы; без входа лимит ниже. Повторите позже.", 429,
-            { retryAfter: waitMs == null ? null : Math.ceil(waitMs / 1000), retryAt: waitMs == null ? null : this.now() + waitMs, attempts: attempt });
+        let errorBody = null;
+        if (!response.ok && [401, 403, 404, 422].includes(response.status)) {
+          try { errorBody = await response.clone().json(); } catch { errorBody = null; }
         }
-        throw appError("SOURCE_UNAVAILABLE", "GitHub временно недоступен.", 502,
-          { retryable: true, retryAfter: waitMs == null ? null : Math.ceil(waitMs / 1000), attempts: attempt });
+        const rateLimited = response.status === 429 || response.status === 403 && (
+          response.headers.get("x-ratelimit-remaining") === "0" || response.headers.has("retry-after") ||
+          /rate limit/i.test(String(errorBody && errorBody.message || ""))
+        );
+        const transient = [500, 502, 503, 504].includes(response.status);
+        if (rateLimited || transient) {
+          const waitMs = this.retryAfterMs(response);
+          if (attempt < this.maxAttempts && (waitMs == null || waitMs <= this.maxInlineWaitMs)) {
+            await this.sleep(waitMs == null ? Math.min(400, 100 * 2 ** (attempt - 1)) : waitMs);
+            continue;
+          }
+          if (rateLimited) {
+            throw appError("RATE_LIMITED", this.authenticated
+              ? "GitHub временно ограничил запросы. Повторите позже."
+              : "GitHub ограничил запросы; без входа лимит ниже. Повторите позже.", 429,
+              { retryAfter: waitMs == null ? null : Math.ceil(waitMs / 1000), retryAt: waitMs == null ? null : this.now() + waitMs, attempts: attempt });
+          }
+          throw appError("SOURCE_UNAVAILABLE", "GitHub временно недоступен.", 502,
+            { retryable: true, retryAfter: waitMs == null ? null : Math.ceil(waitMs / 1000), attempts: attempt });
+        }
+        if (response.status === 401) throw appError("GITHUB_AUTH_INVALID", "GitHub отклонил настроенный токен. Проверьте runtime-доступ.", 401, { status: 401, retryable: false });
+        if (response.status === 404) throw appError("GITHUB_REPOSITORY_UNAVAILABLE", this.authenticated
+          ? "Репозиторий не найден или токену недоступен."
+          : "Репозиторий не найден или закрыт. Без GitHub-доступа доступны только открытые репозитории.", 404,
+        { status: 404, retryable: false });
+        if (response.status === 403) throw appError("GITHUB_ACCESS_DENIED", "GitHub отказал в доступе. Проверьте права токена или доступность открытого репозитория.", 403, { status: 403, retryable: false });
+        if (response.status === 422) throw appError("GITHUB_REQUEST_INVALID", "GitHub не принял запрос. Проверьте название репозитория и ветки.", 422, { status: 422, retryable: false });
+        if (!response.ok) throw appError("SOURCE_UNAVAILABLE", "GitHub временно недоступен.", 502, { status: response.status, retryable: true });
+        return { data: await response.json(), links: parseLinks(response.headers.get("link")) };
+      } catch (error) {
+        if (!controller.signal.aborted) throw error;
+        if (attempt >= this.maxAttempts) throw appError("SOURCE_UNAVAILABLE", "GitHub не ответил за отведённое время.", 502,
+          { retryable: true, attempts: attempt, failureKind: "timeout" });
+        await this.sleep(Math.min(400, 100 * 2 ** (attempt - 1)));
+      } finally {
+        clearTimeout(timeout);
       }
-      if (response.status === 401) throw appError("GITHUB_AUTH_INVALID", "GitHub отклонил настроенный токен. Проверьте runtime-доступ.", 401, { status: 401, retryable: false });
-      if (response.status === 404) throw appError("GITHUB_REPOSITORY_UNAVAILABLE", this.authenticated
-        ? "Репозиторий не найден или токену недоступен."
-        : "Репозиторий не найден или закрыт. Без GitHub-доступа доступны только открытые репозитории.", 404,
-      { status: 404, retryable: false });
-      if (response.status === 403) throw appError("GITHUB_ACCESS_DENIED", "GitHub отказал в доступе. Проверьте права токена или доступность открытого репозитория.", 403, { status: 403, retryable: false });
-      if (response.status === 422) throw appError("GITHUB_REQUEST_INVALID", "GitHub не принял запрос. Проверьте название репозитория и ветки.", 422, { status: 422, retryable: false });
-      if (!response.ok) throw appError("SOURCE_UNAVAILABLE", "GitHub временно недоступен.", 502, { status: response.status, retryable: true });
-      return { data: await response.json(), links: parseLinks(response.headers.get("link")) };
     }
     throw appError("SOURCE_UNAVAILABLE", "GitHub request exhausted bounded retries.", 502, { retryable: true });
   }
@@ -638,6 +651,36 @@ async function applyCommitAttribution(db, ownerId, repositoryId, ref, item, nowM
 
 const SYNC_EXECUTION_LEASE_MS = 5 * 60 * 1000;
 
+class SyncLeaseLostError extends Error {}
+
+function syncExecutionDatabase(db, ownerId, commandId, leaseUntil) {
+  const fencedBatch = async (statements) => {
+    try {
+      // The guard and all writes share one atomic D1 batch; a separate read would race with recovery.
+      const results = await db.batch([
+        db.prepare("INSERT INTO sync_execution_guards(owner_id,command_id,lease_until) VALUES(?,?,?)").bind(ownerId, commandId, leaseUntil),
+        ...statements,
+        db.prepare("DELETE FROM sync_execution_guards WHERE owner_id=? AND command_id=?").bind(ownerId, commandId),
+      ]);
+      return results.slice(1, -1);
+    } catch (error) {
+      if (String(error && error.message || "").includes("SYNC_LEASE_LOST")) throw new SyncLeaseLostError();
+      throw error;
+    }
+  };
+  const wrap = (statement) => ({
+    statement,
+    bind(...args) { return wrap(statement.bind(...args)); },
+    async run() { return (await fencedBatch([statement]))[0]; },
+    first() { return statement.first(); },
+    all() { return statement.all(); },
+  });
+  return {
+    prepare(sql) { return wrap(db.prepare(sql)); },
+    batch(statements) { return fencedBatch(statements.map((statement) => statement.statement)); },
+  };
+}
+
 async function claimPendingSyncReceipt(db, ownerId, commandId, nowMs) {
   const leaseUntil = nowMs + SYNC_EXECUTION_LEASE_MS;
   const updated = await db.prepare("UPDATE command_receipts SET execution_lease_until=? WHERE owner_id=? AND command_id=? AND outcome_code='PENDING' AND COALESCE(execution_lease_until,recorded_at+?)<=?")
@@ -692,32 +735,41 @@ export async function executeSyncCommand(db, identity, envelope, channel, token,
       }
     }
   }
-  let result;
-  let outcome = "OK";
+  const executionDb = syncExecutionDatabase(db, identity.ownerId, envelope.commandId, nowMs + SYNC_EXECUTION_LEASE_MS);
   try {
-    result = await syncRepository(db, identity.ownerId, payload.fullName, payload.cursor, payload.ref, adapterOverride || new GitHubRestAdapter(token), nowMs, { fullRescan: payload.fullRescan, authorGithubIds: payload.authorGithubIds });
-    if (result.error || result.completeness === "partial") outcome = "PARTIAL";
-  } catch (error) {
-    const errorCode = error.code || "SOURCE_UNAVAILABLE";
-    if (["SOURCE_UNAVAILABLE", "RATE_LIMITED"].includes(errorCode)) {
-      outcome = "PARTIAL";
-      const saved = await dbFirst(db, "SELECT r.repository_id,r.default_branch,s.cursor FROM repositories r LEFT JOIN repository_sync_state s ON s.owner_id=r.owner_id AND s.repository_id=r.repository_id AND s.ref=COALESCE(NULLIF(?,''),r.default_branch) WHERE r.owner_id=? AND r.full_name=?",
-        payload.ref || "", identity.ownerId, payload.fullName);
-      if (saved) {
-        const ref = payload.ref || saved.default_branch;
-        await db.prepare("INSERT INTO repository_sync_state(owner_id,repository_id,ref,last_successful_sync_at,cursor,completeness,last_error_code,reconciliation_id) VALUES(?,?,?,NULL,?,'partial',?,NULL) ON CONFLICT(owner_id,repository_id,ref) DO UPDATE SET cursor=COALESCE(repository_sync_state.cursor,excluded.cursor),completeness='partial',last_error_code=excluded.last_error_code")
-          .bind(identity.ownerId, saved.repository_id, ref, saved.cursor || "1", errorCode).run();
+    let result;
+    let outcome = "OK";
+    try {
+      result = await syncRepository(executionDb, identity.ownerId, payload.fullName, payload.cursor, payload.ref, adapterOverride || new GitHubRestAdapter(token), nowMs, { fullRescan: payload.fullRescan, authorGithubIds: payload.authorGithubIds });
+      if (result.error || result.completeness === "partial") outcome = "PARTIAL";
+    } catch (error) {
+      if (error instanceof SyncLeaseLostError) throw error;
+      const errorCode = error.code || "SOURCE_UNAVAILABLE";
+      if (["SOURCE_UNAVAILABLE", "RATE_LIMITED"].includes(errorCode)) {
+        outcome = "PARTIAL";
+        const saved = await dbFirst(db, "SELECT r.repository_id,r.default_branch,s.cursor FROM repositories r LEFT JOIN repository_sync_state s ON s.owner_id=r.owner_id AND s.repository_id=r.repository_id AND s.ref=COALESCE(NULLIF(?,''),r.default_branch) WHERE r.owner_id=? AND r.full_name=?",
+          payload.ref || "", identity.ownerId, payload.fullName);
+        if (saved) {
+          const ref = payload.ref || saved.default_branch;
+          await executionDb.prepare("INSERT INTO repository_sync_state(owner_id,repository_id,ref,last_successful_sync_at,cursor,completeness,last_error_code,reconciliation_id) VALUES(?,?,?,NULL,?,'partial',?,NULL) ON CONFLICT(owner_id,repository_id,ref) DO UPDATE SET cursor=COALESCE(repository_sync_state.cursor,excluded.cursor),completeness='partial',last_error_code=excluded.last_error_code")
+            .bind(identity.ownerId, saved.repository_id, ref, saved.cursor || "1", errorCode).run();
+        }
+        result = { repositoryId: saved && saved.repository_id || null, fullName: payload.fullName, ref: payload.ref || saved && saved.default_branch || null, completeness: "partial", nextPage: saved && saved.cursor || "1", error: errorCode, errorMessage: error.message || "Не удалось загрузить данные из GitHub.", failureKind: error.details && error.details.failureKind || null, retryAfter: error.details && error.details.retryAfter != null ? error.details.retryAfter : null, retryAt: error.details && error.details.retryAt || null };
+      } else {
+        outcome = errorCode;
+        result = { error: outcome, message: error.message, details: error.details || null };
       }
-      result = { repositoryId: saved && saved.repository_id || null, fullName: payload.fullName, ref: payload.ref || saved && saved.default_branch || null, completeness: "partial", nextPage: saved && saved.cursor || "1", error: errorCode, errorMessage: error.message || "Не удалось загрузить данные из GitHub.", failureKind: error.details && error.details.failureKind || null, retryAfter: error.details && error.details.retryAfter != null ? error.details.retryAfter : null, retryAt: error.details && error.details.retryAt || null };
-    } else {
-      outcome = errorCode;
-      result = { error: outcome, message: error.message, details: error.details || null };
     }
+    await executionDb.prepare("UPDATE command_receipts SET outcome_code=?,result_json=?,execution_lease_until=NULL WHERE owner_id=? AND command_id=? AND outcome_code='PENDING'")
+      .bind(outcome, JSON.stringify(result), identity.ownerId, envelope.commandId).run();
+    receipt = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=?", identity.ownerId, envelope.commandId);
+    return resultFromReceipt(receipt, false);
+  } catch (error) {
+    if (!(error instanceof SyncLeaseLostError)) throw error;
+    receipt = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=?", identity.ownerId, envelope.commandId);
+    if (receipt && receipt.outcome_code !== "PENDING") return resultFromReceipt(receipt, true);
+    throw await pendingSyncError(db, identity.ownerId, envelope.commandId, nowMs);
   }
-  await db.prepare("UPDATE command_receipts SET outcome_code=?,result_json=?,execution_lease_until=NULL WHERE owner_id=? AND command_id=? AND outcome_code='PENDING'")
-    .bind(outcome, JSON.stringify(result), identity.ownerId, envelope.commandId).run();
-  receipt = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=?", identity.ownerId, envelope.commandId);
-  return resultFromReceipt(receipt, false);
 }
 
 const UI_ENHANCEMENTS = String.raw`(()=> {
