@@ -780,7 +780,7 @@ const UI_ENHANCEMENTS = String.raw`(()=> {
     if(list) {
       state.repositories.forEach(r=>{
         const row=[...list.children].find(x=>x.dataset.repositoryId===r.repositoryId);
-        if(row){row.dataset.accessState=r.accessState;row.dataset.private=r.isPrivate?"true":"false";}
+        if(row){row.dataset.accessState=r.accessState;row.dataset.private=r.isPrivate?"true":"false";const status=row.children[1];if(status){status.classList.add("repo-sync-status");status.textContent=repositorySyncStatus(r);}}
       });
     }
     return data;
@@ -793,6 +793,18 @@ const UI_ENHANCEMENTS = String.raw`(()=> {
   function formatPlanSample(count) {
     const n=Number(count)||0,lastTwo=n%100;
     return "по "+n+" "+((lastTwo>=11&&lastTwo<=14)||n%10!==1?"планам":"плану");
+  }
+  function repositorySyncStatus(repository) {
+    if(repository.syncStatusUnavailable)return "Состояние скрыто · нет доступа к GitHub";
+    const states=repository.syncStates||[];
+    if(!states.length)return "Ещё не синхронизирована · "+(repository.defaultBranch||"main");
+    return states.map(sync=>{
+      const ref=sync.ref||repository.defaultBranch||"main";
+      const formatted=sync.lastSuccessfulSyncAt==null?"":new Intl.DateTimeFormat("ru-RU",{dateStyle:"medium",timeStyle:"short",timeZone:state.zone}).format(new Date(sync.lastSuccessfulSyncAt));
+      if(sync.completeness==="complete")return "Синхронизирована · "+ref+(formatted?" · "+formatted:"");
+      if(sync.completeness==="partial")return "Частично синхронизирована · "+ref+(formatted?" · последняя полная "+formatted:"")+(sync.lastErrorCode?" · есть ошибка":"");
+      return "Ещё не синхронизирована · "+ref;
+    }).join("; ");
   }
   function renderMetrics(target,data) {
     target.replaceChildren();
@@ -962,7 +974,7 @@ const UI_ENHANCEMENTS = String.raw`(()=> {
       const fullWrap=make("label","Проверить всю историю коммитов");const full=make("input");full.type="checkbox";full.id="fullRescan";fullWrap.prepend(full);sync.insertBefore(fullWrap,sync.querySelector("button"));
     }
     const list=q("#repos");
-    if(list)new MutationObserver(()=>{renderSettingsExtras().catch(()=>{});}).observe(list,{childList:true});
+    if(list){new MutationObserver(()=>{renderSettingsExtras().catch(()=>{});}).observe(list,{childList:true});if(list.children.length)renderSettingsExtras().catch(()=>{});}
   }
   const detail=q("#planDetail");
   if(detail)new MutationObserver(()=>{
@@ -1096,6 +1108,12 @@ async function apiRoute(request, env, url, channel, now) {
   }
   if (request.method === "GET" && url.pathname === "/api/repositories") {
     const repositories = await dbAll(env.DB, "SELECT r.repository_id,r.full_name,r.is_private,r.default_branch,r.access_state,r.selected,s.last_successful_sync_at,s.completeness,s.cursor,s.last_error_code,s.author_filter_json FROM repositories r LEFT JOIN repository_sync_state s ON s.owner_id=r.owner_id AND s.repository_id=r.repository_id AND s.ref=r.default_branch WHERE r.owner_id=? ORDER BY r.full_name", identity.ownerId);
+    const syncStates = await dbAll(env.DB, "SELECT repository_id,ref,last_successful_sync_at,completeness,cursor,last_error_code FROM repository_sync_state WHERE owner_id=? ORDER BY repository_id,ref", identity.ownerId);
+    const syncStatesByRepository = new Map();
+    for (const syncState of syncStates) {
+      if (!syncStatesByRepository.has(syncState.repository_id)) syncStatesByRepository.set(syncState.repository_id, []);
+      syncStatesByRepository.get(syncState.repository_id).push(syncState);
+    }
     const hasGitHubToken = typeof env.GITHUB_TOKEN === "string" && Boolean(env.GITHUB_TOKEN.trim());
     return json({
       githubAvailable: true,
@@ -1107,6 +1125,11 @@ async function apiRoute(request, env, url, channel, now) {
         repositoryId: r.repository_id, fullName: r.is_private && r.access_state === "revoked" ? "Приватный репозиторий (доступ отозван)" : r.full_name, isPrivate: Boolean(r.is_private),
         defaultBranch: r.default_branch, accessState: r.access_state, selected: Boolean(r.selected),
         lastSuccessfulSyncAt: r.last_successful_sync_at, completeness: r.completeness,
+        syncStatusUnavailable: Boolean(r.is_private && r.access_state !== "available"),
+        syncStates: (r.is_private && r.access_state !== "available" ? [] : syncStatesByRepository.get(r.repository_id) || []).map((sync) => ({
+          ref: sync.ref, lastSuccessfulSyncAt: sync.last_successful_sync_at, completeness: sync.completeness,
+          cursor: sync.cursor, lastErrorCode: sync.last_error_code,
+        })),
         cursor: r.cursor, lastErrorCode: r.last_error_code, authorFilterGithubIds: parseColumn(r.author_filter_json, null),
       })),
     });

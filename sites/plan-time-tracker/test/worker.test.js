@@ -754,6 +754,11 @@ test("sync API returns durable partial progress and Retry-After instead of hidin
     const state=await c.db.prepare("SELECT cursor,author_filter_json FROM repository_sync_state WHERE owner_id=? AND repository_id='99' AND ref='main'").bind(OWNER).first();
     assert.equal(state.cursor,"2");
     assert.equal(state.author_filter_json,'["55"]');
+    const listed = await call(c.worker, c.db, "/api/repositories");
+    const repo = listed.body.repositories.find((item) => item.repositoryId === "99");
+    assert.deepEqual(repo.syncStates.map(({ ref, completeness, lastErrorCode }) => ({ ref, completeness, lastErrorCode })), [
+      { ref: "main", completeness: "partial", lastErrorCode: "RATE_LIMITED" },
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -979,6 +984,8 @@ test("revoked private repositories are not read again, hidden from plan detail, 
   await c.db.prepare("INSERT INTO owners(owner_id,created_at) VALUES(?,?)").bind(OWNER, c.now()).run();
   await c.db.prepare("INSERT INTO repositories(owner_id,repository_id,full_name,is_private,default_branch,access_state,selected,updated_at) VALUES(?,?,?,1,'main','available',1,?)")
     .bind(OWNER, repoId, "Seraf-seraf/private-revoked", c.now()).run();
+  await c.db.prepare("INSERT INTO repository_sync_state(owner_id,repository_id,ref,last_successful_sync_at,completeness,last_error_code) VALUES(?,?,?,?,'complete',NULL)")
+    .bind(OWNER, repoId, "sensitive/release", c.now()).run();
   await createPlan(c.worker, c.db, PLAN_A, "Keep timer", OWNER, { repositoryIds: [repoId], repositoryRefs: { [repoId]: "main" } });
   await transition(c.worker, c.db, "StartPlan", PLAN_A, 0);
   await c.db.prepare("INSERT INTO commits(owner_id,repository_id,sha,observed_at,message,url) VALUES(?,?,?,?,?,?)")
@@ -1001,16 +1008,27 @@ test("revoked private repositories are not read again, hidden from plan detail, 
   assert.equal((await call(c.worker,c.db,"/api/plans/"+PLAN_A)).body.plan.status,"RUNNING");
   const recheck=await call(c.worker,c.db,"/api/repositories/"+encodeURIComponent(repoId)+"/recheck-access",{method:"POST"});
   assert.equal(recheck.body.accessState,"unavailable");
+  const listed=await call(c.worker,c.db,"/api/repositories");
+  const hidden=listed.body.repositories.find((repository)=>repository.repositoryId===repoId);
+  assert.equal(hidden.syncStatusUnavailable,true);
+  assert.deepEqual(hidden.syncStates,[]);
 });
 
 test("repository settings expose anonymous public sync without claiming private access", async () => {
   const c = context();
+  await c.db.prepare("INSERT INTO owners(owner_id,created_at) VALUES(?,?)").bind(OWNER,c.now()).run();
+  await c.db.prepare("INSERT INTO repositories(owner_id,repository_id,full_name,is_private,default_branch,access_state,selected,updated_at) VALUES(?,?,?,0,'trunk','available',1,?)")
+    .bind(OWNER, "704", "fixture/never-synced", c.now()).run();
   const publicResponse = await c.worker.fetch(request("/api/repositories"), { DB: c.db });
   const publicSettings = await publicResponse.json();
   assert.equal(publicSettings.githubAvailable, true);
   assert.equal(publicSettings.githubMode, "public");
   assert.match(publicSettings.message, /Открытые доступны без входа/);
   assert.match(publicSettings.message, /Закрытым нужен GitHub-доступ/);
+  const neverSynced = publicSettings.repositories.find((repository) => repository.repositoryId === "704");
+  assert.equal(neverSynced.defaultBranch, "trunk");
+  assert.equal(neverSynced.lastSuccessfulSyncAt, null);
+  assert.deepEqual(neverSynced.syncStates, []);
   const tokenResponse = await c.worker.fetch(request("/api/repositories"), { DB: c.db, GITHUB_TOKEN: "test-only-token" });
   const tokenSettings = await tokenResponse.json();
   assert.equal(tokenSettings.githubAvailable, true);
@@ -1054,6 +1072,13 @@ test("anonymous public sync paginates, applies author filters, and records marke
     assert(requests.every((item) => !item.headers.has("authorization")));
     const state = await c.db.prepare("SELECT author_filter_json FROM repository_sync_state WHERE owner_id=? AND repository_id='701' AND ref='release/2026'").bind(OWNER).first();
     assert.equal(state.author_filter_json, '["55"]');
+    const settings = await call(c.worker, c.db, "/api/repositories");
+    const listed = settings.body.repositories.find((repository) => repository.repositoryId === "701");
+    assert.equal(listed.defaultBranch, "main");
+    assert.equal(listed.lastSuccessfulSyncAt, null, "a non-default ref must not make the default branch look synced");
+    assert.deepEqual(listed.syncStates.map(({ ref, lastSuccessfulSyncAt, completeness }) => ({ ref, lastSuccessfulSyncAt, completeness })), [
+      { ref: "release/2026", lastSuccessfulSyncAt: c.now(), completeness: "complete" },
+    ]);
     const conflicts = await c.db.prepare("SELECT reason,marker_plan_ids_json FROM commit_attribution_conflicts WHERE owner_id=? AND repository_id='701' AND sha=?").bind(OWNER, sha1).first();
     assert.equal(conflicts.reason, "multiple_plan_markers");
     assert.deepEqual(JSON.parse(conflicts.marker_plan_ids_json), [PLAN_A, PLAN_B]);
