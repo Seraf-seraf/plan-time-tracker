@@ -16,6 +16,7 @@ import {
   median,
   parsePlanCreatedAt,
   payloadHash,
+  resolveUiTimeZone,
   syncRepository,
 } from "../worker/index.js";
 
@@ -964,6 +965,44 @@ test("instant dates require an explicit zone and date-only precision never fabri
   const date = parsePlanCreatedAt({ precision: "dateOnly", on: "2026-10-01", timeZone: "Europe/Moscow" });
   assert.equal(date.atMs, null);
   assert.equal(date.on, "2026-10-01");
+});
+
+test("settings persist Moscow and Omsk while legacy IANA settings remain supported", async () => {
+  const c = context();
+  for (const timeZone of ["Europe/Moscow", "Asia/Omsk"]) {
+    assert.equal(resolveUiTimeZone(timeZone), timeZone);
+    const saved = await call(c.worker, c.db, "/api/settings", {
+      method: "POST", body: JSON.stringify({ timezone: timeZone }),
+    });
+    assert.equal(saved.response.status, 200);
+    assert.equal(saved.body.timezone, timeZone);
+    assert.equal((await call(c.worker, c.db, "/api/settings")).body.timezone, timeZone);
+  }
+  for (const legacyZone of ["UTC", "America/New_York"]) {
+    const legacy = await call(c.worker, c.db, "/api/settings", {
+      method: "POST", body: JSON.stringify({ timezone: legacyZone }),
+    });
+    assert.equal(legacy.body.timezone, legacyZone);
+    assert.equal((await call(c.worker, c.db, "/api/settings")).body.timezone, legacyZone);
+    assert.equal(resolveUiTimeZone(legacyZone), "Asia/Omsk");
+  }
+  assert.equal(resolveUiTimeZone(null), "Asia/Omsk");
+});
+
+test("Moscow and Omsk display local hours and analytics use local-day boundaries", () => {
+  const instant = Date.parse("2026-01-15T12:00:00Z");
+  for (const [timeZone, expectedHour, expectedStart, expectedEnd] of [
+    ["Europe/Moscow", "15", "2026-01-14T21:00:00.000Z", "2026-01-15T21:00:00.000Z"],
+    ["Asia/Omsk", "18", "2026-01-14T18:00:00.000Z", "2026-01-15T18:00:00.000Z"],
+  ]) {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).formatToParts(instant);
+    assert.equal(parts.find((part) => part.type === "hour").value, expectedHour);
+    const range = inclusiveDateRange("2026-01-15", "2026-01-15", timeZone);
+    assert.equal(new Date(range.startMs).toISOString(), expectedStart);
+    assert.equal(new Date(range.endMs).toISOString(), expectedEnd);
+  }
 });
 
 test("request payload owner and hostile external origin are not trusted", async () => {
