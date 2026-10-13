@@ -156,6 +156,10 @@ function requireOwner(request) {
   if (!ownerId || ownerId.length > 256) throw appError("NOT_AUTHENTICATED", "Войдите в ChatGPT, чтобы продолжить.", 401);
   return { ownerId: ownerId, email: request.headers.get("oai-authenticated-user-email") || null };
 }
+async function ensureOwner(db, identity, nowMs) {
+  await db.prepare("INSERT INTO owners(owner_id,email,created_at) VALUES(?,?,?) ON CONFLICT(owner_id) DO UPDATE SET email=excluded.email")
+    .bind(identity.ownerId, identity.email || null, nowMs).run();
+}
 function validateOrigin(request) {
   const origin = request.headers.get("origin");
   if (origin && origin !== new URL(request.url).origin) throw appError("FORBIDDEN", "Запрос с другого origin запрещён.", 403);
@@ -1132,8 +1136,7 @@ async function apiRoute(request, env, url, channel, now) {
   validateOrigin(request);
   const identity = requireOwner(request);
   if (!env.DB) throw appError("INTERNAL_ERROR", "D1 binding DB не настроен.", 503);
-  await env.DB.prepare("INSERT INTO owners(owner_id,email,created_at) VALUES(?,?,?) ON CONFLICT(owner_id) DO UPDATE SET email=excluded.email")
-    .bind(identity.ownerId, identity.email, now).run();
+  await ensureOwner(env.DB, identity, now);
   if (request.method === "GET" && url.pathname === "/api/whoami") return json({ userId: identity.ownerId, email: identity.email, serverNow: now });
   if (request.method === "GET" && url.pathname === "/api/settings") {
     const settings = await dbFirst(env.DB, "SELECT timezone,locale FROM owners WHERE owner_id=?", identity.ownerId);
@@ -1326,6 +1329,7 @@ async function mcpRoute(request, env, now) {
   const name = rpc.params && rpc.params.name;
   const args = rpc.params && rpc.params.arguments || {};
   try {
+    await ensureOwner(env.DB, identity, now);
     let result;
     if (name === "GetPlan") result = await readPlan(env.DB, identity.ownerId, args.planId, now);
     else if (name === "GetActivePlan") {

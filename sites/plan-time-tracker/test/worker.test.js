@@ -1297,6 +1297,21 @@ test("rejected commit review leaves all links, conflicts, history and versions u
   }
 });
 
+test("first MCP sync initializes its owner and performs no remote work for anonymous calls", async () => {
+  const c = context(); const originalFetch = globalThis.fetch; let calls = 0;
+  globalThis.fetch = async url => { calls += 1; return new Response(JSON.stringify(url.includes("/commits?") ? [] : {id:42,full_name:"fixture/mcp",private:false,default_branch:"main"})); };
+  try {
+    const rpc = {jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"SyncRepository",arguments:{schemaVersion:1,commandId:commandId(),payload:{fullName:"fixture/mcp"}}}};
+    const anonymous = await c.worker.fetch(request("/mcp",{method:"POST",body:JSON.stringify(rpc)},null),{DB:c.db});
+    assert.equal(anonymous.status,401);assert.equal(calls,0);assert.equal(c.db.sqlite.prepare("SELECT count(*) AS n FROM owners").get().n,0);
+    const response = await c.worker.fetch(request("/mcp",{method:"POST",body:JSON.stringify(rpc)}),{DB:c.db});
+    const data = await response.json(); assert.notEqual(data.result.isError,true);assert.equal(data.result.structuredContent.outcome,"OK");assert.equal(calls,2);
+    assert.equal(c.db.sqlite.prepare("SELECT owner_id FROM owners").get().owner_id,OWNER);
+    const replay = await c.worker.fetch(request("/mcp",{method:"POST",body:JSON.stringify(rpc)}),{DB:c.db});
+    assert.equal((await replay.json()).result.structuredContent.replayed,true);assert.equal(calls,2);
+  } finally { globalThis.fetch=originalFetch;c.db.sqlite.close(); }
+});
+
 test("sync recovery fences old repository, page, error and receipt writes", async () => {
   for (const phase of ["repository", "page", "error", "write", "finalize"]) {
     const c = context();await call(c.worker,c.db,"/api/whoami");
