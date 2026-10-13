@@ -954,10 +954,171 @@ test("revoked private repositories are not read again, hidden from plan detail, 
   assert.equal(recheck.body.accessState,"unavailable");
 });
 
-test("GitHub adapter reports an unconfigured credential instead of falling back to chat access", async () => {
+test("repository settings expose anonymous public sync without claiming private access", async () => {
+  const c = context();
+  const publicResponse = await c.worker.fetch(request("/api/repositories"), { DB: c.db });
+  const publicSettings = await publicResponse.json();
+  assert.equal(publicSettings.githubAvailable, true);
+  assert.equal(publicSettings.githubMode, "public");
+  assert.match(publicSettings.message, /Открытые доступны без входа/);
+  assert.match(publicSettings.message, /Закрытым нужен GitHub-доступ/);
+  const tokenResponse = await c.worker.fetch(request("/api/repositories"), { DB: c.db, GITHUB_TOKEN: "test-only-token" });
+  const tokenSettings = await tokenResponse.json();
+  assert.equal(tokenSettings.githubAvailable, true);
+  assert.equal(tokenSettings.githubMode, "authenticated");
+  assert.match(tokenSettings.message, /Закрытые репозитории требуют прав у токена/);
+});
+
+test("anonymous public sync paginates, applies author filters, and records marker conflicts", async () => {
+  const c = context();
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  const sha1 = "a".repeat(40), sha2 = "b".repeat(40);
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), headers: new Headers(options.headers) });
+    if (String(url).endsWith("/repos/fixture/public-demo")) return new Response(JSON.stringify({
+      id: 701, full_name: "fixture/public-demo", private: false, default_branch: "main",
+    }), { status: 200 });
+    const page = new URL(String(url)).searchParams.get("page");
+    if (page === "1") return new Response(JSON.stringify([{
+      sha: sha1, author: { id: 55, login: "author" }, committer: { id: 55 },
+      commit: { message: `Plan-ID: ${PLAN_A}\nPlan-ID: ${PLAN_B}`, committer: { date: "2026-10-09T13:30:00Z" } },
+    }]), { status: 200, headers: { link: '<https://api.github.com/next?page=2>; rel="next"' } });
+    return new Response(JSON.stringify([{
+      sha: sha2, author: { id: 66, login: "other" }, committer: { id: 66 },
+      commit: { message: "not selected by author filter", committer: { date: "2026-10-09T14:00:00Z" } },
+    }]), { status: 200 });
+  };
+  const envelope = { schemaVersion: 1, commandId: commandId(), commandType: "SyncRepository", payload: {
+    fullName: "fixture/public-demo", ref: "release/2026", authorGithubIds: ["55"],
+  } };
+  try {
+    const response = await c.worker.fetch(request("/api/repositories/sync", { method: "POST", body: JSON.stringify(envelope) }), { DB: c.db });
+    const result = await response.json();
+    assert.equal(response.status, 200, JSON.stringify(result));
+    assert.equal(result.result.completeness, "complete");
+    assert.equal(result.result.ref, "release/2026");
+    assert.equal(result.result.imported, 2);
+    assert.equal(requests.length, 3);
+    assert.deepEqual(requests.map((item) => new URL(item.url).searchParams.get("page")), [null, "1", "2"]);
+    assert.deepEqual(requests.slice(1).map((item) => new URL(item.url).searchParams.get("sha")), ["release/2026", "release/2026"]);
+    assert(requests.every((item) => !item.headers.has("authorization")));
+    const state = await c.db.prepare("SELECT author_filter_json FROM repository_sync_state WHERE owner_id=? AND repository_id='701' AND ref='release/2026'").bind(OWNER).first();
+    assert.equal(state.author_filter_json, '["55"]');
+    const conflicts = await c.db.prepare("SELECT reason,marker_plan_ids_json FROM commit_attribution_conflicts WHERE owner_id=? AND repository_id='701' AND sha=?").bind(OWNER, sha1).first();
+    assert.equal(conflicts.reason, "multiple_plan_markers");
+    assert.deepEqual(JSON.parse(conflicts.marker_plan_ids_json), [PLAN_A, PLAN_B]);
+    const replayResponse = await c.worker.fetch(request("/api/repositories/sync", { method: "POST", body: JSON.stringify(envelope) }), { DB: c.db });
+    const replay = await replayResponse.json();
+    assert.equal(replay.replayed, true);
+    assert.equal(requests.length, 3, "idempotent replay must not fetch GitHub again");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("authenticated private sync remains available with the configured runtime token", async () => {
+  const c = context();
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), headers: new Headers(options.headers) });
+    if (String(url).endsWith("/repos/fixture/private-demo")) return new Response(JSON.stringify({
+      id: 702, full_name: "fixture/private-demo", private: true, default_branch: "main",
+    }), { status: 200 });
+    return new Response("[]", { status: 200 });
+  };
+  const envelope = { schemaVersion: 1, commandId: commandId(), commandType: "SyncRepository", payload: { fullName: "fixture/private-demo" } };
+  try {
+    const response = await c.worker.fetch(request("/api/repositories/sync", { method: "POST", body: JSON.stringify(envelope) }), { DB: c.db, GITHUB_TOKEN: "test-only-token" });
+    const result = await response.json();
+    assert.equal(result.result.completeness, "complete");
+    assert(requests.length >= 2);
+    assert(requests.every((item) => item.headers.get("authorization") === "Bearer test-only-token"));
+    const repo = await c.db.prepare("SELECT is_private FROM repositories WHERE owner_id=? AND repository_id='702'").bind(OWNER).first();
+    assert.equal(repo.is_private, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("anonymous private and unavailable repositories are denied before importing data", async () => {
   const { GitHubRestAdapter } = await import("../worker/index.js");
-  await assert.rejects(() => new GitHubRestAdapter(null).repository("owner", "repo"), (error) =>
-    error instanceof AppError && error.code === "SOURCE_UNAVAILABLE");
+  const privateAdapter = new GitHubRestAdapter(null, async () => new Response(JSON.stringify({
+    id: 703, full_name: "fixture/private-demo", private: true, default_branch: "main",
+  }), { status: 200 }));
+  const c = context();
+  await assert.rejects(() => syncRepository(c.db, OWNER, "fixture/private-demo", null, null, privateAdapter, c.now()),
+    (error) => error.code === "GITHUB_REPOSITORY_UNAVAILABLE" && /только открытые/.test(error.message));
+  assert.equal(await c.db.prepare("SELECT COUNT(*) AS n FROM repositories WHERE owner_id=?").bind(OWNER).first().then((row) => row.n), 0);
+  const unavailableAdapter = new GitHubRestAdapter(null, async () => new Response(JSON.stringify({ message: "Not Found" }), { status: 404 }));
+  await assert.rejects(() => unavailableAdapter.repository("fixture", "missing"),
+    (error) => error.code === "GITHUB_REPOSITORY_UNAVAILABLE" && /закрыт/.test(error.message));
+});
+
+test("GitHub adapter distinguishes invalid credentials, denied access, and rate limits", async () => {
+  const invalidTokenCalls = [];
+  const invalidToken = new GitHubRestAdapter("test-only-invalid-token", async (_url, options) => {
+    invalidTokenCalls.push(new Headers(options.headers));
+    return new Response(JSON.stringify({ message: "Bad credentials" }), { status: 401 });
+  });
+  await assert.rejects(() => invalidToken.repository("fixture", "private-demo"), (error) => error.code === "GITHUB_AUTH_INVALID");
+  assert.equal(invalidTokenCalls.length, 1, "an invalid token must not silently fall back to anonymous access");
+  assert.equal(invalidTokenCalls[0].get("authorization"), "Bearer test-only-invalid-token");
+
+  const denied = new GitHubRestAdapter(null, async () => new Response(JSON.stringify({ message: "Resource not accessible" }), { status: 403 }));
+  await assert.rejects(() => denied.repository("fixture", "public-demo"), (error) => error.code === "GITHUB_ACCESS_DENIED");
+
+  const rateLimited = new GitHubRestAdapter(null, async () => new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+    status: 403, headers: { "x-ratelimit-remaining": "0", "retry-after": "8" },
+  }), { maxInlineWaitMs: 1000 });
+  await assert.rejects(() => rateLimited.commitPage("fixture/public-demo", 1, "main"), (error) =>
+    error.code === "RATE_LIMITED" && /без входа лимит ниже/.test(error.message) && error.details.retryAfter === 8);
+});
+
+test("sync API preserves GitHub auth, denied, unavailable, and rate-limit messages", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    for (const scenario of [
+      { name: "unavailable", status: 404, expectedStatus: 404, expectedCode: "GITHUB_REPOSITORY_UNAVAILABLE", message: /закрыт/ },
+      { name: "denied", status: 403, expectedStatus: 403, expectedCode: "GITHUB_ACCESS_DENIED", message: /отказал в доступе/ },
+      { name: "invalid-token", status: 401, token: "test-only-invalid-token", expectedStatus: 401, expectedCode: "GITHUB_AUTH_INVALID", message: /отклонил настроенный токен/ },
+    ]) {
+      const c = context();
+      let requests = 0;
+      globalThis.fetch = async (_url, options) => {
+        requests += 1;
+        assert.equal(new Headers(options.headers).has("authorization"), Boolean(scenario.token));
+        return new Response(JSON.stringify({ message: scenario.name === "invalid-token" ? "Bad credentials" : "Resource unavailable" }), { status: scenario.status });
+      };
+      const envelope = { schemaVersion: 1, commandId: commandId(), commandType: "SyncRepository", payload: { fullName: "fixture/" + scenario.name } };
+      const response = await c.worker.fetch(request("/api/repositories/sync", { method: "POST", body: JSON.stringify(envelope) }), {
+        DB: c.db,
+        ...(scenario.token ? { GITHUB_TOKEN: scenario.token } : {}),
+      });
+      const body = await response.json();
+      assert.equal(response.status, scenario.expectedStatus);
+      assert.equal(body.error.code, scenario.expectedCode);
+      assert.match(body.error.message, scenario.message);
+      assert.equal(requests, 1, "failed authentication must not retry anonymously");
+      assert.equal(await c.db.prepare("SELECT COUNT(*) AS n FROM repositories WHERE owner_id=?").bind(OWNER).first().then((row) => row.n), 0);
+    }
+
+    const c = context();
+    globalThis.fetch = async () => new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+      status: 403, headers: { "x-ratelimit-remaining": "0", "retry-after": "8" },
+    });
+    const envelope = { schemaVersion: 1, commandId: commandId(), commandType: "SyncRepository", payload: { fullName: "fixture/rate-limited" } };
+    const response = await c.worker.fetch(request("/api/repositories/sync", { method: "POST", body: JSON.stringify(envelope) }), { DB: c.db });
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.result.error, "RATE_LIMITED");
+    assert.match(body.result.errorMessage, /без входа лимит ниже/);
+    assert.equal(body.result.retryAfter, 8);
+    assert.equal(await c.db.prepare("SELECT COUNT(*) AS n FROM repositories WHERE owner_id=?").bind(OWNER).first().then((row) => row.n), 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("instant dates require an explicit zone and date-only precision never fabricates midnight", () => {
