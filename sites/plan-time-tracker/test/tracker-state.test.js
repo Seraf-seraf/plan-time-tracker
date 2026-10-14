@@ -210,7 +210,7 @@ test("expired lease recovery advances the fence and rejects stale executor comma
 
   const staleRenewal = await request(c, "RenewStepLease", { stepId: stepId, attemptId: oldAttempt, fence: oldFence });
   assert.equal(staleRenewal.status, 409);
-  assert.equal(staleRenewal.value.error.code, "LEASE_CONFLICT");
+  assert.equal(staleRenewal.value.error.code, "ATTEMPT_CLOSED");
   assert.equal((await request(c, "StartStep", { stepId: stepId, attemptId: newAttempt, fence: newFence }, 2)).status, 200);
   c.setNow(c.now() + 1000);
   const renewed = await request(c, "RenewStepLease", { stepId: stepId, attemptId: newAttempt, fence: newFence });

@@ -26,7 +26,8 @@ test("metadata command retries replace an envelope only after proven validation 
   const { scripts } = await clientScripts();
   const main = scripts[0];
   assert(main.includes("e.status=r.status"));
-  assert(main.includes('e.status===422&&e.code==="VALIDATION_ERROR"'));
+  assert(main.includes('e.code==="VALIDATION_ERROR"'));
+  assert(!main.includes('e.status===422&&e.code==="VALIDATION_ERROR"'));
   assert(main.includes("rejectedValidation.has(key)&&JSON.stringify(c.payload)!==JSON.stringify(nextPayload)"));
   assert(main.includes('e.code="COMMAND_OUTCOME_UNKNOWN"'));
   assert(main.includes("pending.delete(key);rejectedValidation.delete(key)"));

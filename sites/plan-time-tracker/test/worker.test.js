@@ -917,6 +917,16 @@ test("MCP tool schemas describe the supported required payloads for all writes",
   assert.ok(create.properties.sourceReference);
   const review=tools.ReviewCommitLink.properties.payload;
   assert.deepEqual(review.required,["planId","repositoryId","sha","status","reason"]);
+  const attach=tools.AttachPlanRepository;
+  assert.deepEqual(attach.required,["schemaVersion","commandId","payload","expectedVersion"]);
+  assert.deepEqual(attach.properties.payload.required,["planId","repositoryId"]);
+  assert.equal(attach.properties.payload.additionalProperties,false);
+  const versionedTrackerCommands = ["UpdateStep", "ClaimStepAttempt", "StartStep", "BlockStep", "RecordStepResult", "AcceptStep", "RejectStep"];
+  for (const name of versionedTrackerCommands) assert.equal(tools[name].properties.expectedVersion.minimum, 1, name + " runtime requires a positive step version");
+  assert.ok(tools.RenewStepLease.properties.expectedVersion);
+  assert.equal(tools.RenewStepLease.properties.expectedVersion.minimum, 1);
+  assert.ok(!tools.RenewStepLease.required.includes("expectedVersion"));
+  assert.equal(tools.StartPlan.properties.expectedVersion.minimum, 0, "ordinary plan versions still permit the initial version zero");
   const sync=tools.SyncRepository.properties.payload;
   assert.deepEqual(sync.required,["fullName"]);
   assert.equal(sync.properties.authorGithubIds.maxItems,100);

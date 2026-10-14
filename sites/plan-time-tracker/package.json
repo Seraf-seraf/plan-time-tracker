@@ -6,6 +6,7 @@
     "build": "bash scripts/build.sh",
     "validate": "node scripts/validate-artifact.mjs",
     "pretest": "npm run build",
-    "test": "node --test"
+    "test": "node --test test/*.test.js",
+    "test:ui": "node test/ui-acceptance.mjs"
   }
 }

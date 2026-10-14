@@ -16,7 +16,7 @@ The local source adds owner-scoped checkpoints, fenced attempts and leases, immu
 
 The independent plugin package contains a local-only observation queue helper. It stores only `AppendObservation` envelopes outside the tracked repository, bounded to 1000 events, 5 MiB, and seven days, with at most five send attempts and `Retry-After` support. Web/cloud sessions remain ephemeral and no lifecycle command is queued or replayed.
 
-Additive D1 migrations `0004_tracker.sql` through `0010_tracker_observations.sql` preserve the legacy plan tables and history. `npm test` builds the ignored `dist/` artifact before running the suite so `test/artifact.test.js` can import the actual Worker bundle. This local source has not been deployed to the private Site. The independent skill source is in `../../plugin/plan-time-tracker/`; it remains unverified until supported private MCP connection and installation flows are exercised.
+Additive D1 migrations `0004_tracker.sql` through `0011_plan_repository_binding.sql` preserve the legacy plan tables and history. `0011` adds the versioned `AttachPlanRepository` command and refines result/lease domain errors without rewriting prior migrations. `npm test` builds the ignored `dist/` artifact before running the suite so `test/artifact.test.js` can import the actual Worker bundle. This local source has not been deployed to the private Site. The independent skill source is in `../../plugin/plan-time-tracker/`; it remains unverified until supported private MCP connection and installation flows are exercised.
 
 ## Published Site and verification
 
@@ -38,6 +38,8 @@ node --check worker/index.js
 ```
 
 The local SQLite adapter exercises schema constraints and atomic statement rollback; it does not emulate Cloudflare D1 concurrency or Sites identity middleware. The plugin's local observation queue has a separate Node test suite.
+
+The browser acceptance fixture uses the existing Chromium/Playwright installation, with no new project dependency. See [`test/README.md`](test/README.md) for the invocation. It runs the real Worker-generated UI against synthetic intercepted API responses only.
 
 ## Remaining gates
 
