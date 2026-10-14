@@ -34,12 +34,13 @@ test('period metrics keep scoped gaps and concise accessible copy for date filte
   assert.deepEqual([1,2,4,5,11,21].map(formatPlanSample),['по 1 плану','по 2 планам','по 4 планам','по 5 планам','по 11 планам','по 21 плану']);
 });
 
-test('checkpoint actions keep a scoped gap after result forms and details',async()=>{const source=await html();for(const marker of ['.tracker-card>.tracker-actions{margin-top:10px}','card.append(resultForm);','edit.append(form);card.append(edit);','card.append(actions);'])assert(source.includes(marker),marker);});
+test('checkpoint actions keep a scoped gap after result forms and details',async()=>{const source=await html();for(const marker of ['.tracker-card-body>.tracker-actions{margin-top:10px}','body.append(resultForm);','edit.append(form);body.append(edit);','body.append(actions);'])assert(source.includes(marker),marker);});
 
-test('checkpoint UI separates timer, attempt, result, checks, acceptance, and finish exception',async()=>{
+test('checkpoint UI separates timer, attempt, current result/check readiness, and finish exception',async()=>{
   const source=await html();
-  for(const marker of ['Контрольные этапы','expected_result','requiredChecks','commit_policy','push_policy','ClaimStepAttempt','StartStep','BlockStep','RecordStepResult','RecordCheck','AcceptStep','RejectStep','RenewStepLease','FinishPlan','allowIncomplete:true','Останутся незакрытыми','Попытки','Решение владельца'])assert(source.includes(marker),marker);
+  for(const marker of ['Контрольные этапы','expected_result','requiredChecks','commit_policy','push_policy','ClaimStepAttempt','StartStep','BlockStep','RecordStepResult','RecordCheck','RenewStepLease','FinishPlan','allowIncomplete:true','Останутся незакрытыми','Попытки','step.readyToFinish','step.currentChecks','check.matchesCurrentResult','aria-controls','aria-expanded','toggle.type="button"'])assert(source.includes(marker),marker);
   assert.equal((source.match(/setInterval\(/g)||[]).length,1,'the existing plan timer remains the only interval');
+  for(const removed of ['AcceptStep','RejectStep','currentAcceptance','acceptanceCurrent','Waivers JSON'])assert(!source.includes(removed),removed);
   assert(!source.includes('AppendObservation'), 'UI observations do not drive lifecycle commands');
 });
 

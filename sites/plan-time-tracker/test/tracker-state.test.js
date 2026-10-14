@@ -87,9 +87,9 @@ async function claim(context, stepId, expectedVersion, sessionId = SESSION_A, ex
   }, expectedVersion, channel);
 }
 
-test("checkpoint lifecycle keeps agent-done, checks, acceptance, and explicit plan finish separate", async () => {
+test("checkpoint lifecycle preserves failed results, required-check gates and explicit finish exceptions", async () => {
   const c = createContext();
-  const stepId = await setupRunningStep(c);
+  const stepId = await setupRunningStep(c, ["unit"]);
   const initialIntervals = c.db.sqlite.prepare("SELECT interval_id,start_ms,end_ms FROM work_intervals WHERE owner_id=? AND plan_id=?").all(OWNER, PLAN_ID);
   assert.equal(initialIntervals.length, 1);
   assert.equal(initialIntervals[0].end_ms, null);
@@ -133,8 +133,8 @@ test("checkpoint lifecycle keeps agent-done, checks, acceptance, and explicit pl
   assert.equal(done.status, 200);
   assert.equal(done.value.result.resultRevision, 2);
   assert.equal(done.value.result.version, 7);
-  const currentStep = { ...c.db.sqlite.prepare("SELECT status,acceptance_decision,acceptance_revision,current_result_revision FROM plan_steps WHERE owner_id=? AND step_id=?").get(OWNER, stepId) };
-  assert.deepEqual(currentStep, { status: "DONE", acceptance_decision: "NONE", acceptance_revision: null, current_result_revision: 2 });
+  const currentStep = { ...c.db.sqlite.prepare("SELECT status,current_result_revision FROM plan_steps WHERE owner_id=? AND step_id=?").get(OWNER, stepId) };
+  assert.deepEqual(currentStep, { status: "DONE", current_result_revision: 2 });
 
   c.setNow(c.now() + 1000);
   const incompleteFinish = await request(c, "FinishPlan", { planId: PLAN_ID }, 1);

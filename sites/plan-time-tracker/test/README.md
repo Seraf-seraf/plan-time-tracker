@@ -12,8 +12,18 @@ node test/ui-acceptance.mjs
 
 If Playwright is already resolvable by Node, `PLAYWRIGHT_MODULE` may be omitted. `CHROMIUM_EXECUTABLE` may also be omitted when Playwright's bundled Chromium is available. The runner writes `results.json`, `summary.json`, and viewport screenshots under `work/ui-acceptance/` by default; set `UI_ACCEPTANCE_ARTIFACT_DIR` to choose another local output directory. These outputs are generated evidence, not source fixtures.
 
-The companion `fixtures/ui-acceptance.mjs` contains synthetic, non-production data. The runner asserts DOM visibility, selected navigation, command bodies/replay IDs, mocked failure states, spacing, responsive overflow, and the 12 reviewed behavior groups plus follow-up blocker scenarios. The Worker+SQLite contract and migration checks run separately with:
+The companion `fixtures/ui-acceptance.mjs` contains synthetic, non-production data. The runner asserts DOM visibility, selected navigation, command bodies/replay IDs, mocked failure states, spacing, responsive overflow, and the 12 reviewed behavior groups plus follow-up blocker scenarios. It also exercises checkpoint keyboard/touch disclosures, authoritative check summaries, and drafts across a command on another card and replacement of the outer detail DOM. Check drafts are scoped to their result revision; toggles never send commands.
+
+All mandatory unit, VM client-contract, and actual Worker+SQLite tests run with:
 
 ```sh
-node --test test/attach-plan-repository.test.js
+npm test
 ```
+
+The focused Worker+SQLite contract and migration checks can also be run separately with:
+
+```sh
+node --test test/attach-plan-repository.test.js test/tracker-evidence.test.js test/commit-attribution.test.js
+```
+
+These database tests apply canonical migrations to isolated temporary SQLite, including populated upgrades that retain historical decision receipts and rows as inert audit data. Normal finish is verified against current results and the latest required checks by server sequence. Removed owner-decision commands must fail without mutations. Browser API responses remain synthetic: a passing DOM runner does not establish hosted D1 behavior or private Site authentication.

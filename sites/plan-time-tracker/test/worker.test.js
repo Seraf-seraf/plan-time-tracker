@@ -812,6 +812,105 @@ test("inclusive date period uses calendar days across spring and autumn DST chan
   assert.throws(() => inclusiveDateRange("2026-03-09", "2026-03-08", "UTC"), /диапазон/);
 });
 
+test("analytics API rejects impossible calendar endpoints before inclusive-day normalization", async () => {
+  const c = context();
+  const invalidRanges = [
+    ["2026-02-01", "2026-02-30"], ["2026-02-01", "2026-02-29"],
+    ["2026-04-01", "2026-04-31"], ["2026-01-01", "2026-13-01"],
+    ["1900-02-01", "1900-02-29"], ["2026-02-30", "2026-03-03"],
+    ["2026-10-15", "2026-10-14"], ["", "2026-10-14"], ["2026-10-14", ""],
+    ["10000-01-01", "10000-01-01"], ["+010000-01-01", "+010000-01-01"],
+    ["0000-01-01", "0000-01-01"], ["0099-02-29", "0099-03-01"],
+    ["0099-02-01", "0099-02-29"],
+  ];
+  try {
+    for (const [from, to] of invalidRanges) {
+      const query = new URLSearchParams({ from, to, timeZone: "UTC" });
+      const result = await call(c.worker, c.db, "/api/analytics?" + query);
+      assert.equal(result.response.status, 400, `${from}..${to}`);
+      assert.equal(result.body.error.code, "VALIDATION_ERROR", `${from}..${to}`);
+      assert.equal(result.body.period, undefined, "invalid input must not produce a normalized period");
+    }
+  } finally { c.db.sqlite.close(); }
+});
+
+for (const [day, startMs, endMs] of [
+  ["0001-01-01", -62135596800000, -62135510400000],
+  ["0099-12-31", -59011545600000, -59011459200000],
+  ["9999-12-31", 253402214400000, 253402300800000],
+]) {
+  test(`analytics API accepts the same positive dateOnly boundary as CreatePlan: ${day}`, async () => {
+    const c = context();
+    try {
+      const created = await createPlan(c.worker, c.db, PLAN_A, "Calendar boundary fixture", OWNER, {
+        planCreatedAt: { precision: "dateOnly", on: day, timeZone: "UTC" },
+      });
+      assert.equal(created.response.status, 200, "existing dateOnly contract must accept this date");
+      const plan = await call(c.worker, c.db, "/api/plans/" + PLAN_A);
+      assert.equal(plan.body.plan.planCreatedAt.on, day);
+      const query = new URLSearchParams({ from: day, to: day, timeZone: "UTC" });
+      const analytics = await call(c.worker, c.db, "/api/analytics?" + query);
+      assert.equal(analytics.response.status, 200, `analytics must accept ${day}`);
+      assert.deepEqual(analytics.body.period, { from: day, to: day, timeZone: "UTC", startMs, endMs });
+      assert.equal(endMs - startMs, 86400000);
+    } finally { c.db.sqlite.close(); }
+  });
+}
+
+test("analytics API preserves all positive years 0001 through 0099 without the 1900 remap", async () => {
+  const c = context();
+  try {
+    for (let year = 1; year <= 99; year += 1) {
+      const day = String(year).padStart(4, "0") + "-12-31";
+      const nextDay = String(year + 1).padStart(4, "0") + "-01-01";
+      const startMs = Date.parse(day + "T00:00:00Z"), endMs = Date.parse(nextDay + "T00:00:00Z");
+      const analytics = await call(c.worker, c.db, "/api/analytics?" + new URLSearchParams({ from: day, to: day, timeZone: "UTC" }));
+      assert.equal(analytics.response.status, 200, day);
+      assert.deepEqual(analytics.body.period, { from: day, to: day, timeZone: "UTC", startMs, endMs });
+      assert.equal(endMs - startMs, 86400000);
+    }
+  } finally { c.db.sqlite.close(); }
+});
+
+test("dateOnly API enforces the same positive four-digit calendar contract as analytics", async () => {
+  const c = context();
+  try {
+    for (const on of ["0000-01-01", "10000-01-01", "+010000-01-01", "0099-02-29", "2026-02-30"]) {
+      const created = await createPlan(c.worker, c.db, PLAN_A, "Invalid date fixture", OWNER, {
+        planCreatedAt: { precision: "dateOnly", on, timeZone: "UTC" },
+      });
+      assert.equal(created.response.status, 400, on);
+      assert.equal(created.body.error.code, "VALIDATION_ERROR", on);
+    }
+    const plans = await call(c.worker, c.db, "/api/plans");
+    assert.deepEqual(plans.body.plans, [], "rejected dates must not create plans");
+  } finally { c.db.sqlite.close(); }
+});
+
+test("analytics API preserves valid leap dates, inclusive year rollover and local DST boundaries", async () => {
+  const c = context();
+  const validRanges = [
+    ["0004-02-29", "0004-02-29", "UTC", "0004-02-29T00:00:00Z", "0004-03-01T00:00:00Z"],
+    ["2024-02-29", "2024-02-29", "UTC", "2024-02-29T00:00:00Z", "2024-03-01T00:00:00Z"],
+    ["2000-02-29", "2000-02-29", "UTC", "2000-02-29T00:00:00Z", "2000-03-01T00:00:00Z"],
+    ["2026-02-28", "2026-02-28", "UTC", "2026-02-28T00:00:00Z", "2026-03-01T00:00:00Z"],
+    ["2026-10-14", "2026-10-14", "UTC", "2026-10-14T00:00:00Z", "2026-10-15T00:00:00Z"],
+    ["2026-12-31", "2027-01-01", "UTC", "2026-12-31T00:00:00Z", "2027-01-02T00:00:00Z"],
+    ["2026-03-08", "2026-03-08", "America/New_York", "2026-03-08T05:00:00Z", "2026-03-09T04:00:00Z"],
+    ["2026-11-01", "2026-11-01", "America/New_York", "2026-11-01T04:00:00Z", "2026-11-02T05:00:00Z"],
+    ["2026-10-14", "2026-10-14", "Europe/Moscow", "2026-10-13T21:00:00Z", "2026-10-14T21:00:00Z"],
+    ["2026-10-14", "2026-10-14", "Asia/Omsk", "2026-10-13T18:00:00Z", "2026-10-14T18:00:00Z"],
+  ];
+  try {
+    for (const [from, to, timeZone, start, end] of validRanges) {
+      const query = new URLSearchParams({ from, to, timeZone });
+      const result = await call(c.worker, c.db, "/api/analytics?" + query);
+      assert.equal(result.response.status, 200, `${from}..${to} ${timeZone}`);
+      assert.deepEqual(result.body.period, { from, to, timeZone, startMs: Date.parse(start), endMs: Date.parse(end) });
+    }
+  } finally { c.db.sqlite.close(); }
+});
+
 test("Friday-to-Monday interval clipping and completed median use the required separate samples", async () => {
   const c = context();
   const friday = Date.parse("2026-10-09T13:00:00Z");
@@ -921,7 +1020,9 @@ test("MCP tool schemas describe the supported required payloads for all writes",
   assert.deepEqual(attach.required,["schemaVersion","commandId","payload","expectedVersion"]);
   assert.deepEqual(attach.properties.payload.required,["planId","repositoryId"]);
   assert.equal(attach.properties.payload.additionalProperties,false);
-  const versionedTrackerCommands = ["UpdateStep", "ClaimStepAttempt", "StartStep", "BlockStep", "RecordStepResult", "AcceptStep", "RejectStep"];
+  const versionedTrackerCommands = ["UpdateStep", "ClaimStepAttempt", "StartStep", "BlockStep", "RecordStepResult"];
+  assert.equal(tools.AcceptStep, undefined);
+  assert.equal(tools.RejectStep, undefined);
   for (const name of versionedTrackerCommands) assert.equal(tools[name].properties.expectedVersion.minimum, 1, name + " runtime requires a positive step version");
   assert.ok(tools.RenewStepLease.properties.expectedVersion);
   assert.equal(tools.RenewStepLease.properties.expectedVersion.minimum, 1);

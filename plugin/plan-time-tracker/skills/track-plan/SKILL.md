@@ -5,24 +5,25 @@ description: Work on explicitly assigned Plan Time Tracker checkpoints using its
 
 # Track an explicitly assigned plan
 
-Use this skill only when the user names the plan or checkpoint to work on. The timer belongs to the plan. Checkpoint progress, attempts, test results, owner acceptance, and commit publication are separate records.
+Use this skill only when the user names the plan or checkpoint to work on. The timer belongs to the plan. Checkpoint progress, attempts, test results, and commit publication are separate records.
 
 ## Before acting
 
 1. Confirm that the current client exposes the authenticated Plan Time Tracker MCP tools. If a tool is absent or authentication fails, stop and report that limitation. Never call an unauthenticated endpoint, accept an `ownerId`, create a grant, or work around platform authorization.
 2. Call `GetTrackerCapabilities`, then `GetPlanExecutionSnapshot` for the plan ID explicitly supplied by the user. Do not select a plan just because it is active. Use only the returned `localObservationQueue.ownerScope` for the local queue; never derive a scope from an email, username, or user-supplied owner ID.
-3. Confirm the plan, checkpoint, repository, requested scope, status, expected result, required checks, commit policy, push policy, current result revision, attempts, and acceptance state. Ask the user when a required decision is missing.
+3. Confirm the plan, checkpoint, repository, requested scope, status, expected result, required checks, commit policy, push policy, current result revision, attempts, and server-reported readiness. Ask the user when a required decision is missing.
 4. A plan must already be `RUNNING` before starting a checkpoint. `PLANNED` or `PAUSED` never implies permission to start or resume it.
 
 ## Explicit lifecycle and checkpoint flow
 
 - `CreatePlan` only registers a plan. Before `StartPlan`, `PausePlan`, `ResumePlan`, or `FinishPlan`, require a direct user instruction for that transition. Conversation context, elapsed time, calendar, hooks, turn completion, tool calls, and commits are not lifecycle intent.
-- Create or update checkpoints only in the scope the user approved. Checkpoint status moves through explicit `StartStep`, `BlockStep`, or `RecordStepResult` commands. `DONE` means the agent reported completion; it does not mean the owner accepted it.
+- Create or update checkpoints only in the scope the user approved. Checkpoint status moves through explicit `StartStep`, `BlockStep`, or `RecordStepResult` commands. `DONE` alone does not prove the required checks passed or authorize finishing the plan.
 - Claim an attempt only after the plan and checkpoint are confirmed. Preserve the returned `attemptId` and `fence`; use the current checkpoint version for versioned commands. Start only the attempt just claimed. Renew the lease about every three minutes while connected; a lease that expired cannot be revived. After interruption, reread the snapshot and receipt before deciding what the user should authorize next.
-- A completed checkpoint cannot be reopened by an agent claim. The owner must assign rework through the owner UI with a reason. Do not send `reworkReason` through MCP or infer permission from a rejection.
+- A completed checkpoint cannot be reopened by an agent claim. The owner must assign rework through the owner UI with a reason. Do not send `reworkReason` through MCP or infer permission from a failed check.
 - Run requested checks before reporting the result. Record the actual exit status and full tested SHA. Then call `RecordStepResult` to obtain a result revision and `RecordCheck` for each check against that revision. A check passes only when its exit code is zero and its tested SHA matches the result revision SHA. Never invent a SHA when it is unavailable.
-- `AcceptStep` and `RejectStep` are explicit owner decisions tied to the current result revision. Call either only after a direct user instruction. A required check can be waived only by an explicit owner waiver with a reason; preserve the waiver in the report.
-- Finish the plan only after a separate direct instruction. If checkpoints remain incomplete, report that the owner must either complete them or explicitly finish with a reason. Do not call `FinishPlan` merely because all agents reported `DONE`.
+- Normal finish requires every checkpoint to be `DONE`, have its current result revision, have no active attempt, and have the latest server-sequence check for every required key `PASSED` on that revision with the matching tested SHA. A later `FAILED` or `NOT_RUN`, rework, a new result revision, or a newly required key makes an earlier pass insufficient. Use the execution snapshot's `readyToFinish` and `currentChecks` (`server_sequence`, `matchesCurrentResult`); do not infer readiness from timestamps, display order, or a redacted SHA. An empty required-check list introduces no additional SHA requirement.
+- There is no separate revision approval or check waiver workflow. Historical approval/waiver records remain inert audit data. The removed `AcceptStep` and `RejectStep` names are unsupported; clients must refresh their tool schemas. Do not send these names or replay an old receipt as an active command. Historical receipts and timeline events remain readable as audit evidence.
+- Finish the plan only after a separate direct instruction. If checkpoints are not ready, report the specific unmet conditions. The owner may explicitly choose the existing incomplete-finish exception with `allowIncomplete: true` and a nonempty `reason`; that records the exception rather than passing missing or failed checks. Do not call `FinishPlan` merely because all agents reported `DONE`.
 
 ## Reliable commands and recovery
 
@@ -38,6 +39,6 @@ Use this skill only when the user names the plan or checkpoint to work on. The t
 
 ## Report and stop
 
-Report checkpoint status, result revision and SHA, each check with its actual result, current acceptance, commit state, and publication state separately. State any missing tool, auth, repository, or verification evidence. Do not claim hosted operation from local tests or from a successful tools list.
+Report checkpoint status, result revision and SHA, server-reported readiness and any unmet required checks, commit state, and publication state separately. State any missing tool, auth, repository, or verification evidence. Do not claim hosted operation from local tests or from a successful tools list.
 
 Example command envelopes and recovery states are in [`fixtures/recovery-cases.json`](fixtures/recovery-cases.json).
