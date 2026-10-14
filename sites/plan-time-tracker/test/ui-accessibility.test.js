@@ -19,6 +19,7 @@ test('repository sync status displays each saved ref and only its own timestamp'
 });
 test('mobile plan cards give titles and actions separate full-width rows',async()=>{const source=await html();assert(source.includes('.row>.plan-open{flex:1 1 100%}'));assert(source.includes('.row>.row-right{width:100%;justify-content:flex-start'));});
 test('Plans header keeps a scoped 16px separation before its list',async()=>{const source=await html();assert(source.includes('#view-plans>.toolbar{margin-bottom:16px}'));});
+test('Plan detail stacks its back control and card with a scoped 16px gap',async()=>{const source=await html();assert(source.includes('#view-detail{display:grid;gap:16px}'));});
 
 test('GitHub author ID placeholder stays concise on mobile',async()=>{const source=await html();assert(source.includes('ID авторов GitHub'));assert(source.includes('authors.placeholder=\"через запятую\"'));});
 
