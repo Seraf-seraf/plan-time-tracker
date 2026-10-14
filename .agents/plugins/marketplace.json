@@ -1,0 +1,20 @@
+{
+  "name": "plan-time-tracker",
+  "interface": {
+    "displayName": "Plan Time Tracker"
+  },
+  "plugins": [
+    {
+      "name": "dev-9529b49da3708191b8f13f1e1e4b1e01",
+      "source": {
+        "source": "local",
+        "path": "./plugin/plan-time-tracker"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
