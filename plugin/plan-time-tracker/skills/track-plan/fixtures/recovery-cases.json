@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "name": "lost_ack_observation",
+      "command": {
+        "schemaVersion": 1,
+        "commandId": "a0000000-0000-4000-8000-000000000001",
+        "commandType": "AppendObservation",
+        "payload": {
+          "eventId": "a0000000-0000-4000-8000-000000000002",
+          "planId": "a0000000-0000-4000-8000-000000000003",
+          "sourceId": "codex-local",
+          "sessionId": "a0000000-0000-4000-8000-000000000004",
+          "sourceSequence": 7,
+          "occurredAt": 1800000000000,
+          "eventType": "heartbeat",
+          "data": {}
+        }
+      },
+      "retry": "Send the identical command envelope again, or call GetCommandReceipt for the same commandId.",
+      "expectedReplay": { "eventId": "a0000000-0000-4000-8000-000000000002", "sameServerSequence": true, "domainStateChanged": false }
+    },
+    {
+      "name": "pending_command_receipt",
+      "receipt": { "status": "PENDING", "commandId": "a0000000-0000-4000-8000-000000000005" },
+      "nextAction": "Poll GetCommandReceipt using the same commandId; do not generate a replacement write."
+    },
+    {
+      "name": "stale_version",
+      "error": { "code": "VERSION_CONFLICT" },
+      "nextAction": "Read the plan execution snapshot and obtain renewed user intent before issuing a new command."
+    },
+    {
+      "name": "ordered_offline_delivery",
+      "observations": [
+        { "sourceSequence": 10, "expectedClassification": "NORMAL" },
+        { "sourceSequence": 12, "expectedClassification": "GAP" },
+        { "sourceSequence": 11, "expectedClassification": "LATE" },
+        { "sourceSequence": 13, "eventType": "correction", "expectedClassification": "CORRECTION" }
+      ],
+      "invariant": "Server sequence orders receipt; late, gap, and correction observations never transition a plan or checkpoint."
+    },
+    {
+      "name": "bounded_local_queue",
+      "limits": { "events": 1000, "bytes": 5242880, "retentionMs": 604800000, "sendAttempts": 5, "backoffCapMs": 30000 },
+      "retryAfter": { "seconds": 45, "minimumWaitMs": 45000 },
+      "afterAttempts": 5,
+      "expectedState": "PENDING",
+      "invariant": "The exact AppendObservation envelope and commandId remain queued in FIFO order; only local state is durable, and no lifecycle command is queued or auto-replayed."
+    }
+  ]
+}

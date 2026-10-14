@@ -1,0 +1,24 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "dev-9529b49da3708191b8f13f1e1e4b1e01",
+  "version": "1.0.1",
+  "description": "Private tracker for explicit plan work intervals, repository context, and active-time analytics.",
+  "author": {
+    "name": "App developer"
+  },
+  "extensions": {
+    "com.openai": {
+      "apps": "./.app.json",
+      "interface": {
+        "capabilities": [],
+        "category": "Other",
+        "defaultPrompt": null,
+        "developerName": "App developer",
+        "displayName": "Plan Time Tracker",
+        "longDescription": "Private tracker for explicit plan work intervals, repository context, and active-time analytics.",
+        "shortDescription": "Track plan execution",
+        "websiteURL": "https://plan-time-tracker.seraf-k.chatgpt.site"
+      }
+    }
+  }
+}
