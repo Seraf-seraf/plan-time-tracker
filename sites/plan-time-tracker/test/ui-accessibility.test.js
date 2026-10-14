@@ -18,6 +18,7 @@ test('repository sync status displays each saved ref and only its own timestamp'
   assert.equal(format({defaultBranch:'main',syncStates:[{ref:'main',completeness:'partial',lastSuccessfulSyncAt:timestamp,lastErrorCode:'RATE_LIMITED'}]}),'Частично синхронизирована · main · последняя полная '+formatted+' · есть ошибка');
 });
 test('mobile plan cards give titles and actions separate full-width rows',async()=>{const source=await html();assert(source.includes('.row>.plan-open{flex:1 1 100%}'));assert(source.includes('.row>.row-right{width:100%;justify-content:flex-start'));});
+test('Plans header keeps a scoped 16px separation before its list',async()=>{const source=await html();assert(source.includes('#view-plans>.toolbar{margin-bottom:16px}'));});
 
 test('GitHub author ID placeholder stays concise on mobile',async()=>{const source=await html();assert(source.includes('ID авторов GitHub'));assert(source.includes('authors.placeholder=\"через запятую\"'));});
 
