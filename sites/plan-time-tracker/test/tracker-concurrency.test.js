@@ -69,7 +69,7 @@ async function setupPlan(context) {
   })).status, 200);
   const createdStep = await command(context, "CreateStep", {
     planId: PLAN_ID, ordinal: 0, title: "Record observations", expectedResult: "Bounded audit events are visible.",
-    requiredChecks: [], commitPolicy: "NEVER", pushPolicy: "NEVER",
+    requiredChecks: [],
   });
   assert.equal(createdStep.status, 200);
   const stepId = createdStep.value.result.stepId;
@@ -123,7 +123,7 @@ test("parallel checkpoint attempts do not double-count the plan timer across pau
   const firstStepId = await setupPlan(context);
   const secondStep = await command(context, "CreateStep", {
     planId: PLAN_ID, ordinal: 1, title: "Verify timer accounting", expectedResult: "One plan interval remains authoritative.",
-    requiredChecks: [], commitPolicy: "NEVER", pushPolicy: "NEVER",
+    requiredChecks: [],
   });
   assert.equal(secondStep.status, 200);
   const secondStepId = secondStep.value.result.stepId;

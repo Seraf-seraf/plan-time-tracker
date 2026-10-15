@@ -3,25 +3,12 @@ import assert from 'node:assert/strict';
 import {Script} from 'node:vm';
 import worker from '../worker/index.js';
 async function html(){return (await worker.fetch(new Request('https://tracker.test/',{headers:{'oai-authenticated-user-id':'ui-test-owner'}}),{})).text();}
-test('all four client scripts compile and existing UI enhancements remain present',async()=>{const source=await html();const scripts=[...source.matchAll(/<script>([\s\S]*?)<\/script>/g)];assert.equal(scripts.length,4);scripts.forEach(([,js])=>new Script(js));assert(source.includes('overviewPeriodPlans'));assert(source.includes('repoRefs'));});
+test('all four client scripts compile and existing UI enhancements remain present',async()=>{const source=await html();const scripts=[...source.matchAll(/<script>([\s\S]*?)<\/script>/g)];assert.equal(scripts.length,4);scripts.forEach(([,js])=>new Script(js));assert(source.includes('overviewPeriodPlans'));assert(!source.includes('repoRefs'));});
 test('responsive forms and keyboard dialog safeguards are delivered',async()=>{const source=await html();for(const marker of ['minmax(min(100%,180px),1fr)','aria-labelledby="modalTitle"',"event.key==='Escape'","event.key!=='Tab'",'modalReturnFocus.focus()','overflow-wrap:anywhere'])assert(source.includes(marker),marker);});
-test('forms prevent duplicate submission and public sync stays enabled without a runtime token',async()=>{const source=await html();for(const marker of ["form.getAttribute('aria-busy')==='true'",'sync.dataset.githubAvailable=String(data.githubAvailable===true)','sync.querySelector("button").disabled=data.githubAvailable!==true',"form.removeAttribute('aria-busy')",'status.textContent=data.message','r.result.errorMessage||r.result.message'])assert(source.includes(marker),marker);assert.equal((source.match(/id=\"githubStatus\"/g)||[]).length,1);assert(source.includes('role=\"status\"'));assert(!source.includes('G3 не настроен:'));assert(!source.includes('list.prepend(n)'));});
-test('repository sync status displays each saved ref and only its own timestamp',async()=>{
-  const source=await html(),scripts=[...source.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(([,script])=>script);
-  const helper=scripts[1].match(/function repositorySyncStatus\(repository\) \{[\s\S]*?\n  \}/)?.[0];
-  assert(helper,'repositorySyncStatus function exists');
-  const format=new Function('state',`${helper};return repositorySyncStatus;`)({zone:'UTC'});
-  assert.equal(format({syncStatusUnavailable:true,syncStates:[]}), 'Состояние скрыто · нет доступа к GitHub');
-  assert.equal(format({defaultBranch:'main',syncStates:[]}),'Ещё не синхронизирована · main');
-  const timestamp=Date.parse('2026-10-13T10:00:00Z'),formatted=new Intl.DateTimeFormat('ru-RU',{dateStyle:'medium',timeStyle:'short',timeZone:'UTC'}).format(new Date(timestamp));
-  assert.equal(format({defaultBranch:'main',syncStates:[{ref:'release/qa',completeness:'complete',lastSuccessfulSyncAt:timestamp}]}),'Синхронизирована · release/qa · '+formatted);
-  assert.equal(format({defaultBranch:'main',syncStates:[{ref:'main',completeness:'partial',lastSuccessfulSyncAt:timestamp,lastErrorCode:'RATE_LIMITED'}]}),'Частично синхронизирована · main · последняя полная '+formatted+' · есть ошибка');
-});
+test('forms prevent duplicate submission and no integration controls are delivered',async()=>{const source=await html();for(const marker of ["form.getAttribute('aria-busy')==='true'","form.removeAttribute('aria-busy')"])assert(source.includes(marker),marker);for(const removed of ['githubStatus','repositoryId','commitPolicy','pushPolicy','SyncRepository'])assert(!source.includes(removed),removed);});
 test('mobile plan cards give titles and actions separate full-width rows',async()=>{const source=await html();assert(source.includes('.row>.plan-open{flex:1 1 100%}'));assert(source.includes('.row>.row-right{width:100%;justify-content:flex-start'));});
 test('Plans header keeps a scoped 16px separation before its list',async()=>{const source=await html();assert(source.includes('#view-plans>.toolbar{margin-bottom:16px}'));});
 test('Plan detail keeps its 16px gap and intrinsic back-button width',async()=>{const source=await html();assert(source.includes('#view-detail{display:grid;gap:16px}'));assert(source.includes('#view-detail>#backPlans{justify-self:start}'));});
-
-test('GitHub author ID placeholder stays concise on mobile',async()=>{const source=await html();assert(source.includes('ID авторов GitHub'));assert(source.includes('authors.placeholder=\"через запятую\"'));});
 
 test('period metrics keep scoped gaps and concise accessible copy for date filters and median sample',async()=>{
   const source=await html();
@@ -38,7 +25,7 @@ test('checkpoint actions keep a scoped gap after result forms and details',async
 
 test('checkpoint UI separates timer, attempt, current result/check readiness, and finish exception',async()=>{
   const source=await html();
-  for(const marker of ['Контрольные этапы','expected_result','requiredChecks','commit_policy','push_policy','ClaimStepAttempt','StartStep','BlockStep','RecordStepResult','RecordCheck','RenewStepLease','FinishPlan','allowIncomplete:true','Условия завершения не выполнены','Попытки','step.readyToFinish','step.currentChecks','check.matchesCurrentResult','aria-controls','aria-expanded','toggle.type="button"'])assert(source.includes(marker),marker);
+  for(const marker of ['Контрольные этапы','expected_result','requiredChecks','ClaimStepAttempt','StartStep','BlockStep','RecordStepResult','RecordCheck','RenewStepLease','FinishPlan','allowIncomplete:true','Условия завершения не выполнены','Попытки','step.readyToFinish','step.currentChecks','check.matchesCurrentResult','aria-controls','aria-expanded','toggle.type="button"'])assert(source.includes(marker),marker);
   assert.equal((source.match(/setInterval\(/g)||[]).length,1,'the existing plan timer remains the only interval');
   for(const removed of ['AcceptStep','RejectStep','currentAcceptance','acceptanceCurrent','Waivers JSON'])assert(!source.includes(removed),removed);
   assert(!source.includes('AppendObservation'), 'UI observations do not drive lifecycle commands');
@@ -46,9 +33,9 @@ test('checkpoint UI separates timer, attempt, current result/check readiness, an
 
 test('checkpoint UI labels bottleneck counts and server-recorded check delay',async()=>{const source=await html();for(const marker of ['Сводка: блокировок ','попыток после первой ','включая восстановление и доработку','неуспешных результатов ','задержка до первой проверки ','а не длительность выполнения теста'])assert(source.includes(marker),marker);});
 
-test('unified timeline pages server ordered legacy and tracker events with delivery and Git proof markers',async()=>{
+test('unified timeline pages server ordered legacy and tracker events with delivery markers',async()=>{
   const source=await html();
-  for(const marker of ['/api/tracker/plans/','/timeline?afterSequence=','Получено сервером:','Время клиента:','serverSequence','LATE','GAP','STALE_EXECUTOR','CORRECTION','correctionOfEventId','Проверка удалённой публикации: неизвестно.','последней полной синхронизации ветки'])assert(source.includes(marker),marker);
+  for(const marker of ['/api/tracker/plans/','/timeline?afterSequence=','Получено сервером:','Время клиента:','serverSequence','LATE','GAP','STALE_EXECUTOR','CORRECTION','correctionOfEventId'])assert(source.includes(marker),marker);
   assert(source.includes('plan.events||[]'));
   assert(source.includes('tracker-timeline-actions'));
 });

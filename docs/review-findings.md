@@ -1,3 +1,5 @@
+> Historical report. Git integration requirements and publication status below are superseded by the current [source/MCP contract](worktree-evidence.md). Retained for audit; this file does not authorize current Git tools or deployment.
+
 # Independent local review — 2026-10-12
 
 The review compared the implementation with both complete inputs in `docs/originals/`. A separate GPT-6 Luna low reviewer inspected data ownership, SQL constraints, command receipts, GitHub sync and attribution, UI, analytics, MCP, and skill behavior. Findings were checked against local SQLite/Worker code and browser preview. Missing hosted Sites services were kept out of the code-defect list.

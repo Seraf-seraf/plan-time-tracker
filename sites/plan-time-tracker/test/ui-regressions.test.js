@@ -14,14 +14,6 @@ async function clientScripts() {
   };
 }
 
-test("plan and commit filters use the important hidden class on flex rows", async () => {
-  const { html, scripts } = await clientScripts();
-  assert(scripts[1].includes('row.classList.toggle("hidden",!visibleIds.has(row.dataset.planId))'));
-  assert(scripts[1].includes('row.classList.add("hidden")'));
-  assert(scripts[1].includes('row.classList.toggle("hidden",status!=="all"&&parts[1]!==status)'));
-  assert(!scripts[1].includes("row.hidden="));
-  assert(html.includes(".hidden{display:none!important}"));
-});
 
 test("metadata command retries replace an envelope only after proven validation rejection", async () => {
   const { scripts } = await clientScripts();
@@ -48,14 +40,6 @@ test("analytics applies one guarded loader for metrics, chart, and list", async 
   assert(main.includes('const chart=q("#chart");chart.replaceChildren()'));
 });
 
-test("repository conflict controls wrap inside their own settings card", async () => {
-  const { html, scripts } = await clientScripts();
-  assert(scripts[1].includes('make("div",null,"row commit-conflict-row")'));
-  assert(html.includes(".commit-conflict-row{min-width:0;flex-wrap:wrap}"));
-  assert(html.includes(".commit-conflict-row>select{flex:1 1 100%;min-width:0;max-width:100%}"));
-  assert(scripts[0].includes('commits.className="plan-commit-list"'));
-  assert(html.includes("#planDetail .plan-commit-list>.row{min-width:0;flex-wrap:wrap}"));
-});
 
 test("checkpoint disclosures and consecutive forms retain 10px gaps", async () => {
   const { html } = await clientScripts();
@@ -119,7 +103,7 @@ test("detail enhancements are reapplied for each plan render and stale responses
 test("tracker releases only allowlisted matching final domain rejections after the next explicit submit", async () => {
   const { scripts } = await clientScripts();
   const tracker = scripts[2];
-  assert(tracker.includes('new Set(["RESULT_REVISION_STALE","LEASE_EXPIRED","REPOSITORY_NOT_ATTACHED","STEP_ALREADY_EXISTS","REPOSITORY_UNAVAILABLE","REWORK_REQUIRED"])'));
+  assert(tracker.includes('new Set(["RESULT_REVISION_STALE","LEASE_EXPIRED","STEP_NOT_STARTED","STEP_ALREADY_EXISTS","REWORK_REQUIRED","ATTEMPT_CLOSED","LEASE_FENCED","ACTIVE_ATTEMPT_EXISTS"])'));
   assert(tracker.includes('if(error.status!==409||!terminalDomainRejections.has(error.code))return false'));
   assert(tracker.includes('receipt.status==="FINAL"&&receipt.commandId===envelope.commandId&&receipt.commandType===envelope.commandType&&receipt.error?.code===error.code&&!receipt.result'));
   assert(tracker.includes('else if(await hasMatchingFinalDomainRejection(envelope,error))terminalRejectedCommands.add(key)'));
@@ -134,12 +118,6 @@ test("export link has the requested label and UTC storage copy remains unchanged
   assert(!html.includes("Скачать личный экспорт JSON"));
 });
 
-test("New Plan dispatches repository selection changes on repository reload and successful reset", async () => {
-  const { scripts } = await clientScripts();
-  const main = scripts[0];
-  assert(main.includes('options.dispatchEvent(new Event("change",{bubbles:true}))'));
-  assert(main.includes('e.target.reset();q("#repoIds").dispatchEvent(new Event("change",{bubbles:true}))'));
-});
 
 for (const client of ["main", "tracker"]) {
   test(`${client} command preserves exact replay after malformed or unconfirmed HTTP 200 responses`, async () => {
@@ -191,11 +169,10 @@ for (const client of ["main", "tracker"]) {
 
 for (const [client, type, code] of [
   ["tracker", "CreateStep", "STEP_ALREADY_EXISTS"],
-  ["tracker", "RecordStepResult", "REPOSITORY_UNAVAILABLE"],
+  ["tracker", "RecordStepResult", "LEASE_EXPIRED"],
   ["tracker", "RecordCheck", "RESULT_REVISION_STALE"],
   ["tracker", "ClaimStepAttempt", "REWORK_REQUIRED"],
   ["main", "FinishPlan", "CHECKPOINTS_INCOMPLETE"],
-  ["main", "ReviewCommitLink", "COMMIT_EXCLUDED"],
 ]) {
   test(`${client} ${type} unlocks only the matching FINAL refusal and preserves every ambiguous receipt`, async () => {
     const { scripts } = await clientScripts();

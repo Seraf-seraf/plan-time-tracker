@@ -77,8 +77,6 @@ function createStepEnvelope(id = commandId(), overrides = {}) {
       title: "Implement checkpoint",
       expectedResult: "The feature is implemented and checked.",
       requiredChecks: ["unit", "build"],
-      commitPolicy: "ON_EXPLICIT_REQUEST",
-      pushPolicy: "NEVER",
       ...overrides,
     },
   };
@@ -163,7 +161,7 @@ test("CreateStep is available through the owner-authenticated MCP command layer"
   const tool = tools.find((entry) => entry.name === "CreateStep");
   assert.ok(tool);
   assert.equal(tool.inputSchema.additionalProperties, false);
-  assert.deepEqual(tool.inputSchema.properties.payload.required, ["planId", "ordinal", "title", "expectedResult", "requiredChecks", "commitPolicy", "pushPolicy"]);
+  assert.deepEqual(tool.inputSchema.properties.payload.required, ["planId", "ordinal", "title", "expectedResult", "requiredChecks"]);
 
   const call = await request(c.worker, c.db, "/mcp", {
     jsonrpc: "2.0", id: 2, method: "tools/call", params: {
@@ -173,7 +171,7 @@ test("CreateStep is available through the owner-authenticated MCP command layer"
         commandId: commandId(),
         payload: {
           planId: PLAN_ID, ordinal: 0, title: "MCP checkpoint", expectedResult: "Observable result",
-          requiredChecks: [], commitPolicy: "NEVER", pushPolicy: "NEVER",
+          requiredChecks: [],
         },
       },
     },

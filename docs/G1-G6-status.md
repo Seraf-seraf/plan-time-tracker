@@ -1,3 +1,5 @@
+> Historical report. Git integration requirements and publication status below are superseded by the current [source/MCP contract](worktree-evidence.md). Retained for audit; this file does not authorize current Git tools or deployment.
+
 # G1–G6: Sites deployment and verification status
 
 Date: 2026-10-12. Repository: private `Seraf-seraf/plan-time-tracker`. The complete, unabridged requirements and plan are preserved in `docs/originals/`; SHA-256: requirements `36b96a84e6430629378d51cf77c660c37f7963c6033c7cd5d74984040994fa48`, plan `b251ba81fc4b6b6c9fb25ca3699973290d8ee8d743328ffbeae0e0a13623ab66`. The GitHub `main` base used for the Site source snapshot was `3943ff928a919cb8e035bd754f787eb200b0127d`.

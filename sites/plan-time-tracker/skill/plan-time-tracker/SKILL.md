@@ -1,50 +1,57 @@
-# Plan Time Tracker command protocol (draft)
+---
+name: plan-time-tracker
+description: Track explicitly assigned Plan Time Tracker work through authenticated MCP commands and source snapshot evidence.
+---
 
-This file describes the intended agent instructions for a future Site-connected skill. It is not evidence that a Site MCP client can currently connect. The skill must remain marked **unverified** until the private Site's deployed MCP endpoint is exercised end to end with real platform authentication.
+# Track an explicitly assigned plan
 
-## Rules for agents
+Use this skill only for a plan or checkpoint explicitly assigned by the user. MCP is the command transport; the server's work intervals are the source of truth for time. File snapshots identify check inputs. Neither a tool call, observation, checkpoint attempt nor snapshot starts or stops the timer.
 
-- Use the authenticated Site MCP tools for reads and writes. Never put or accept `ownerId` in command payloads; Sites identity determines ownership.
-- Plan registration does not start its timer. Ask for explicit intent before each Start, Pause, Resume, or Finish. Never infer a transition from conversation, elapsed time, calendar, night, or weekend.
-- Do not treat commit count, commit timestamps, or repository activity as time spent or progress. Only server-created work intervals define active time.
-- Preserve a command envelope's `commandId` when retrying after an ambiguous network result. A retry with the same ID must preserve the exact command type, expected version, and payload. If changing any value, create a new command ID after rereading current state.
-- On `VERSION_CONFLICT`, reread the plan and ask the user to confirm a new action when needed. Never automatically replay a transition with a new version.
-- A `SOURCE_UNAVAILABLE`, `RATE_LIMITED`, or partial-sync result must be described as incomplete. Do not imply that GitHub was synchronized.
-- Attribute commits only through a full `Plan-ID: <UUID>` marker in a selected repository/ref or explicit user-reviewed attribution. Time overlap is a candidate only. Honor exclusions.
+## Authenticate and inspect
 
-## Common write envelope
+1. Use only the authenticated Plan Time Tracker MCP tools. Call `GetTrackerCapabilities`, then `GetPlanExecutionSnapshot` for the supplied plan ID. Stop on missing tools or authentication failure; never accept `ownerId`, forge identity headers, or use an alternate endpoint.
+2. Confirm the requested checkpoint, scope, expected result, required checks, current result revision, attempts and server readiness. Do not choose a plan merely because it is active.
+3. Use current tool discovery. Removed repository/synchronization/commit/push tools and fields are unsupported, including replay of old commands. Historical evidence is retained internally and is never a prerequisite for a new result.
 
-For lifecycle and metadata commands, call the MCP tool named by `commandType` with:
+## Explicit time and checkpoint lifecycle
+
+- `CreatePlan` only registers a plan. `StartPlan`, `PausePlan`, `ResumePlan` and `FinishPlan` each require direct user intent. Never infer intent from conversation, elapsed time, night, weekend, a turn ending or a tool event. Server timestamps define all interval boundaries.
+- A plan must already be `RUNNING` before working on a checkpoint. `PLANNED` and `PAUSED` do not authorize starting or resuming time.
+- `CreateStep` takes `planId`, `ordinal`, `title`, `expectedResult` and `requiredChecks`. Do not supply policy fields or repository context. Update only user-authorized checkpoint fields with `UpdateStep` and a reason.
+- Claim an attempt only for the assigned checkpoint. Preserve its `attemptId`, `fence` and current step version. Start only that attempt with `StartStep`. Renew its lease about every three minutes. An expired lease cannot be revived; reread the snapshot before recovery. `BlockStep` records a reason without changing plan time.
+- Closing an attempt or reaching its lease deadline does not finish the checkpoint or change plan time. Inspect `step.execution` (`state`, `canClaim`, `canStart`, `canRecordResult`) rather than raw RUNNING alone. For an assigned RUNNING plan, recover a closed/expired attempt with a new ClaimStepAttempt and its increased fence, then StartStep; never renew/reuse a closed or expired fence. If a live attempt was claimed but not started, start that attempt. Resolve ambiguous Claim/Start outcomes with the identical envelope or its receipt before any new action. A paused plan needs a separate explicit ResumePlan command.
+- Completed checkpoint rework must be assigned by the owner through the web UI with a reason. Do not send `reworkReason` through MCP or treat a failed check as rework authorization.
+
+## Source evidence without a repository
+
+Stop source writers. Run `scripts/source-snapshot.mjs <source-directory>` before checks, then `--expect <digest>` immediately before and after every check. The helper uses no version-control command. Version 2 hashes relative UTF-8 paths, executable modes, symlink target bytes and file contents in deterministic order. It never follows symlinks. It excludes metadata/dependency/build directories and `.env`/`.env.*`; see the helper's default exclusions. Use `.tracker-snapshot.json` with `{ "exclude": ["relative/output-directory"] }` for additional generated outputs. The configuration itself and its policy affect the digest. Keep logs and captures outside the source tree, or explicitly exclude them before capture. Describe excluded environment/dependency inputs separately. The helper detects changes but does not freeze files or run tests.
+
+Record actual execution results with `RecordStepResult`, using the active fenced attempt, `outcome`, a bounded `summary`, and optionally:
 
 ```json
-{
-  "schemaVersion": 1,
-  "commandId": "<new UUID; retain it for a retry>",
-  "expectedVersion": 3,
-  "payload": { "planId": "<plan UUID>" }
-}
+{"sourceSnapshot":{"kind":"SOURCE_SNAPSHOT","formatVersion":2,"digest":"sha256:<64 lowercase hex>"}}
 ```
 
-`CreatePlan` omits `expectedVersion`. Its payload includes `title`, explicit `planCreatedAt` (`instant` with an offset timestamp or `dateOnly` with IANA `timeZone`), and optionally description, acceptance criteria, repository IDs and refs. Creating a plan leaves it `PLANNED`.
+Omit the helper's local `fileCount`. A source-less result is a truthful report, not check evidence. A changed digest requires a new authorized result revision and rerunning affected checks; never rewrite an immutable result or carry old checks forward. A new result revision needs its own checks even if the digest is unchanged.
 
-To bind another owned, currently available repository to an existing plan, call `AttachPlanRepository` with the normal write envelope, the plan's current `expectedVersion`, and `payload: { "planId": "<plan UUID>", "repositoryId": "<repository ID>" }`. A successful response returns the new plan version and a `REPOSITORY_ATTACHED` event is recorded atomically; the command does not start, pause, or finish the plan or change its timer, intervals, attempts, or leases. Retry an ambiguous result with the exact same envelope. On `VERSION_CONFLICT`, reread the plan before deciding whether to issue a new command ID and version. Foreign or unavailable repositories return `REPOSITORY_UNAVAILABLE`; an existing binding returns `REPOSITORY_ALREADY_ATTACHED`.
+`RecordStepResult` returns `resultRevision`. Record each actual `RecordCheck` with that revision, `checkKey`, `status`, `testedSnapshotDigest` equal to the result digest, actual `exitCode` and optional bounded evidence summary/HTTPS URL. `PASSED` requires 0; `FAILED` requires 1–255; `NOT_RUN` omits the exit code. Do not invent passes or claim the server executed tests. Historical checks are audit records; only current-revision checks affect readiness.
 
-For `RecordStepResult`, a repository SHA can be recorded only after that repository is attached to the plan and the current fenced attempt has a `STEP_STARTED` event. `REPOSITORY_NOT_ATTACHED` and `STEP_NOT_STARTED` are distinct definitive failures. A recovery must use a new claim/attempt and start that attempt; never rewrite an earlier closed attempt or result. `RenewStepLease` accepts an optional `expectedVersion`; when supplied, the server enforces it and reports stale versions as `VERSION_CONFLICT`.
+## Completion and recovery
 
-There is no separate checkpoint revision approval or check waiver workflow. Normal `FinishPlan` requires every checkpoint to be `DONE`, have a current result revision and no active attempt, and have the latest server-sequence record for every required check `PASSED` on that revision with the matching commit SHA or worktree snapshot digest. Use snapshot step fields `readyToFinish` and `currentChecks` (`server_sequence`, `matchesCurrentResult`), not check timestamps or display order, to choose the current check. A later failed/not-run check, rework, a new result, or an added required key invalidates earlier readiness. An empty required-check list adds no SHA requirement. Read the server-reported readiness before requesting an explicit Finish decision.
+Normal finish requires every checkpoint to be `DONE`, have a current successful result, no open attempt, and a latest `PASSED` check for every required key matching that result's source. Use `readyToFinish`, `readinessBlockers` and `currentChecks` (`server_sequence`, `matchesCurrentResult`). A later FAILED/NOT_RUN, rework, a new result revision or an added required key invalidates earlier readiness. An empty required-check list requires no source snapshot. Historical source identities remain immutable and retain their prior check semantics internally; do not reinterpret a historical identity as a new snapshot.
 
-The existing exception path remains an explicit `FinishPlan` payload with `allowIncomplete: true` and a nonempty `reason`; it records why the user finished with unmet conditions and does not mark those checks as passed. Historical approval/waiver rows remain inert audit records. `AcceptStep` and `RejectStep` are removed commands, explicitly refused without mutation even when an old receipt exists; clients must refresh their tool schemas rather than call an alias or no-op.
+There are no separate approval/waiver commands. Report unmet conditions. Only after separate explicit intent call `FinishPlan`. The owner may choose the existing exception with `allowIncomplete: true` and a nonempty `reason`; this records the exception without passing checks.
 
-Lifecycle tools: `StartPlan`, `PausePlan`, `ResumePlan`, `FinishPlan`. The Site server supplies all event/interval timestamps. Use `GetActivePlan` and `GetPlan` to obtain the latest plan version. Use `GetAnalytics` with inclusive `from`/`to` calendar dates and IANA timezone.
+Use a version 1 command envelope with a UUID `commandId`, bounded `payload` and the required current `expectedVersion`. For MCP, select the tool by command type rather than sending `commandType`. After an ambiguous response, retry the identical envelope or call `GetCommandReceipt`. Keep command type, version and payload unchanged. PENDING means wait and reread the same receipt; FINAL means use the saved outcome; NOT_FOUND means reread the snapshot before a new user-authorized action. On `VERSION_CONFLICT`, reread and obtain renewed intent when consequential; never automatically replay lifecycle intent with a changed version. Reconnect only through the supported authenticated flow.
 
-`SyncRepository` is a separate envelope with `payload.fullName` (`owner/repo`) and optional `cursor`, `ref`, `fullRescan`, and `authorGithubIds`. Candidate filtering uses stable numeric GitHub author IDs; an empty list allows all identified authors. Unknown authors are not time candidates, and author and committer identities remain separate. Bot labels remain visible for linked commits. Sync is only usable after Site runtime GitHub access is configured and verified. `ReviewCommitLink` requires `repositoryId`, full SHA, status (`confirmed`, `candidate`, `excluded`) and a nonempty reason.
+## Metadata-only observations and local queue
 
-## Verification gate
+`AppendObservation` supports turn/tool started/finished, heartbeat, gap and correction events. Keep a stable `sourceId`, a new UUID `sessionId` per client session, monotonic `sourceSequence`, stable UUID `eventId` and exact retry envelopes. Observations are audit metadata and never change time or checkpoint status. Use server receipt sequence for ordering. Never include code, full logs, prompts, credentials or external response bodies.
 
-Before calling the skill operational, verify Site auth identity, owner isolation, D1 atomicity/idempotency, private GitHub reads and pagination, MCP/UI shared behavior, secret handling/revocation, and deployment operations. These G1–G6 checks are currently not all passed.
+The optional `scripts/observation-queue.mjs` stores only AppendObservation envelopes. Scope it by `localObservationQueue.ownerScope` returned by capabilities and `planContext` equal to the assigned plan ID. Do not derive owner scope. Enqueue the exact envelope, take the oldest ready event, mark it sent, then call the matching authenticated tool; acknowledge only after success. Preserve IDs on retry and honor `retryable` and `retryAfter` (seconds converted to milliseconds). After five sends, report PENDING; never discard it silently. A manual requeue preserves its original ID. Limits are 1000 events, 5 MiB, seven days, with bounded exponential backoff. The queue never sends requests or accepts lifecycle commands. Existing old-scope files remain untouched; do not automatically replay obsolete observations.
 
-## Uncommitted source checks
+Queue durability is local-only. Cloud/web sessions are ephemeral; report unavailable persistence honestly.
 
-Use the independent plugin snapshot helper to capture tracked and non-ignored untracked source contents before checks and verify the same digest immediately before/after each check with source writers stopped. Record `worktreeSnapshot: { kind: "WORKTREE_SNAPSHOT", repositoryId, formatVersion: 1, digest, baseRevisionSha? }` instead of the legacy result repository/SHA pair. Omit helper `fileCount`. Record checks using `testedSnapshotDigest` instead of `testedSha`, with the actual exit code. Both modes bind to the exact result revision. Never substitute baseline SHA for dirty-tree evidence. Snapshot identity is not commit or publication proof. `NEVER` remains respected. Old source-less reports are not converted or attested automatically. New source evidence requires a new authorized result/attempt.
+## Report
 
-See [the source and readiness contract](../../../../docs/worktree-evidence.md) for exact digest scope, protected reads, actor permissions and the regression matrix. Use `completion` on plan summaries and `readyToFinish`, `readinessBlockers` and `currentChecks` on execution snapshots; do not equate `DONE` with finish readiness.
+Report plan/time state, checkpoint/result revision and source digest, actual check outcomes, authoritative readiness and unmet conditions separately. Do not claim hosted operation from local SQLite/browser tests or successful tool discovery. No publication, source-control operation or plan finish is implied by a completed checkpoint.

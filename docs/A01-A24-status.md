@@ -1,3 +1,5 @@
+> Historical report. Git integration requirements and publication status below are superseded by the current [source/MCP contract](worktree-evidence.md). Retained for audit; this file does not authorize current Git tools or deployment.
+
 # A01–A24 acceptance status (local implementation)
 
 The complete normative Library file is preserved at [docs/originals/plan_time_tracker_requirements.txt](originals/plan_time_tracker_requirements.txt) (SHA-256 `36b96a84e6430629378d51cf77c660c37f7963c6033c7cd5d74984040994fa48`). “Local pass” means a local SQLite/Worker test only and never a hosted Site pass. The A01–A24 acceptance outcomes below are not 24 independent end-to-end tests: the local suite contains 44 regression tests that cover parts of several scenarios, while hosted acceptance remains unrun.

@@ -71,7 +71,6 @@ async function setupRunningStep(context, requiredChecks = []) {
   const step = await request(context, "CreateStep", {
     planId: PLAN_ID, ordinal: 0, title: "Implement and verify",
     expectedResult: "A reviewable implementation with recorded evidence.", requiredChecks,
-    commitPolicy: "ON_EXPLICIT_REQUEST", pushPolicy: "NEVER",
   });
   assert.equal(step.status, 200);
   assert.equal(step.value.result.status, "PENDING");

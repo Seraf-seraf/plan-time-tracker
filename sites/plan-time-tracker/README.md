@@ -1,56 +1,30 @@
-# Plan Time Tracker for ChatGPT Sites
+# Plan Time Tracker
 
-A private Site app for recording plan execution time. The browser UI, Worker API/MCP handler, and source-of-truth schema run inside ChatGPT Sites. GitHub is optional read-only source data; there is no separate backend.
+The tracker records work time through explicit authenticated MCP commands and the owner UI. `CreatePlan` registers a plan; only Start/Pause/Resume/Finish change server-timed intervals. Observations, tools, attempts and source changes never accrue or stop time on their own. One owner can run one plan at a time. Calendar/active/paused time and inclusive-date analytics use the existing server interval model.
 
-## Current implementation
+The current contract removes repository management/filters, synchronization, commit attribution, commit/push policies and Git observations. It requires no external integration token. This change is local and pending review; it has not been pushed or deployed.
 
-- Owner-scoped plans, immutable plan event history, server-timed half-open work intervals, idempotent commands, and a one-RUNNING-plan constraint.
-- Explicit Start, Pause, Resume, Finish; time continues across nights and weekends until Pause or Finish.
-- UI for plan creation, lifecycle controls, plan/date/repository filters, interval/event history, explicit Finish confirmation, branch/ref selection, commit status and conflict review, analytics sample details, timezone, private-cache controls, and owner JSON export.
-- Shared API/MCP command processor. MCP schemas and calls use the same command types, receipts, owner identity, and D1 data model.
-- Read-only GitHub REST adapter with bounded retries/Retry-After, durable page checkpoints/resume, full-ref reconciliation, commit de-duplication, exact Plan-ID conflict review, explicit owner exclusions, revoke/cache handling, and time-overlap candidates. It requires a Site runtime `GITHUB_TOKEN` and is disabled when absent.
+## Checks and source identity
 
-## Checkpoint tracker source (local, not deployed)
+Create checkpoints with title, ordinal, expected result and required check keys. Claim/start a fenced attempt, record its result revision, then record actual required checks for that revision. New evidence uses `sourceSnapshot: {kind:"SOURCE_SNAPSHOT",formatVersion:2,digest:"sha256:<64 lowercase hex>"}` and `RecordCheck.testedSnapshotDigest` with actual exit status. See [the complete contract](../../docs/worktree-evidence.md) and [bundled agent instructions](skill/plan-time-tracker/SKILL.md).
 
-The local source adds owner-scoped checkpoints, fenced attempts and leases, immutable result revisions, source-bound check evidence, explicit incomplete-finish snapshots, and a sequenced metadata-only observation journal. The existing plan intervals remain the only timer. API and MCP reads share the same owner-scoped snapshot, receipt, and paginated timeline helpers; the existing Site UI includes checkpoint controls, the combined legacy/journal timeline, and counts for blocked events, repeat attempts, failed results, and server-recorded result-to-check delay. That delay is not test execution time.
+Normal finish is guarded by current successful results, closed attempts and the latest server-sequence passed checks. A new result, rework, an added required key or a later failed/not-run check invalidates prior readiness. A result without source cannot satisfy required checks. Empty required-check lists add no source requirement. The explicit owner exception requires a reason and never fabricates passes.
 
-Normal finish requires all checkpoints to be `DONE`, a current result revision, no active attempt, and the latest server-sequence record for every required check to be `PASSED` for the current revision and matching commit SHA or worktree snapshot digest. A later failed/not-run check, rework, a new result, or an added required key invalidates previous readiness. Empty required-check lists add no new SHA requirement. Separate owner revision approval and check waivers are removed from the active UI/API/MCP flow; historical approval/waiver rows and receipts are preserved as inert audit data. Removed command names are refused without mutation, including old receipt replay, rather than implemented as aliases or no-ops. The explicit incomplete-finish exception still requires user intent and a reason and records unmet conditions without passing checks.
+## Migration and history
 
-Checkpoint cards can be collapsed individually with keyboard/touch controls or with «Свернуть все» / «Развернуть все». On first view, `RUNNING`, `BLOCKED`, and `FAILED` cards are open to expose current work and problems; `PENDING` and ready `DONE` cards are collapsed; incomplete `DONE` cards start open. Subsequent refreshes preserve the user's choice. Their summary shows status and authoritative check readiness. Collapsing does not submit a command, hide validation errors, or discard drafts; draft and disclosure state are scoped to plan/checkpoint/form, with check drafts also scoped to result revision. Server errors reopen the relevant card and remain visible outside its collapsed body.
+Apply canonical migrations in order, through `0015_source_snapshots.sql`. 0015 only adds source-snapshot/check tables and replaces evidence/readiness views and result/check triggers. It does not delete or update existing application rows. Historical COMMIT and WORKTREE_SNAPSHOT identities and checks retain internal semantics, including protected-source redaction and finish readiness. The public UI/API shows their history without repository/SHA controls. New work uses v2 snapshots; it does not convert old evidence automatically. Removed commands refuse even cached old receipts; receipts remain readable as audit records.
 
-The independent plugin package contains a local-only observation queue helper. It stores only `AppendObservation` envelopes outside the tracked repository, bounded to 1000 events, 5 MiB, and seven days, with at most five send attempts and `Retry-After` support. Web/cloud sessions remain ephemeral and no lifecycle command is queued or replayed.
+Do not reverse migrations or deploy the old Worker after creating v2 evidence. Publication requires the reviewed Worker and migration together. Existing historical documents under `docs/` describe earlier requirements/publications, not the current contract. The source Git repository and its metadata are retained.
 
-Additive D1 migrations `0004_tracker.sql` through `0014_worktree_snapshot_evidence.sql` preserve existing plan tables and history. `0011` adds the versioned `AttachPlanRepository` command and refines result/lease domain errors without rewriting prior migrations. `0012` checks explicit commit exclusions atomically. `0013` replaces active finish/check coupling and readiness without deleting historical approval, waiver, result, check, attempt, lease, receipt, or timer data. Snapshot steps expose authoritative `readyToFinish` and `currentChecks` (`server_sequence`, `matchesCurrentResult`); active execution JSON omits historical approval fields and lists. `npm test` builds the ignored `dist/` artifact before running the suite so `test/artifact.test.js` can import the actual Worker bundle. This local candidate has not been deployed by this task. The independent skill source is in `../../plugin/plan-time-tracker/`; it remains unverified until supported private MCP connection and installation flows are exercised.
-
-## Published Site and verification
-
-At the 2026-10-14 inspection, the existing Site at https://plan-time-tracker.seraf-k.chatgpt.site is live at version 6 with custom access for its owner only; the access record contains one allowed user and no groups. The live database overview reports binding `DB` and 13 existing application tables, with no tracker tables yet. Its current Site source commit is `55130f1da3127e8b402c02e855899665c10df8d7`; the local GitHub checkout is at `49cc794a132383e14e7eff7c4f5eb82bd07929c1`. Those are separate source repositories. The tracker implementation and migrations described above are a local release candidate and have not been deployed.
-
-The original requirements, acceptance matrix, and traceability records remain under `../../docs/`. Earlier Site and local verification notes there are historical evidence; they do not cover the current tracker release candidate.
-
-The current authenticated MCP connector returned `GetActivePlan: null`. That proves the existing read path in this client context only; it does not verify the new tracker tools, another client, the Site UI's authenticated flow, or hosted D1 concurrency.
-
-## Local development
-
-Requires Node.js 22+ (tests use built-in `node:sqlite`). From this directory:
+## Local verification
 
 ```sh
 npm test
-npm run build
 npm run validate
-node --check worker/index.js
+PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs CHROMIUM_EXECUTABLE=/usr/bin/chromium UI_ACCEPTANCE_ARTIFACT_DIR=/tmp/tracker-source-ui npm run test:ui
+node --test ../../plugin/plan-time-tracker/test/*.test.mjs
 ```
 
-The local SQLite adapter exercises schema constraints and atomic statement rollback; it does not emulate Cloudflare D1 concurrency or Sites identity middleware. The plugin's local observation queue has a separate Node test suite.
+`npm test` builds the ignored Worker artifact and runs mandatory timer, owner, idempotency, concurrency, migration, evidence and VM UI-contract tests. Browser suites intercept every localhost request and execute the actual Worker with migrated in-memory SQLite. External requests are forbidden. They cover responsive navigation, modal focus, exact replay after lost acknowledgement, source results/checks, completion conditions, cancelled and duplicate finish. These are local tests, not hosted D1/authentication or production-data QA. No dependencies are added by the tests.
 
-The browser acceptance fixture uses the existing Chromium/Playwright installation, with no new project dependency. See [`test/README.md`](test/README.md) for the invocation. It runs the real Worker-generated UI against synthetic intercepted API responses only.
-
-## Remaining gates
-
-Local Node and artifact checks do not prove hosted D1 races, local and web/cloud client parity, owner-authenticated browser interaction, GitHub public/private sync, or the full A01–A24 acceptance suite. Those remain release gates. The independent plugin format and existing Site App binding are now represented in the local package; the account plugin and Site have not yet been updated.
-
-## Worktree evidence candidate
-
-Migration 0014 adds immutable source snapshots and snapshot checks, preserving all historical tables and receipts. The result source kinds are `COMMIT`, `WORKTREE_SNAPSHOT`, and `NONE`. Baseline SHA is context only; no old report is converted into snapshot/check evidence. Normal finish uses the latest required checks for the current result and exact source identity. Plan summaries now expose authoritative completion readiness, and all UI completion actions and checkpoint badges explain unmet conditions. See [the contract and regression matrix](../../docs/worktree-evidence.md). Historical publication notes above describe previous inspections, not this candidate's release state.
-
-Run both browser suites with `npm run test:ui` and the documented Playwright/Chromium paths. The new `ui-worktree.mjs` suite routes browser calls to the actual Worker and an isolated in-memory SQLite database. It covers snapshot result/check recording, source-less legacy blockers, private evidence redaction, cancellation, duplicate finish, and closed timers without production requests.
+Execution snapshots distinguish raw checkpoint state from executor availability through step.execution. A RUNNING checkpoint with a closed/expired attempt needs recovery; it is not actively executing. The owner UI exposes fresh-attempt recovery and pending-attempt Start, using server-aligned lease time and read-only refresh. Recovery leaves plan intervals intact; a paused plan requires an explicit ResumePlan. Historical retired-command receipts expose only safe audit identity/outcome/time and preserve raw stored data.

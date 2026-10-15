@@ -19,25 +19,47 @@
         }
       },
       "retry": "Send the identical command envelope again, or call GetCommandReceipt for the same commandId.",
-      "expectedReplay": { "eventId": "a0000000-0000-4000-8000-000000000002", "sameServerSequence": true, "domainStateChanged": false }
+      "expectedReplay": {
+        "eventId": "a0000000-0000-4000-8000-000000000002",
+        "sameServerSequence": true,
+        "domainStateChanged": false
+      }
     },
     {
       "name": "pending_command_receipt",
-      "receipt": { "status": "PENDING", "commandId": "a0000000-0000-4000-8000-000000000005" },
+      "receipt": {
+        "status": "PENDING",
+        "commandId": "a0000000-0000-4000-8000-000000000005"
+      },
       "nextAction": "Poll GetCommandReceipt using the same commandId; do not generate a replacement write."
     },
     {
       "name": "stale_version",
-      "error": { "code": "VERSION_CONFLICT" },
+      "error": {
+        "code": "VERSION_CONFLICT"
+      },
       "nextAction": "Read the plan execution snapshot and obtain renewed user intent before issuing a new command."
     },
     {
       "name": "ordered_offline_delivery",
       "observations": [
-        { "sourceSequence": 10, "expectedClassification": "NORMAL" },
-        { "sourceSequence": 12, "expectedClassification": "GAP" },
-        { "sourceSequence": 11, "expectedClassification": "LATE" },
-        { "sourceSequence": 13, "eventType": "correction", "expectedClassification": "CORRECTION" }
+        {
+          "sourceSequence": 10,
+          "expectedClassification": "NORMAL"
+        },
+        {
+          "sourceSequence": 12,
+          "expectedClassification": "GAP"
+        },
+        {
+          "sourceSequence": 11,
+          "expectedClassification": "LATE"
+        },
+        {
+          "sourceSequence": 13,
+          "eventType": "correction",
+          "expectedClassification": "CORRECTION"
+        }
       ],
       "invariant": "Server sequence orders receipt; late, gap, and correction observations never transition a plan or checkpoint."
     },
@@ -46,10 +68,30 @@
       "step": {
         "status": "DONE",
         "current_result_revision": 2,
-        "currentResult": { "revision": 2, "outcome": "DONE", "revision_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-        "requiredChecks": ["unit"],
-        "attempts": [{ "status": "CLOSED" }],
-        "currentChecks": [{ "check_key": "unit", "result_revision": 2, "status": "PASSED", "server_sequence": 8, "matchesCurrentResult": true }],
+        "currentResult": {
+          "revision": 2,
+          "outcome": "DONE",
+          "source_kind": "SOURCE_SNAPSHOT",
+          "snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "snapshot_format_version": 2
+        },
+        "requiredChecks": [
+          "unit"
+        ],
+        "attempts": [
+          {
+            "status": "CLOSED"
+          }
+        ],
+        "currentChecks": [
+          {
+            "check_key": "unit",
+            "result_revision": 2,
+            "status": "PASSED",
+            "server_sequence": 8,
+            "matchesCurrentResult": true
+          }
+        ],
         "readyToFinish": true
       },
       "nextAction": "Report readiness; only send FinishPlan after the user explicitly requests it. No separate checkpoint approval command exists."
@@ -57,10 +99,30 @@
     {
       "name": "same_timestamp_later_failed_check",
       "checks": [
-        { "check_key": "unit", "result_revision": 2, "status": "PASSED", "created_at": 1800000000000, "server_sequence": 8 },
-        { "check_key": "unit", "result_revision": 2, "status": "FAILED", "created_at": 1800000000000, "server_sequence": 9 }
+        {
+          "check_key": "unit",
+          "result_revision": 2,
+          "status": "PASSED",
+          "created_at": 1800000000000,
+          "server_sequence": 8
+        },
+        {
+          "check_key": "unit",
+          "result_revision": 2,
+          "status": "FAILED",
+          "created_at": 1800000000000,
+          "server_sequence": 9
+        }
       ],
-      "currentChecks": [{ "check_key": "unit", "result_revision": 2, "status": "FAILED", "server_sequence": 9, "matchesCurrentResult": true }],
+      "currentChecks": [
+        {
+          "check_key": "unit",
+          "result_revision": 2,
+          "status": "FAILED",
+          "server_sequence": 9,
+          "matchesCurrentResult": true
+        }
+      ],
       "readyToFinish": false,
       "nextAction": "Report the latest failure, even if the timestamps match. NOT_RUN has the same readiness consequence; never choose an earlier pass."
     },
@@ -69,8 +131,17 @@
       "step": {
         "status": "DONE",
         "current_result_revision": 3,
-        "requiredChecks": ["unit"],
-        "checks": [{ "check_key": "unit", "result_revision": 2, "status": "PASSED", "server_sequence": 8 }],
+        "requiredChecks": [
+          "unit"
+        ],
+        "checks": [
+          {
+            "check_key": "unit",
+            "result_revision": 2,
+            "status": "PASSED",
+            "server_sequence": 8
+          }
+        ],
         "currentChecks": [],
         "readyToFinish": false
       },
@@ -78,8 +149,19 @@
     },
     {
       "name": "new_required_key_or_historical_waiver_does_not_pass",
-      "requiredChecks": ["unit", "build"],
-      "currentChecks": [{ "check_key": "unit", "result_revision": 2, "status": "PASSED", "server_sequence": 8, "matchesCurrentResult": true }],
+      "requiredChecks": [
+        "unit",
+        "build"
+      ],
+      "currentChecks": [
+        {
+          "check_key": "unit",
+          "result_revision": 2,
+          "status": "PASSED",
+          "server_sequence": 8,
+          "matchesCurrentResult": true
+        }
+      ],
       "historicalWaiverRowsRetained": true,
       "readyToFinish": false,
       "nextAction": "Record the missing build check for the current revision. Historical waiver rows do not satisfy required checks."
@@ -89,9 +171,19 @@
       "step": {
         "status": "DONE",
         "current_result_revision": 1,
-        "currentResult": { "revision": 1, "outcome": "DONE", "revision_sha": null },
+        "currentResult": {
+          "revision": 1,
+          "outcome": "DONE",
+          "source_kind": "SOURCE_SNAPSHOT",
+          "snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "snapshot_format_version": 2
+        },
         "requiredChecks": [],
-        "attempts": [{ "status": "CLOSED" }],
+        "attempts": [
+          {
+            "status": "CLOSED"
+          }
+        ],
         "currentChecks": [],
         "readyToFinish": true
       },
@@ -115,20 +207,27 @@
     },
     {
       "name": "bounded_local_queue",
-      "limits": { "events": 1000, "bytes": 5242880, "retentionMs": 604800000, "sendAttempts": 5, "backoffCapMs": 30000 },
-      "retryAfter": { "seconds": 45, "minimumWaitMs": 45000 },
+      "limits": {
+        "events": 1000,
+        "bytes": 5242880,
+        "retentionMs": 604800000,
+        "sendAttempts": 5,
+        "backoffCapMs": 30000
+      },
+      "retryAfter": {
+        "seconds": 45,
+        "minimumWaitMs": 45000
+      },
       "afterAttempts": 5,
       "expectedState": "PENDING",
       "invariant": "The exact AppendObservation envelope and commandId remain queued in FIFO order; only local state is durable, and no lifecycle command is queued or auto-replayed."
     },
     {
-      "name": "worktree_snapshot_is_not_commit_evidence",
+      "name": "source_snapshot_binds_current_checks",
       "resultSource": {
-        "kind": "WORKTREE_SNAPSHOT",
-        "repositoryId": "fixture-repository",
-        "formatVersion": 1,
-        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "baseRevisionSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        "kind": "SOURCE_SNAPSHOT",
+        "formatVersion": 2,
+        "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
       "check": {
         "resultRevision": 1,
@@ -137,7 +236,7 @@
         "exitCode": 0,
         "testedSnapshotDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
-      "invariant": "Capture and verify real source bytes before/after each check. Baseline is context only; never set testedSha for worktree checks. NEVER needs no commit."
+      "invariant": "Capture real source bytes and verify their digest before and after every check without requiring a repository. Each check belongs to its exact result revision."
     },
     {
       "name": "legacy_prose_cannot_be_attested_after_migration",
@@ -145,8 +244,9 @@
         "status": "DONE",
         "currentResult": {
           "revision": 1,
-          "source_kind": "NONE",
-          "revision_sha": null
+          "source_kind": "SOURCE_SNAPSHOT",
+          "snapshot_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "snapshot_format_version": 2
         },
         "requiredChecks": [
           "unit"

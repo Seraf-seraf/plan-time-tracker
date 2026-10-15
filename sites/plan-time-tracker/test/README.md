@@ -1,31 +1,7 @@
-# Local UI acceptance fixture
+# Isolated verification
 
-`ui-acceptance.mjs` runs the actual Worker-generated HTML, CSS, and browser scripts in Chromium. Playwright is loaded from an existing installation; this project does not add a Playwright runtime dependency. The fixture API is intercepted in the page context, uses synthetic plans/repositories/attempts, and aborts every non-local origin. It never contacts the Site, GitHub, or a production API.
+Run `npm test` for built-artifact, owner/lifecycle/timer, receipt replay, concurrency, historical-schema, v2 evidence and VM client-contract checks. The SQLite databases are in memory and use all canonical migrations.
 
-Run from `sites/plan-time-tracker` in an environment with Chromium and Playwright already installed:
+Run `npm run test:ui` with an existing Playwright module and Chromium (`PLAYWRIGHT_MODULE`, `CHROMIUM_EXECUTABLE`). `UI_ACCEPTANCE_ARTIFACT_DIR` chooses an output directory outside source, normally `/tmp/tracker-source-ui`. The first suite verifies navigation/responsiveness, modal keyboard behavior, new plan/checkpoint creation without Git, unknown-outcome exact replay and explicit interval timing. The companion `ui-worktree.mjs` (historical filename) verifies the current v2 source result/check/finish flow with real Worker+SQLite. Every request is intercepted on localhost; external requests are forbidden. No production state or authentication is exercised. `ui-recovery.mjs` additionally checks closed, abandoned, expired, newly expired, unstarted and paused attempts, client clock skew, duplicate clicks and lost Claim/Start acknowledgements.
 
-```sh
-PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs \
-CHROMIUM_EXECUTABLE=/usr/bin/chromium \
-node test/ui-acceptance.mjs
-```
-
-If Playwright is already resolvable by Node, `PLAYWRIGHT_MODULE` may be omitted. `CHROMIUM_EXECUTABLE` may also be omitted when Playwright's bundled Chromium is available. The runner writes `results.json`, `summary.json`, and viewport screenshots under `work/ui-acceptance/` by default; set `UI_ACCEPTANCE_ARTIFACT_DIR` to choose another local output directory. These outputs are generated evidence, not source fixtures.
-
-The companion `fixtures/ui-acceptance.mjs` contains synthetic, non-production data. The runner asserts DOM visibility, selected navigation, command bodies/replay IDs, mocked failure states, spacing, responsive overflow, and the 12 reviewed behavior groups plus follow-up blocker scenarios. It also exercises checkpoint keyboard/touch disclosures, authoritative check summaries, and drafts across a command on another card and replacement of the outer detail DOM. Check drafts are scoped to their result revision; toggles never send commands.
-
-All mandatory unit, VM client-contract, and actual Worker+SQLite tests run with:
-
-```sh
-npm test
-```
-
-The focused Worker+SQLite contract and migration checks can also be run separately with:
-
-```sh
-node --test test/attach-plan-repository.test.js test/tracker-evidence.test.js test/commit-attribution.test.js
-```
-
-These database tests apply canonical migrations to isolated temporary SQLite, including populated upgrades that retain historical decision receipts and rows as inert audit data. Normal finish is verified against current results and the latest required checks by server sequence. Removed owner-decision commands must fail without mutations. Browser API responses remain synthetic: a passing DOM runner does not establish hosted D1 behavior or private Site authentication.
-
-For worktree evidence, also run `node test/ui-worktree.mjs` with the same Playwright and Chromium environment. `npm run test:ui` runs both suites. This suite uses the real Worker and migrated in-memory SQLite through intercepted localhost requests. It writes evidence under `UI_ACCEPTANCE_ARTIFACT_DIR/worktree` (or `/tmp/tracker-worktree-browser/worktree`) and never contacts production. Run the plugin capture/queue tests separately with `node --test plugin/plan-time-tracker/test/*.test.mjs` from the repository root.
+Removed Git feature tests have been replaced with explicit public refusal, field/schema removal, populated-history preservation and repository-free evidence cases. The retained `tracker-schema.test.js` intentionally exercises historical schema invariants as migration compatibility evidence. Plugin helper and queue tests run separately: `node --test ../../plugin/plan-time-tracker/test/*.test.mjs`.

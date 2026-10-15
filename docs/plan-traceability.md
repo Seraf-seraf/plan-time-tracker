@@ -1,3 +1,5 @@
+> Historical report. Git integration requirements and publication status below are superseded by the current [source/MCP contract](worktree-evidence.md). Retained for audit; this file does not authorize current Git tools or deployment.
+
 # Полная трассировка плана на код и проверки
 
 Это индекс трассировки, а не пересказ нормативных формулировок. Полный исправленный план и практическое приложение сохранены без сокращений в originals/serafim_gpt6_project_plan_full.txt; нормативное ТЗ и полные R01–R10/A01–A24 сохранены в originals/plan_time_tracker_requirements.txt. Проверенные SHA-256 обоих файлов приведены в G1-G6-status.md. Номера строк ниже относятся к полным пунктам в оригинале: критерии и подпункты сохранены именно там.

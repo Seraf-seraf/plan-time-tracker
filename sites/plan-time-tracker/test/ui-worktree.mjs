@@ -18,8 +18,8 @@ class Statement {
   async all() { return { results: sqlite.prepare(this.sql).all(...this.args) }; }
 }
 let now = Date.now();
-const db = { prepare(sql) { return new Statement(sql); } }, worker = createWorker(() => now), owner = "worktree-browser-fixture";
-const origin = "http://localhost", digest = "sha256:" + "a".repeat(64), baseline = "b".repeat(40);
+const db = { prepare(sql) { return new Statement(sql); } }, worker = createWorker(() => now), owner = "source-browser-fixture";
+const origin = "http://localhost", digest = "sha256:" + "a".repeat(64);
 const legacyPlan = "11111111-1111-4111-8111-111111111111", snapshotPlan = "22222222-2222-4222-8222-222222222222";
 const requiredChecks = ["unit", "postgres", "typecheck", "lint"];
 async function fetchLocal(path, options = {}) {
@@ -33,22 +33,20 @@ async function command(type, payload, expectedVersion) {
 }
 async function createRunningStep(planId, title) {
   await command("CreatePlan", { planId, title, planCreatedAt: { precision: "dateOnly", on: "2026-10-15", timeZone: "UTC" } });
-  const step = await command("CreateStep", { planId, ordinal: 3, title: "Verify source contents", expectedResult: "Synthetic browser check", requiredChecks, commitPolicy: "NEVER", pushPolicy: "NEVER" });
+  const step = await command("CreateStep", { planId, ordinal: 3, title: "Verify source contents", expectedResult: "Synthetic browser check", requiredChecks });
   await command("StartPlan", { planId }, 0);
   const claim = await command("ClaimStepAttempt", { stepId: step.stepId, sessionId: crypto.randomUUID(), sourceId: "browser-fixture" }, 1);
   const lease = { stepId: step.stepId, attemptId: claim.attemptId, fence: claim.fence };
   await command("StartStep", lease, 1);
   return lease;
 }
-const legacyLease = await createRunningStep(legacyPlan, "Legacy worktree report");
+const legacyLease = await createRunningStep(legacyPlan, "Historical prose report");
 now += 60000;
 await command("RecordStepResult", { ...legacyLease, outcome: "DONE", summary: "Synthetic prose report without source evidence" }, 2);
 await command("PausePlan", { planId: legacyPlan }, 1);
 const snapshotLease = await createRunningStep(snapshotPlan, "Snapshot source result");
 now += 60000;
-sqlite.prepare("INSERT INTO repositories(owner_id,repository_id,full_name,is_private,default_branch,access_state,selected,updated_at) VALUES(?, 'fixture-repo','fixture/source',1,'main','available',1,?)").run(owner, now);
-sqlite.prepare("INSERT INTO plan_repositories(owner_id,plan_id,repository_id,selected_ref) VALUES(?,?,'fixture-repo','main')").run(owner, snapshotPlan);
-const artifactDir = resolve(process.env.UI_ACCEPTANCE_ARTIFACT_DIR || "/tmp/tracker-worktree-browser", "worktree");
+const artifactDir = resolve(process.env.UI_ACCEPTANCE_ARTIFACT_DIR || "/tmp/tracker-source-browser", "source");
 mkdirSync(artifactDir, { recursive: true });
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE || "/usr/bin/chromium", headless: true, args: ["--no-sandbox"] });
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
@@ -67,6 +65,8 @@ await page.route("**/*", async route => {
 try {
   await page.goto(origin);
   await page.locator('#plans[data-loaded="true"]').waitFor({ state: "attached" });
+  assert.equal(await page.getByRole("button",{name:"Репозитории",exact:true}).count(),0);
+  assert.equal(await page.locator('#repoIds,#sync,#repos,#overviewRepo,#planRepo,#analyticsRepo').count(),0);
   await page.locator('.nav [data-view="plans"]').click();
   const count = posts.length;
   const legacyRow = page.locator('#plans [data-plan-id="' + legacyPlan + '"]');
@@ -91,16 +91,13 @@ try {
   const card = page.locator('.tracker-card[data-step-id="' + snapshotLease.stepId + '"]');
   const resultForm = card.locator('[data-tracker-form^="result:"]');
   await resultForm.locator("textarea").fill("Synthetic snapshot result");
-  await resultForm.locator('[data-draft-field="Repository ID результата (если есть)"]').fill("fixture-repo");
-  await resultForm.locator('[data-draft-field="Digest снимка рабочего дерева (вместо commit SHA)"]').fill(digest);
-  await resultForm.locator('[data-draft-field="Baseline SHA снимка (только контекст)"]').fill(baseline);
+  await resultForm.locator('[data-draft-field="Digest снимка файлов"]').fill(digest);
   await resultForm.getByRole("button", { name: "Записать результат", exact: true }).click();
   await card.locator('[data-tracker-form^="check:"]').first().waitFor();
   const recorded = posts.find(post => post.body?.commandType === "RecordStepResult").body.payload;
   assert.equal(recorded.revisionSha, undefined);
-  assert.equal(recorded.worktreeSnapshot.digest, digest);
-  assert.equal(recorded.worktreeSnapshot.baseRevisionSha, baseline);
-  assert.match(await card.innerText(), /commit и публикация не подтверждены/);
+  assert.deepEqual(recorded.sourceSnapshot, {kind:"SOURCE_SNAPSHOT",formatVersion:2,digest});
+  assert.match(await card.innerText(), /Снимок файлов/);
   for (const key of requiredChecks) {
     const checkForm = card.locator('[data-tracker-form="check:' + snapshotLease.stepId + ':1:' + key + '"]');
     await checkForm.locator("textarea").fill("Synthetic fixture check evidence");
@@ -135,16 +132,6 @@ try {
     widths.push({ width, overflow });
     await page.screenshot({ path: resolve(artifactDir, "snapshot-ready-" + width + ".png"), fullPage: true });
   }
-  // Check private evidence after revocation, while keeping authoritative readiness.
-  sqlite.prepare("UPDATE repositories SET access_state='revoked' WHERE repository_id='fixture-repo'").run();
-  await page.reload();
-  await page.locator('.nav [data-view="plans"]').click();
-  await page.locator('#plans [data-plan-id="' + snapshotPlan + '"] .plan-open').click();
-  await card.locator(".tracker-card-summary").waitFor();
-  assert.match(await card.locator(".tracker-card-summary").innerText(), /4\/4.*Готов к завершению/);
-  assert.equal(await card.locator('[data-tracker-form^="check:"]').count(), 0);
-  assert(!(await card.innerText()).includes(digest));
-  assert(!(await card.innerText()).includes(baseline));
   const beforeFinish = posts.length;
   await page.locator('#planDetail>.plan-completion-actions').getByRole("button", { name: "Завершить", exact: true }).click();
   assert.equal(posts.length, beforeFinish, "cancelled normal finish sends no command");
@@ -155,8 +142,10 @@ try {
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM work_intervals WHERE plan_id=? AND end_ms IS NULL").get(snapshotPlan).n, 0);
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM commits").get().n, 0);
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM tracker_finish_exceptions").get().n, 0);
+  assert(!posts.some(post=>/Repository|Commit/.test(post.body.commandType)));
+  assert(!posts.some(post=>/repositoryId|commitPolicy|pushPolicy|revisionSha|testedSha/.test(JSON.stringify(post.body))));
   assert.deepEqual(errors, []);
-  const report = { passed: true, backend: "actual Worker + in-memory migrated SQLite", productionRequests: 0, widths, commands: posts.map(post => post.body.commandType), checks: ["source-less legacy block", "consistent badges and conditions", "snapshot result and checks", "private redaction", "cancel normal/exception", "double-click finish", "no commit", "closed timer"] };
+  const report = { passed: true, backend: "actual Worker + in-memory migrated SQLite", productionRequests: 0, widths, commands: posts.map(post => post.body.commandType), checks: ["source-less legacy block", "consistent badges and conditions", "snapshot result and checks", "repository-free evidence", "cancel normal/exception", "double-click finish", "no Git prerequisite", "closed timer"] };
   writeFileSync(resolve(artifactDir, "report.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report));
 } catch (error) { console.error(JSON.stringify({fixturePageErrors:errors,rows:await page.locator("#plans").innerHTML(),toast:await page.locator("#toast").innerText(),detail:(await page.locator("#planDetail").innerText()).slice(0,300)}));throw error; } finally { await browser.close(); sqlite.close(); }

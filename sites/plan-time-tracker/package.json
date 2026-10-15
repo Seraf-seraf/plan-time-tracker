@@ -7,6 +7,6 @@
     "validate": "node scripts/validate-artifact.mjs",
     "pretest": "npm run build",
     "test": "node --test test/*.test.js",
-    "test:ui": "node test/ui-acceptance.mjs && node test/ui-worktree.mjs"
+    "test:ui": "node test/ui-acceptance.mjs && node test/ui-worktree.mjs && node test/ui-recovery.mjs"
   }
 }

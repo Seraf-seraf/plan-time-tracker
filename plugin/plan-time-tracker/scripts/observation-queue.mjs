@@ -19,9 +19,6 @@ const EVENT_DATA_KEYS = {
   turn_finished: ["turnId", "status"],
   tool_started: ["operationId", "toolName"],
   tool_finished: ["operationId", "toolName", "status", "durationMs"],
-  commit_created: ["repositoryId", "revisionSha", "ref", "resultRevision"],
-  commit_pushed: ["repositoryId", "revisionSha", "ref"],
-  push_failed: ["repositoryId", "revisionSha", "ref", "reason"],
   heartbeat: [],
   gap: [],
   correction: ["reason"],
@@ -29,8 +26,6 @@ const EVENT_DATA_KEYS = {
 const EVENT_REQUIRED_KEYS = {
   turn_started: ["turnId"], turn_finished: ["turnId", "status"],
   tool_started: ["operationId", "toolName"], tool_finished: ["operationId", "toolName", "status"],
-  commit_created: ["repositoryId", "revisionSha", "resultRevision"],
-  commit_pushed: ["repositoryId", "revisionSha"], push_failed: ["repositoryId", "revisionSha", "reason"],
   heartbeat: [], gap: [], correction: ["reason"],
 };
 const SECRET_LIKE = /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|Bearer\s+[A-Za-z0-9._~+/-]{16,})/i;
@@ -39,14 +34,14 @@ function sha256(value) {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function validateScope(ownerScope, repositoryContext) {
+function validateScope(ownerScope, planContext) {
   if (typeof ownerScope !== "string" || !/^[a-f0-9]{64}$/i.test(ownerScope)) {
     throw new Error("ownerScope must come from authenticated GetTrackerCapabilities.");
   }
-  const repositoryContextPattern = /^(?:[A-Za-z0-9_.:-]{1,128}|[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})$/;
-  if (typeof repositoryContext !== "string" || !repositoryContextPattern.test(repositoryContext) ||
-      /(?:token|secret|password|authorization)/i.test(repositoryContext)) {
-    throw new Error("repositoryContext must be a repository ID or owner/name without a URL or credentials.");
+  const planContextPattern = /^[A-Za-z0-9_.:-]{1,128}$/;
+  if (typeof planContext !== "string" || !planContextPattern.test(planContext) ||
+      /(?:token|secret|password|authorization)/i.test(planContext)) {
+    throw new Error("planContext must be a plan ID or local source label without a URL or credentials.");
   }
 }
 
@@ -65,15 +60,6 @@ function validateEventMetadata(payload) {
           (data.durationMs !== undefined && (!Number.isSafeInteger(data.durationMs) || data.durationMs < 0 || data.durationMs > 604800000)))) {
       throw new Error("Invalid tool_finished status or durationMs.");
     }
-  }
-  if (["commit_created", "commit_pushed", "push_failed"].includes(payload.eventType)) {
-    if (typeof data.repositoryId !== "string" || !data.repositoryId.trim() || data.repositoryId.length > 40 || !/^[a-f0-9]{40}$/i.test(data.revisionSha || "")) {
-      throw new Error("Git observation requires a repository ID and full SHA-1.");
-    }
-    if (data.ref !== undefined && (typeof data.ref !== "string" || !data.ref.trim() || data.ref.length > 255)) throw new Error("Invalid Git ref.");
-    if (data.resultRevision !== undefined && (!Number.isSafeInteger(data.resultRevision) || data.resultRevision < 1)) throw new Error("resultRevision must be a positive integer.");
-    if (payload.eventType === "commit_created" && (!payload.stepId || data.resultRevision === undefined)) throw new Error("commit_created requires a checkpoint and result revision.");
-    if (payload.eventType === "push_failed" && (typeof data.reason !== "string" || !data.reason.trim() || data.reason.length > 1000)) throw new Error("push_failed requires a bounded reason.");
   }
   if (payload.eventType === "correction" && (typeof data.reason !== "string" || !data.reason.trim() || data.reason.length > 1000)) {
     throw new Error("correction requires a bounded reason.");
@@ -137,13 +123,13 @@ function defaultStateDirectory() {
 }
 
 export class ObservationQueue {
-  constructor({ stateDirectory = defaultStateDirectory(), ownerScope, repositoryContext, now = Date.now, random = Math.random }) {
-    validateScope(ownerScope, repositoryContext);
+  constructor({ stateDirectory = defaultStateDirectory(), ownerScope, planContext, now = Date.now, random = Math.random }) {
+    validateScope(ownerScope, planContext);
     if (typeof stateDirectory !== "string" || !stateDirectory.startsWith("/")) throw new Error("stateDirectory must be absolute.");
     this.stateDirectory = stateDirectory;
     this.scopeHash = sha256("owner\0" + ownerScope);
-    this.repositoryHash = sha256("repository\0" + repositoryContext.toLowerCase());
-    this.filePath = join(stateDirectory, sha256(this.scopeHash + "\0" + this.repositoryHash) + ".json");
+    this.planHash = sha256("plan\0" + planContext);
+    this.filePath = join(stateDirectory, sha256(this.scopeHash + "\0" + this.planHash) + ".json");
     this.now = now;
     this.random = random;
   }
@@ -311,13 +297,13 @@ export class ObservationQueue {
   async readState() {
     try {
       const state = JSON.parse(await readFile(this.filePath, "utf8"));
-      if (state.schemaVersion !== 1 || state.scopeHash !== this.scopeHash || state.repositoryHash !== this.repositoryHash ||
+      if (state.schemaVersion !== 1 || state.scopeHash !== this.scopeHash || state.planHash !== this.planHash ||
           !Array.isArray(state.events) || !state.sequences || typeof state.sequences !== "object") {
         throw new Error("Local observation queue state has an unsupported schema or scope.");
       }
       return state;
     } catch (error) {
-      if (error.code === "ENOENT") return { schemaVersion: 1, scopeHash: this.scopeHash, repositoryHash: this.repositoryHash, events: [], sequences: {} };
+      if (error.code === "ENOENT") return { schemaVersion: 1, scopeHash: this.scopeHash, planHash: this.planHash, events: [], sequences: {} };
       throw error;
     }
   }

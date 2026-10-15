@@ -1,5 +1,7 @@
 # plan-time-tracker
 
+Time tracking uses explicit authenticated MCP commands and server work intervals. The current source removes Git integration from the product and uses repository-free file snapshots for check evidence. Historical records remain intact. This local change awaits review and publication.
+
 Application source and development instructions: [sites/plan-time-tracker](sites/plan-time-tracker/README.md).
 
 ## Codex CLI

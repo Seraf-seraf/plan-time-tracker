@@ -31,7 +31,7 @@ function envelope(sequence) {
 async function withQueue(run) {
   const stateDirectory = await mkdtemp(join(tmpdir(), "plan-time-tracker-queue-"));
   let now = 1800000000000;
-  const options = { stateDirectory, ownerScope: OWNER_SCOPE, repositoryContext: "example/project", now: () => now, random: () => 0.5 };
+  const options = { stateDirectory, ownerScope: OWNER_SCOPE, planContext: "plan-fixture", now: () => now, random: () => 0.5 };
   try {
     await run({ queue: new ObservationQueue(options), options, setNow: (value) => { now = value; } });
   } finally {
@@ -118,11 +118,11 @@ test("retry backoff grows exponentially with bounded positive jitter", async () 
   });
 });
 
-test("queue is owner and repository scoped, expires after seven days, and refuses lifecycle or secret payloads", async () => {
+test("queue is owner and plan scoped, expires after seven days, and refuses lifecycle or secret payloads", async () => {
   await withQueue(async ({ queue, options, setNow }) => {
     await queue.enqueue(envelope(1));
     const otherOwner = new ObservationQueue({ ...options, ownerScope: OTHER_OWNER_SCOPE });
-    const otherRepository = new ObservationQueue({ ...options, repositoryContext: "example/other" });
+    const otherRepository = new ObservationQueue({ ...options, planContext: "other-plan" });
     assert.equal((await otherOwner.next()).status, "EMPTY");
     assert.equal((await otherRepository.next()).status, "EMPTY");
 
@@ -200,7 +200,7 @@ test("event and durable-state caps are enforced at their exact boundaries", asyn
 test("CLI persists an observation without receiving or storing the authenticated owner identity", async () => {
   await withQueue(async ({ options }) => {
     const scriptPath = fileURLToPath(new URL("../scripts/observation-queue.mjs", import.meta.url));
-    const input = { stateDirectory: options.stateDirectory, ownerScope: OWNER_SCOPE, repositoryContext: "example/project", envelope: envelope(1) };
+    const input = { stateDirectory: options.stateDirectory, ownerScope: OWNER_SCOPE, planContext: "plan-fixture", envelope: envelope(1) };
     const enqueue = spawnSync(process.execPath, [scriptPath, "enqueue"], { input: JSON.stringify(input), encoding: "utf8" });
     assert.equal(enqueue.status, 0, enqueue.stderr);
     assert.equal(JSON.parse(enqueue.stdout).status, "QUEUED");
@@ -210,7 +210,7 @@ test("CLI persists an observation without receiving or storing the authenticated
   });
 });
 
-test("queue state uses private local permissions and stores only hashed owner/repository scope", async () => {
+test("queue state uses private local permissions and stores only hashed owner/plan scope", async () => {
   await withQueue(async ({ queue, options }) => {
     await queue.enqueue(envelope(1));
     const [directoryStat, fileStat, stored] = await Promise.all([
@@ -219,6 +219,6 @@ test("queue state uses private local permissions and stores only hashed owner/re
     assert.equal(directoryStat.mode & 0o777, 0o700);
     assert.equal(fileStat.mode & 0o777, 0o600);
     assert.equal(stored.includes(OWNER_SCOPE), false);
-    assert.equal(stored.includes(options.repositoryContext), false);
+    assert.equal(stored.includes(options.planContext), false);
   });
 });

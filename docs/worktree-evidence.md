@@ -1,74 +1,31 @@
-# Checkpoint result and check evidence
+# Source snapshots and current-result evidence
 
-The server owns readiness. A recorded `DONE` result is an execution outcome, not proof that required checks passed. Step version, result revision, commit SHA and snapshot digest have different meanings. Plan lifecycle and timer intervals remain independent of checkpoint attempts.
+This contract supersedes the earlier Git-dependent v1 workflow. Time is determined exclusively by explicit plan commands and server work intervals. MCP is the transport for intent and audit metadata; neither source activity nor observations drive lifecycle.
 
-Normal finish requires every step to be `DONE`, have a current `DONE` result, have no `OPEN` attempt, and have the latest server-sequence check for every required key `PASSED` for that exact result revision and source identity. A later `FAILED` or `NOT_RUN` invalidates an earlier pass even at the same timestamp. Rework, a new result, and requirement changes never inherit readiness. An empty required-check list adds no source requirement.
+## Repository-free source v2
 
-## Source identities
+`RecordStepResult` accepts `sourceSnapshot: {kind:"SOURCE_SNAPSHOT",formatVersion:2,digest:"sha256:<64 lowercase hex>"}`. No repository identifier, baseline or commit field is accepted. Source-less reports remain possible, but cannot satisfy required checks.
 
-Existing commit inputs are preserved: `RecordStepResult.payload.repositoryId` and `revisionSha` are supplied together. `RecordCheck.payload.testedSha` must equal that result's full SHA. The server records client evidence; it does not execute tests, verify Git bytes, create commits or prove publication. Clients must check the actual source identity honestly.
+Run `plugin/plan-time-tracker/scripts/source-snapshot.mjs <source-directory>` with source writers stopped. Repeat with `--expect <digest>` immediately before and after every check. A mismatch requires fresh result attribution and rerunning affected checks. The helper does not execute tests, freeze files or prove provenance; the client must report truthfully. It works in ordinary directories with no Git installation.
 
-For uncommitted source, supply this mutually exclusive result input:
+Version 2 hashes a domain separator, explicit exclusion policy, UTF-8 relative paths in byte order, regular/symlink file kind, executable mode and SHA-256 of bytes or symlink targets. Symlinks are never followed. Deletions, new/renamed paths, contents, executable changes and target changes affect the identity. Invalid UTF-8 names and special files are refused. Two captures must match. Missing/inaccessible files produce a sanitized failure rather than partial evidence.
 
-```json
-{
-  "worktreeSnapshot": {
-    "kind": "WORKTREE_SNAPSHOT",
-    "repositoryId": "<attached repository ID>",
-    "formatVersion": 1,
-    "digest": "sha256:<64 lowercase hex characters>",
-    "baseRevisionSha": "<optional full HEAD SHA; context only>"
-  }
-}
-```
+Default excluded path segments at any depth: `.git`, `.hg`, `.svn`, `node_modules`, `.venv`, `venv`, `__pycache__`, `.next`, `dist`, `build`, `coverage`, `.cache`, `.wrangler`. `.env` and `.env.*` names are excluded. These environment, dependency and generated inputs are separate check context. Ignore files do not determine source scope. For custom outputs create `.tracker-snapshot.json` with only `{"exclude":["relative/output-directory"]}` (up to 100 exact relative paths). No absolute/parent paths, wildcard matching or excluding the configuration itself. The configuration bytes and policy are part of the identity. Keep test logs/screenshots/queue files outside the source root or exclude them before capture. Do not exclude relevant source inputs.
 
-Record a check with `testedSnapshotDigest` equal to that digest, and no `testedSha`. Both check modes retain the existing status/exit-code rules: `PASSED` requires exit 0, `FAILED` requires 1–255, `NOT_RUN` has no exit code. Checks may be appended to historical results, but only checks for the current result affect readiness. Do not use a SHA-256 value in a commit-SHA field or use baseline SHA for dirty-tree checks.
+The local helper returns `fileCount` for diagnostics; omit it from the strict API source object. A format-v2 digest cannot be substituted for historical v1 evidence even if source bytes happen to match: the domain and source-scope rules differ.
 
-A source-less result remains recordable as a truthful report. It cannot satisfy required checks. Migration 0014 does not infer source identities or passing checks from old summaries. Old result/check/approval/receipt history stays immutable. A new source requires a new result through an explicitly authorized attempt; a completed step needs owner-assigned rework. Never silently resume a paused plan or rewrite an old result to attach evidence after the fact.
+## Checks and completion
 
-## Capture and verify source contents
+Checks name `stepId`, `resultRevision`, `checkKey`, `status` and matching `testedSnapshotDigest`. PASSED requires exit 0; FAILED requires 1–255; NOT_RUN omits exitCode. Historical checks may be appended as audit, but only checks for the current result count. The latest server sequence wins at equal timestamps. Every new result revision needs new check records even if digest is unchanged. Rework/open attempts and newly required keys also invalidate finish readiness.
 
-The plugin's `scripts/worktree-snapshot.mjs` runs locally without network access or Git mutations:
+Use authoritative `readyToFinish`, `readinessBlockers`, `currentChecks.server_sequence` and `matchesCurrentResult`; never infer from display order, a result marked DONE or a prior pass. Required-check-free results need no source. Normal Finish requires all steps ready; the explicit allowIncomplete exception records a reason without changing checks. Plan Finish always requires separate user intent.
 
-```sh
-node /path/to/plugin/scripts/worktree-snapshot.mjs /path/to/repository
-node /path/to/plugin/scripts/worktree-snapshot.mjs /path/to/repository --expect sha256:<digest>
-```
+## Historical compatibility
 
-V1 hashes the bytes of every tracked and non-ignored untracked regular file, executable mode, raw path bytes, and symlink target bytes, in byte-sorted path order with length-prefixed fields and the `plan-time-tracker.worktree.v1` domain prefix. Absent tracked files contribute no entry. HEAD and staging metadata are not hashed. Submodules, nested repositories represented as directories and special files are refused. Ignored dependencies, generated outputs, environment variables, databases and runtime state are outside this **source** identity; describe relevant environment and actual check commands in evidence. The digest does not assert that these external inputs are immutable.
+Migration 0015 retains every historical row and receipt. Existing COMMIT and WORKTREE_SNAPSHOT v1 evidence keeps its internal exact-identity/readiness semantics and protected-source redaction. Public reads show a historical source label; permitted old snapshot digests remain available for their checks, while repository/SHA controls are removed. No old prose report is auto-attested. No new result can use the legacy Git fields. A historical COMMIT needing rework must get a new authorized attempt/result and v2 snapshot; existing passes are not copied.
 
-The helper reads twice and refuses an unstable capture. Its output contains `kind`, `formatVersion`, `digest`, optional `baseRevisionSha`, and a local `fileCount`. Copy the first four fields into `worktreeSnapshot`, add the attached `repositoryId`, and omit `fileCount` from the API payload. It prints no source content, path manifest or Git stderr.
+Old Git commands and routes refuse before mutation, including receipt replay. The source repository and `.git` are not removed. Historical database tables remain for audit and compatibility, without synchronization or cache-deletion endpoints.
 
-Stop source writers, capture before checks and verify the same digest immediately before and after each check. Record only actual outcomes for that unchanged source. If content changes, stop attribution, capture the new source and rerun affected checks; do not reuse a previous pass. The helper checks identity; it does not freeze the tree or execute tests. Concurrent writers or inability to capture reliably are explicit limitations, not permission to invent evidence.
+## Verification boundaries
 
-Commit/push policy `NEVER` remains compatible with snapshot checks and never authorizes a commit. Snapshot checks do not establish commit creation, remote publication, ref membership or deployment. `commit_created` and `commit_pushed` observations remain separate from check evidence.
-
-## Read and authorization contract
-
-`GetPlan`, `GetActivePlan`, and HTTP plan summaries expose `completion.readyToFinish`, `incompleteStepCount`, and `trackerEnabled`. Snapshot steps expose authoritative `readyToFinish`, latest `currentChecks`, and `readinessBlockers`. Result `source_kind` is `COMMIT`, `WORKTREE_SNAPSHOT` or `NONE`; snapshot results expose `snapshot_digest`, `snapshot_format_version`, and optional `base_revision_sha`. Check `tested_snapshot_digest` and `tested_sha` are mutually exclusive. `matchesCurrentResult` is computed before redaction and must be respected even when protected identities are hidden.
-
-Owner/private-repository protections apply to result history, checks and timeline events. Revoked private access hides repository IDs, digests, baseline/tested SHAs and evidence URLs, without changing authoritative readiness. UI completion controls lead to unmet conditions when blocked. Collapsed cards keep the readiness summary and blocker list visible. Check history labels result revision and current-versus-historical records.
-
-API UI commands remain owner actions. MCP commands remain agent actions. Writing results requires a running plan and a valid started, fenced attempt. Agents record checks only while `RUNNING`; the owner UI can record actual check evidence on `PAUSED` or `COMPLETED` plans. Finishing is allowed from `RUNNING` or `PAUSED` only after separate explicit user intent. The owner exception needs `allowIncomplete: true` and a nonempty reason; it saves unmet conditions, not fictitious checks. Removed approval/waiver commands remain unsupported.
-
-## Regression matrix
-
-| Invariant | Verification |
-| --- | --- |
-| Four required checks, `NEVER`, no commit | Worker/SQLite snapshot evidence scenario and real browser flow |
-| Wrong/missing/mixed source identity | Payload validation, SQL mismatch rejection, immutable snapshot/check constraints |
-| Revision and requirement freshness | Rework/new digest/new revision/added required key; old checks retained but not current |
-| Latest server order | Same-timestamp later `FAILED` and `NOT_RUN` invalidate earlier pass |
-| Receipts and concurrency | Exact replay, changed-payload refusal, rollback on failure, simultaneous claims/start/finish, source result/check race tests |
-| Attempts and leases | Started-attempt requirement, expired/fenced/closed denial; live attempt blocks finish |
-| Pause/finish and exception | UI/MCP actor distinction, cancel sends no command, duplicate click writes once, owner reason required |
-| Private access and owner isolation | Snapshot/check/timeline redaction, authoritative readiness after revocation, foreign-owner denial |
-| Migration/history | Populated 0013→0014 upgrade preserves rows; no automatic conversion of old prose |
-| Client capture | Staged/unstaged/untracked/deleted bytes, executable mode, symlinks, deterministic digest, changed-source refusal, no commit/index mutations |
-| UI state and retries | Badge/count/source explanation, result revision labels, mobile layout, drafts/collapse, unknown outcomes, final receipts and cancellation |
-
-Local SQLite and intercepted browser tests do not emulate hosted D1 scheduling or Sites identity middleware. Publication is followed by read-only live MCP/UI verification; real plans are never finished and old checks are never fabricated for a smoke test.
-
-## Publication and rollback
-
-Deploy schema-only migration 0014 with the reviewed Worker bundle. Before activation, compare the published Site source with the GitHub base and preserve any independent changes. A failed upload may still leave the additive migration applied; it does not attest old reports. Once new snapshot evidence exists, rollback code must understand the new evidence views and fields. Do not reverse the migration or publish an older UI that reads only commit checks. Prefer a reviewed forward repair if necessary.
+Mandatory local suites exercise fresh and populated migrations, row preservation, exact replay, deduplication, stale digest/result refusal, same-timestamp invalidation, source-less gates, transaction rollback, timer concurrency, owner isolation and private historical redaction. Chromium suites use real Worker+SQLite through intercepted localhost routes and forbid production traffic. Helper tests run without Git or PATH executables. Passing these does not attest hosted D1, private Site authentication or installed MCP schemas.
