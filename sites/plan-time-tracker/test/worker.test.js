@@ -1032,6 +1032,14 @@ test("MCP tool schemas describe the supported required payloads for all writes",
   assert.deepEqual(sync.required,["fullName"]);
   assert.equal(sync.properties.authorGithubIds.maxItems,100);
   assert.equal(tools.UpdatePlanMetadata.properties.payload.anyOf.length,4);
+  const resultSource=tools.RecordStepResult.properties.payload.properties.worktreeSnapshot;
+  assert.equal(resultSource.properties.kind.const,"WORKTREE_SNAPSHOT");
+  assert.deepEqual(resultSource.required,["kind","repositoryId","digest","formatVersion"]);
+  const checkSource=tools.RecordCheck.properties.payload;
+  assert(!checkSource.required.includes("testedSha"),"snapshot clients must not be required to invent a commit SHA");
+  assert.equal(checkSource.anyOf.length,2);
+  assert(checkSource.properties.testedSnapshotDigest);
+
 });
 
 test("private UI response has no-store and does not interpolate untrusted database text as HTML", async () => {

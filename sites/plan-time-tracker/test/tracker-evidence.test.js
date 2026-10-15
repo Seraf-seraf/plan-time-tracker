@@ -56,7 +56,7 @@ async function request(c, commandType, payload, expectedVersion, id = commandId(
   return { status: response.status, value: await response.json() };
 }
 
-async function setupResult(c, requiredChecks = ["unit", "build"], revisionSha = SHA_A) {
+async function setupResult(c, requiredChecks = ["unit", "build"], revisionSha = SHA_A, commitPolicy = "ON_EXPLICIT_REQUEST") {
   const created = await request(c, "CreatePlan", {
     planId: PLAN_ID, title: "Evidence plan", planCreatedAt: { precision: "dateOnly", on: "2026-10-01", timeZone: "UTC" },
   });
@@ -67,7 +67,7 @@ async function setupResult(c, requiredChecks = ["unit", "build"], revisionSha = 
     .bind(OWNER, PLAN_ID, REPOSITORY_ID).run();
   const checkpoint = await request(c, "CreateStep", {
     planId: PLAN_ID, ordinal: 0, title: "Implement checkpoint", expectedResult: "A verified code change.",
-    requiredChecks, commitPolicy: "ON_EXPLICIT_REQUEST", pushPolicy: "NEVER",
+    requiredChecks, commitPolicy, pushPolicy: "NEVER",
   });
   assert.equal(checkpoint.status, 200);
   const stepId = checkpoint.value.result.stepId;
@@ -82,7 +82,7 @@ async function setupResult(c, requiredChecks = ["unit", "build"], revisionSha = 
   assert.equal((await request(c, "StartStep", { stepId, attemptId, fence }, 1)).status, 200);
   const recorded = await request(c, "RecordStepResult", {
     stepId, attemptId, fence, outcome: "DONE", summary: "Рабочий результат для проверки.",
-    ...(revisionSha ? { repositoryId: REPOSITORY_ID, revisionSha } : {}),
+    ...(typeof revisionSha === "object" && revisionSha ? { worktreeSnapshot: revisionSha } : revisionSha ? { repositoryId: REPOSITORY_ID, revisionSha } : {}),
   }, 2);
   assert.equal(recorded.status, 200);
   assert.equal(recorded.value.result.resultRevision, 1);
@@ -640,6 +640,10 @@ test("0013 populated upgrade preserves every historical row, receipt, active lea
     for (const table of ["plans", "work_intervals", "plan_events", "plan_date_history", "command_receipts", "plan_steps", "step_attempts", "step_results", "step_checks", "step_acceptances", "tracker_journal"]) assert.ok(before[table].length > 0, table);
     c.db.sqlite.exec(readFileSync(resolve(migrationDirectory, migrationName), "utf8"));
     assert.deepEqual(applicationRows(c), before, "the append-only migration changes no persisted application row");
+    // The current Worker requires all subsequent schema-only migrations too.
+    for (const name of migrations.slice(migrationIndex + 1)) c.db.sqlite.exec(readFileSync(resolve(migrationDirectory, name), "utf8"));
+    for (const [name, rows] of Object.entries(applicationRows(c))) if (!(name in before)) { assert.deepEqual(rows, []); before[name] = []; }
+    assert.deepEqual(applicationRows(c), before, "later additive migrations preserve all populated history");
     assert.deepEqual(c.db.sqlite.prepare("PRAGMA foreign_key_check").all(), []);
     assert.equal(c.db.sqlite.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
     assert.equal(c.db.sqlite.prepare("SELECT name FROM sqlite_master WHERE name='command_decide_step'").get(), undefined);
@@ -743,5 +747,240 @@ test("authoritative required-check summary survives history truncation and priva
     assert.equal(execution.steps[0].readyToFinish, true, "protected SHA redaction must not invalidate authoritative readiness");
     assert.equal(execution.steps[0].currentResult.revision_sha, null);
     assert.equal((await request(c, "FinishPlan", { planId: PLAN_ID }, 1)).status, 200);
+  } finally { c.db.sqlite.close(); }
+});
+
+const DIGEST_A = "sha256:" + "a".repeat(64);
+const DIGEST_B = "sha256:" + "b".repeat(64);
+const worktree = (digest = DIGEST_A) => ({ kind: "WORKTREE_SNAPSHOT", repositoryId: REPOSITORY_ID, digest, formatVersion: 1, baseRevisionSha: SHA_A });
+const snapshotCheck = (stepId, checkKey = "unit", extra = {}) => ({ stepId, resultRevision: 1, checkKey, status: "PASSED", testedSnapshotDigest: DIGEST_A, exitCode: 0, ...extra });
+async function rpc(c, name, args, owner = OWNER) {
+  const response = await c.worker.fetch(new Request("https://tracker.test/mcp", { method: "POST", headers: { "content-type": "application/json", "oai-authenticated-user-id": owner }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }) }), { DB: c.db });
+  return (await response.json()).result;
+}
+
+test("NEVER worktree results require four actual snapshot checks, never baseline SHA attestation", async () => {
+  const c = createContext();
+  try {
+    const step = await setupResult(c, ["unit", "postgres", "typecheck", "lint"], worktree(), "NEVER");
+    let execution = (await readTracker(c, "/api/tracker/plans/" + PLAN_ID + "/execution")).value;
+    const result = execution.steps[0].currentResult;
+    assert.equal(result.source_kind, "WORKTREE_SNAPSHOT");
+    assert.equal(result.revision_sha, null);
+    assert.equal(result.snapshot_digest, DIGEST_A);
+    assert.equal(result.base_revision_sha, SHA_A);
+    assert.equal(result.repository_id, REPOSITORY_ID);
+    assert.equal(execution.steps[0].status, "DONE");
+    assert.equal(execution.steps[0].readyToFinish, false);
+    assert.equal(execution.plan.completion.readyToFinish, false);
+    assert.equal(execution.plan.completion.incompleteStepCount, 1);
+    assert.equal((await recordCheck(c, step.stepId, "unit", "PASSED", SHA_A)).value.error.code, "RESULT_REVISION_STALE");
+    assert.equal((await request(c, "RecordCheck", snapshotCheck(step.stepId, "unit", { testedSnapshotDigest: DIGEST_B }))).value.error.code, "RESULT_REVISION_STALE");
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM tracker_check_evidence").get().n, 0);
+    for (const key of ["unit", "postgres", "typecheck"]) assert.equal((await request(c, "RecordCheck", snapshotCheck(step.stepId, key))).status, 200);
+    const state = applicationRows(c);
+    const refused = await request(c, "FinishPlan", { planId: PLAN_ID }, 1);
+    assert.equal(refused.value.error.code, "CHECKPOINTS_INCOMPLETE");
+    assert.deepEqual(applicationRows(c).work_intervals, state.work_intervals);
+    const checkId = commandId(), payload = snapshotCheck(step.stepId, "lint");
+    const saved = await request(c, "RecordCheck", payload, undefined, checkId);
+    assert.equal(saved.status, 200);
+    assert.equal((await request(c, "RecordCheck", payload, undefined, checkId)).value.replayed, true);
+    assert.equal((await request(c, "RecordCheck", { ...payload, testedSnapshotDigest: DIGEST_B }, undefined, checkId)).value.error.code, "IDEMPOTENCY_KEY_REUSED");
+    execution = (await readTracker(c, "/api/tracker/plans/" + PLAN_ID + "/execution")).value;
+    assert.equal(execution.steps[0].readyToFinish, true);
+    assert(execution.steps[0].currentChecks.every(check => check.tested_sha === null && check.tested_snapshot_digest === DIGEST_A && check.matchesCurrentResult));
+    assert.equal(execution.steps[0].version, 3);
+    assert.deepEqual(execution.steps[0].readinessBlockers, []);
+    assert.equal((await rpc(c, "GetPlan", { planId: PLAN_ID })).structuredContent.completion.readyToFinish, true);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM step_checks").get().n, 0);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM commits").get().n, 0);
+    assert.equal((await request(c, "FinishPlan", { planId: PLAN_ID }, 1)).status, 200);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM tracker_finish_exceptions").get().n, 0);
+  } finally { c.db.sqlite.close(); }
+});
+
+test("snapshot validation refuses missing, mixed, malformed and mismatched evidence without mutations", async () => {
+  const c = createContext();
+  try {
+    const active = await createRunningAttempt(c);
+    c.db.sqlite.prepare("INSERT INTO repositories(owner_id,repository_id,full_name,is_private,default_branch,access_state,selected,updated_at) VALUES(?,?,?,0,'main','available',1,?)").run(OWNER, REPOSITORY_ID, "fixture/snapshot", c.now());
+    const base = { ...active, outcome: "DONE", summary: "A real working tree result", worktreeSnapshot: worktree() };
+    for (const source of [{ ...worktree(), digest: SHA_A }, { ...worktree(), digest: DIGEST_A + "\n" }, { ...worktree(), digest: [DIGEST_A] }, { ...worktree(), baseRevisionSha: [SHA_A] }, { ...worktree(), digest: "sha256:" + "A".repeat(64) }, { ...worktree(), kind: "COMMIT" }, { ...worktree(), formatVersion: 2 }, { ...worktree(), repositoryId: "" }, { ...worktree(), baseRevisionSha: "invalid" }, { ...worktree(), extra: "unsupported" }]) {
+      assert.equal((await request(c, "RecordStepResult", { ...base, worktreeSnapshot: source }, 2)).status, 400);
+    }
+    assert.equal((await request(c, "RecordStepResult", { ...base, repositoryId: REPOSITORY_ID, revisionSha: SHA_A }, 2)).status, 400);
+    const unattached = await request(c, "RecordStepResult", base, 2);
+    assert.equal(unattached.value.error.code, "REPOSITORY_NOT_ATTACHED");
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM step_result_snapshots").get().n, 0);
+    c.db.sqlite.prepare("INSERT INTO plan_repositories(owner_id,plan_id,repository_id,selected_ref) VALUES(?,?,?,'main')").run(OWNER, PLAN_ID, REPOSITORY_ID);
+    assert.equal((await request(c, "RecordStepResult", base, 2)).status, 200);
+    const payload = snapshotCheck(active.stepId);
+    for (const invalid of [{ ...payload, testedSha: SHA_A }, { ...payload, testedSnapshotDigest: undefined }, { ...payload, testedSnapshotDigest: "invalid" }, { ...payload, exitCode: 1 }]) {
+      assert.equal((await request(c, "RecordCheck", invalid)).status, 400);
+    }
+    assert.equal((await request(c, "RecordCheck", payload)).status, 200);
+    assert.throws(() => c.db.sqlite.prepare("UPDATE step_result_snapshots SET snapshot_digest=?").run(DIGEST_B), /IMMUTABLE/);
+    assert.throws(() => c.db.sqlite.exec("DELETE FROM step_result_snapshots"), /IMMUTABLE/);
+    assert.throws(() => c.db.sqlite.exec("UPDATE step_snapshot_checks SET status='FAILED'"), /IMMUTABLE/);
+    assert.throws(() => c.db.sqlite.exec("DELETE FROM step_snapshot_checks"), /IMMUTABLE/);
+    assert.deepEqual(c.db.sqlite.prepare("PRAGMA foreign_key_check").all(), []);
+  } finally { c.db.sqlite.close(); }
+});
+
+test("snapshot latest FAILED and NOT_RUN invalidate earlier PASS by server order even at the same timestamp", async () => {
+  for (const status of ["FAILED", "NOT_RUN"]) {
+    const c = createContext();
+    try {
+      const step = await setupResult(c, ["unit"], worktree(), "NEVER");
+      assert.equal((await request(c, "RecordCheck", snapshotCheck(step.stepId))).status, 200);
+      assert.equal((await request(c, "RecordCheck", snapshotCheck(step.stepId, "unit", { status, exitCode: status === "FAILED" ? 1 : undefined }))).status, 200);
+      const execution = (await readTracker(c, "/api/tracker/plans/" + PLAN_ID + "/execution")).value;
+      assert.equal(execution.steps[0].status, "DONE");
+      assert.equal(execution.steps[0].readyToFinish, false);
+      assert.equal(execution.steps[0].currentChecks[0].status, status);
+      assert(execution.steps[0].checks[0].server_sequence > execution.steps[0].checks[1].server_sequence);
+      assert.equal((await request(c, "FinishPlan", { planId: PLAN_ID }, 1)).value.error.code, "CHECKPOINTS_INCOMPLETE");
+    } finally { c.db.sqlite.close(); }
+  }
+});
+
+test("snapshot checks remain result-scoped across rework, changed content and added requirements", async () => {
+  const c = createContext();
+  try {
+    const step = await setupResult(c, ["unit"], worktree());
+    await request(c, "RecordCheck", snapshotCheck(step.stepId));
+    const claim = await request(c, "ClaimStepAttempt", { stepId: step.stepId, sessionId: commandId(), sourceId: "snapshot-rework", reworkReason: "Owner requests changed source" }, 3);
+    assert.equal(claim.status, 200);
+    assert.equal((await readTracker(c, "/api/tracker/plans/" + PLAN_ID + "/execution")).value.steps[0].readyToFinish, false);
+    const lease = { stepId: step.stepId, attemptId: claim.value.result.attemptId, fence: claim.value.result.fence };
+    assert.equal((await request(c, "StartStep", { ...lease, rework: true, reason: "Owner requests changed source" }, 3)).status, 200);
+    assert.equal((await request(c, "RecordStepResult", { ...lease, outcome: "DONE", summary: "Changed content", worktreeSnapshot: worktree(DIGEST_B) }, 4)).status, 200);
+    assert.equal((await request(c, "RecordCheck", snapshotCheck(step.stepId, "unit", { resultRevision: 2 }))).value.error.code, "RESULT_REVISION_STALE");
+    assert.equal((await request(c, "RecordCheck", snapshotCheck(step.stepId))).status, 200, "historical checks remain appendable, never current");
+    let execution = (await readTracker(c, "/api/tracker/plans/" + PLAN_ID + "/execution")).value;
+    assert.deepEqual(execution.steps[0].currentChecks, []);
+    assert.equal(execution.steps[0].readyToFinish, false);
+    assert.equal((await request(c, "RecordCheck", snapshotCheck(step.stepId, "unit", { resultRevision: 2, testedSnapshotDigest: DIGEST_B }))).status, 200);
+    assert.equal((await request(c, "UpdateStep", { stepId: step.stepId, changes: { requiredChecks: ["unit", "lint"] }, reason: "Explicit requirement change" }, 5)).status, 200);
+    execution = (await readTracker(c, "/api/tracker/plans/" + PLAN_ID + "/execution")).value;
+    assert.equal(execution.steps[0].currentResult, null);
+    assert.equal(execution.steps[0].resultHistory.length, 2);
+    assert.equal(execution.steps[0].readyToFinish, false);
+  } finally { c.db.sqlite.close(); }
+});
+
+test("snapshot pause permissions, owner exception and owner isolation preserve evidence meaning", async () => {
+  const c = createContext();
+  try {
+    const step = await setupResult(c, ["unit", "lint"], worktree(), "NEVER");
+    assert.equal((await request(c, "PausePlan", { planId: PLAN_ID }, 1)).status, 200);
+    const args = { schemaVersion: 1, commandId: commandId(), payload: snapshotCheck(step.stepId) };
+    assert.equal((await rpc(c, "RecordCheck", args)).structuredContent.code, "PLAN_PAUSED");
+    assert.equal((await rpc(c, "GetPlanExecutionSnapshot", { planId: PLAN_ID }, "other-owner")).structuredContent.code, "PLAN_NOT_FOUND");
+    assert.equal((await request(c, "RecordCheck", snapshotCheck(step.stepId))).status, 200, "owner UI may record actual evidence on pause");
+    assert.equal((await request(c, "FinishPlan", { planId: PLAN_ID, allowIncomplete: true, reason: "" }, 2)).status, 400);
+    const finish = await request(c, "FinishPlan", { planId: PLAN_ID, allowIncomplete: true, reason: "Owner explicitly accepts missing lint" }, 2);
+    assert.equal(finish.status, 200);
+    const exception = c.db.sqlite.prepare("SELECT * FROM tracker_finish_exceptions").get();
+    assert.equal(JSON.parse(exception.snapshot_json)[0].stepId, step.stepId);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM tracker_check_evidence WHERE check_key='lint'").get().n, 0);
+    assert.equal((await readTracker(c, "/api/tracker/plans/" + PLAN_ID + "/execution")).value.steps[0].readyToFinish, false);
+  } finally { c.db.sqlite.close(); }
+});
+
+test("snapshot required checks survive bounded history and private revocation redacts every read surface", async () => {
+  const c = createContext();
+  try {
+    const step = await setupResult(c, ["unit"], worktree());
+    assert.equal((await request(c, "RecordCheck", snapshotCheck(step.stepId))).status, 200);
+    for (let i = 0; i < 101; i++) assert.equal((await request(c, "RecordCheck", snapshotCheck(step.stepId, "optional-" + i))).status, 200);
+    c.db.sqlite.prepare("UPDATE repositories SET is_private=1,access_state='revoked' WHERE repository_id=?").run(REPOSITORY_ID);
+    const execution = (await readTracker(c, "/api/tracker/plans/" + PLAN_ID + "/execution")).value;
+    const item = execution.steps[0];
+    assert.equal(item.checks.length, 100);
+    assert.equal(item.currentChecks.length, 102);
+    assert.equal(item.currentChecks.find(check => check.check_key === "unit").matchesCurrentResult, true);
+    assert.equal(item.currentResult.snapshot_digest, null);
+    assert.equal(item.currentResult.base_revision_sha, null);
+    assert.equal(item.currentResult.repository_id, null);
+    assert(item.checks.every(check => check.tested_snapshot_digest === null));
+    assert.equal(item.readyToFinish, true);
+    const timeline = (await readTracker(c, "/api/tracker/plans/" + PLAN_ID + "/timeline?limit=100")).value;
+    assert(!JSON.stringify(timeline).includes(DIGEST_A));
+    assert(!JSON.stringify(timeline).includes(SHA_A));
+    assert.equal((await request(c, "FinishPlan", { planId: PLAN_ID }, 1)).status, 200);
+  } finally { c.db.sqlite.close(); }
+});
+
+test("0014 preserves populated history and cannot attest old source-less prose reports", async () => {
+  const index = migrations.indexOf("0014_worktree_snapshot_evidence.sql"), c = createContext(index);
+  try {
+    const step = await setupResult(c, ["unit", "postgres", "typecheck", "lint"], null, "NEVER");
+    const before = applicationRows(c);
+    c.db.sqlite.exec(readFileSync(resolve(migrationDirectory, migrations[index]), "utf8"));
+    const after = applicationRows(c);
+    for (const [name, rows] of Object.entries(before)) assert.deepEqual(after[name], rows, name);
+    assert.deepEqual(after.step_result_snapshots, []);
+    assert.deepEqual(after.step_snapshot_checks, []);
+    const execution = (await readTracker(c, "/api/tracker/plans/" + PLAN_ID + "/execution")).value;
+    assert.equal(execution.steps[0].currentResult.source_kind, "NONE");
+    assert.equal(execution.steps[0].readyToFinish, false);
+    assert(execution.steps[0].readinessBlockers.some(item => item.code === "RESULT_SOURCE_MISSING"));
+    assert.equal((await request(c, "RecordCheck", snapshotCheck(step.stepId))).value.error.code, "RESULT_REVISION_STALE");
+    assert.equal((await request(c, "FinishPlan", { planId: PLAN_ID }, 1)).value.error.code, "CHECKPOINTS_INCOMPLETE");
+    assert.deepEqual(c.db.sqlite.prepare("PRAGMA foreign_key_check").all(), []);
+  } finally { c.db.sqlite.close(); }
+});
+
+test("snapshot result and check commands keep atomic rollback, exact replay and lease guards", async () => {
+  const expired = createContext();
+  try {
+    const lease = await createExpiredAttempt(expired);
+    const rejected = await request(expired, "RecordStepResult", { ...lease, outcome: "DONE", summary: "Expired snapshot", worktreeSnapshot: worktree() }, 2);
+    assert.equal(rejected.value.error.code, "LEASE_EXPIRED");
+    assert.equal(expired.db.sqlite.prepare("SELECT COUNT(*) AS n FROM step_result_snapshots").get().n, 0);
+    assert.equal(expired.db.sqlite.prepare("SELECT COUNT(*) AS n FROM step_results").get().n, 0);
+  } finally { expired.db.sqlite.close(); }
+  const c = createContext();
+  try {
+    const lease = await createRunningAttempt(c);
+    c.db.sqlite.prepare("INSERT INTO repositories(owner_id,repository_id,full_name,is_private,default_branch,access_state,selected,updated_at) VALUES(?,?,?,0,'main','available',1,?)").run(OWNER, REPOSITORY_ID, "fixture/atomic", c.now());
+    c.db.sqlite.prepare("INSERT INTO plan_repositories(owner_id,plan_id,repository_id,selected_ref) VALUES(?,?,?,'main')").run(OWNER, PLAN_ID, REPOSITORY_ID);
+    const payload = { ...lease, outcome: "DONE", summary: "Atomic snapshot", worktreeSnapshot: worktree() }, id = commandId();
+    c.db.sqlite.exec("CREATE TRIGGER fixture_snapshot_fail BEFORE INSERT ON step_result_snapshots BEGIN SELECT RAISE(ABORT,'FIXTURE_FAILURE'); END");
+    const before = applicationRows(c);
+    assert((await request(c, "RecordStepResult", payload, 2, id)).status >= 400);
+    assert.deepEqual(applicationRows(c), before, "snapshot insert failure rolls back result, attempt, receipt and journal together");
+    c.db.sqlite.exec("DROP TRIGGER fixture_snapshot_fail");
+    const concurrent = await Promise.all([request(c, "RecordStepResult", payload, 2, id), request(c, "RecordStepResult", payload, 2, id)]);
+    assert(concurrent.every(result => result.status === 200));
+    assert.equal(concurrent.filter(result => result.value.replayed).length, 1);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM step_result_snapshots").get().n, 1);
+    c.db.sqlite.exec("CREATE TRIGGER fixture_check_fail BEFORE INSERT ON step_snapshot_checks BEGIN SELECT RAISE(ABORT,'FIXTURE_FAILURE'); END");
+    const beforeCheck = applicationRows(c), checkId = commandId();
+    assert((await request(c, "RecordCheck", snapshotCheck(lease.stepId), undefined, checkId)).status >= 400);
+    assert.deepEqual(applicationRows(c), beforeCheck, "snapshot check insert failure rolls back its receipt and journal event");
+    c.db.sqlite.exec("DROP TRIGGER fixture_check_fail");
+    const recorded = await rpc(c, "RecordCheck", { schemaVersion: 1, commandId: checkId, payload: snapshotCheck(lease.stepId) });
+    assert.equal(recorded.structuredContent.outcome, "OK", "new snapshot mode works through MCP, not only UI/API");
+    const read = await rpc(c, "GetPlanExecutionSnapshot", { planId: PLAN_ID });
+    assert.equal(read.structuredContent.steps[0].currentChecks[0].tested_sha, null);
+  } finally { c.db.sqlite.close(); }
+});
+
+test("concurrent snapshot check and Finish cannot bypass the canonical gate or double-close the timer", async () => {
+  const c = createContext();
+  try {
+    const step = await setupResult(c, ["unit"], worktree(), "NEVER");
+    const [check, finish] = await Promise.all([request(c, "RecordCheck", snapshotCheck(step.stepId)), request(c, "FinishPlan", { planId: PLAN_ID }, 1)]);
+    assert.equal(check.status, 200);
+    if (finish.status !== 200) {
+      assert.equal(finish.value.error.code, "CHECKPOINTS_INCOMPLETE");
+      assert.equal((await request(c, "FinishPlan", { planId: PLAN_ID }, 1)).status, 200);
+    }
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM plan_events WHERE event_type='FINISHED'").get().n, 1);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM work_intervals WHERE end_ms IS NULL").get().n, 0);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM tracker_finish_exceptions").get().n, 0);
   } finally { c.db.sqlite.close(); }
 });

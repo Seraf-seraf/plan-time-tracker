@@ -27,3 +27,5 @@ node --test test/attach-plan-repository.test.js test/tracker-evidence.test.js te
 ```
 
 These database tests apply canonical migrations to isolated temporary SQLite, including populated upgrades that retain historical decision receipts and rows as inert audit data. Normal finish is verified against current results and the latest required checks by server sequence. Removed owner-decision commands must fail without mutations. Browser API responses remain synthetic: a passing DOM runner does not establish hosted D1 behavior or private Site authentication.
+
+For worktree evidence, also run `node test/ui-worktree.mjs` with the same Playwright and Chromium environment. `npm run test:ui` runs both suites. This suite uses the real Worker and migrated in-memory SQLite through intercepted localhost requests. It writes evidence under `UI_ACCEPTANCE_ARTIFACT_DIR/worktree` (or `/tmp/tracker-worktree-browser/worktree`) and never contacts production. Run the plugin capture/queue tests separately with `node --test plugin/plan-time-tracker/test/*.test.mjs` from the repository root.

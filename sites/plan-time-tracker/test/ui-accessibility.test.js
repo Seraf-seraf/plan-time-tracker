@@ -38,7 +38,7 @@ test('checkpoint actions keep a scoped gap after result forms and details',async
 
 test('checkpoint UI separates timer, attempt, current result/check readiness, and finish exception',async()=>{
   const source=await html();
-  for(const marker of ['Контрольные этапы','expected_result','requiredChecks','commit_policy','push_policy','ClaimStepAttempt','StartStep','BlockStep','RecordStepResult','RecordCheck','RenewStepLease','FinishPlan','allowIncomplete:true','Останутся незакрытыми','Попытки','step.readyToFinish','step.currentChecks','check.matchesCurrentResult','aria-controls','aria-expanded','toggle.type="button"'])assert(source.includes(marker),marker);
+  for(const marker of ['Контрольные этапы','expected_result','requiredChecks','commit_policy','push_policy','ClaimStepAttempt','StartStep','BlockStep','RecordStepResult','RecordCheck','RenewStepLease','FinishPlan','allowIncomplete:true','Условия завершения не выполнены','Попытки','step.readyToFinish','step.currentChecks','check.matchesCurrentResult','aria-controls','aria-expanded','toggle.type="button"'])assert(source.includes(marker),marker);
   assert.equal((source.match(/setInterval\(/g)||[]).length,1,'the existing plan timer remains the only interval');
   for(const removed of ['AcceptStep','RejectStep','currentAcceptance','acceptanceCurrent','Waivers JSON'])assert(!source.includes(removed),removed);
   assert(!source.includes('AppendObservation'), 'UI observations do not drive lifecycle commands');
