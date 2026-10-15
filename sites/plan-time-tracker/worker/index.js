@@ -1085,7 +1085,7 @@ function renderStepChart(body,data) {
   if(!measured.length&&!hasAmbiguity)body.append(make("p","Данные о привязке времени к пунктам отсутствуют. Знак «—» означает отсутствие данных.","muted"));
   else if(!hasAmbiguity&&measured.length!==data.steps.length)body.append(make("p","«—» — нет данных о привязке времени.","muted"));
   const chart=make("div",null,"step-chart"),frame=make("div",null,"step-chart-frame"),axis=make("div",null,"step-y-axis"),scroll=make("div",null,"step-chart-scroll"),columns=make("div",null,"step-columns");
-  chart.append(make("div","Минуты · от нуля","step-minutes"));
+  chart.append(make("div","Минуты","step-minutes"));
   const maxMinutes=measured.reduce((max,s)=>Math.max(max,s.activeMs/60000),0),rawTick=maxMinutes/5,magnitude=Math.pow(10,Math.floor(Math.log10(rawTick||0.2))),normalized=rawTick/magnitude,tick=(normalized<=1?1:normalized<=2?2:normalized<=5?5:10)*magnitude,ceiling=Math.max(1,tick*5);
   axis.setAttribute("aria-hidden","true");
   for(let i=0;i<=5;i++){const tick=make("span",new Intl.NumberFormat("ru-RU",{maximumFractionDigits:3}).format(ceiling*i/5));tick.style.bottom=(100*i/5)+"%";axis.append(tick);}
@@ -1107,7 +1107,7 @@ function renderStepChart(body,data) {
     button.addEventListener("focus",()=>show(button,step));button.addEventListener("blur",()=>{if(!window.matchMedia("(max-width:600px)").matches)hide();});
     button.addEventListener("click",()=>show(button,step));
   });
-  scroll.append(columns);frame.append(axis,scroll);chart.append(frame,tooltip,make("p","Пункты плана · в исходном порядке","step-axis-caption"));body.append(chart);
+  scroll.append(columns);frame.append(axis,scroll);chart.append(frame,tooltip,make("p","Пункты плана","step-axis-caption"));body.append(chart);
   body.append(make("p","Полное название и точное время: наведите на столбик или подпись, выберите клавишей Tab или нажмите на телефоне. Escape скрывает подсказку.","muted"));
   const method=make("details",null,"step-method");method.append(make("summary","Как считается время"),make("p","Учитываются только интервалы активности плана в выбранные даты включительно, в указанном часовом поясе. Выполнение пункта подтверждается запуском и ограничено закрытием попытки или истечением её срока. Паузы исключены, все попытки суммируются. Время без однозначной привязки, в том числе пересечения разных пунктов, не распределяется. При полном перекрытии время пункта не определено («—»); при частичном отмечено «*» и показана только однозначная часть. 0 мин означает подтверждённое выполнение без учтённого времени и без пересечений в периоде. Срез ограничивает состав пунктов и учтённое время; названия и порядок показаны в текущей редакции. Медиана выше по-прежнему использует полное активное время планов, завершённых в периоде."));body.append(method);
 }
