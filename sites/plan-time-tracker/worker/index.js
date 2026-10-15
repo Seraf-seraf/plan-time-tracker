@@ -587,15 +587,17 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
     });
   }
   const actorType = channel === "mcp" ? "agent" : "user";
+  let receiptInserted = false;
   try {
-    await db.prepare("INSERT OR IGNORE INTO command_receipts (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?)")
+    const write = await db.prepare("INSERT OR IGNORE INTO command_receipts (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?)")
       .bind(identity.ownerId, envelope.commandId, hash, envelope.commandType, planId, envelope.expectedVersion == null ? null : envelope.expectedVersion, nowMs,
         identity.ownerId, actorType, JSON.stringify(payload), nowMs).run();
+    receiptInserted = Number(write.meta?.changes) > 0;
   } catch (error) { throw mapDbError(error); }
   receipt = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=?", identity.ownerId, envelope.commandId);
   if (!receipt) throw appError("INTERNAL_ERROR", "Не удалось сохранить результат tracker-команды.", 500);
   if (!await receiptMatchesCommand(receipt, envelope, hash)) throw appError("IDEMPOTENCY_KEY_REUSED", messageFor("IDEMPOTENCY_KEY_REUSED"), 409);
-  return resultFromReceipt(receipt, false);
+  return resultFromReceipt(receipt, !receiptInserted);
 }
 
 export async function executeCommand(db, identity, envelope, channel, nowMs) {
@@ -700,15 +702,17 @@ export async function executeCommand(db, identity, envelope, channel, nowMs) {
   }
 
   const actorType = channel === "mcp" ? "agent" : "user";
+  let receiptInserted = false;
   try {
-    await db.prepare("INSERT OR IGNORE INTO command_receipts (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?)")
+    const write = await db.prepare("INSERT OR IGNORE INTO command_receipts (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?)")
       .bind(identity.ownerId, envelope.commandId, hash, envelope.commandType, planId, envelope.expectedVersion == null ? null : envelope.expectedVersion,
         nowMs, identity.ownerId, actorType, JSON.stringify(payload), nowMs).run();
+    receiptInserted = Number(write.meta?.changes) > 0;
   } catch (error) { throw mapDbError(error); }
   receipt = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=?", identity.ownerId, envelope.commandId);
   if (!receipt) throw appError("INTERNAL_ERROR", "Не удалось сохранить результат команды.", 500);
   if (!await receiptMatchesCommand(receipt, envelope, hash)) throw appError("IDEMPOTENCY_KEY_REUSED", messageFor("IDEMPOTENCY_KEY_REUSED"), 409);
-  return resultFromReceipt(receipt, false);
+  return resultFromReceipt(receipt, !receiptInserted);
 }
 
 async function listPlans(db, ownerId, nowMs) {

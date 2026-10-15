@@ -121,6 +121,23 @@ test("CreateStep stores an atomic receipt and journal entry; replay survives a l
   assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS count FROM work_intervals WHERE owner_id=? AND plan_id=?").get(OWNER, PLAN_ID).count, 0);
 });
 
+test("simultaneous identical plan and tracker commands report one application and one replay", async () => {
+  const c = createContext();
+  try {
+    const planEnvelope = { schemaVersion: 1, commandId: commandId(), commandType: "CreatePlan", payload: { planId: PLAN_ID, title: "Concurrent receipt", planCreatedAt: { precision: "dateOnly", on: "2026-10-15", timeZone: "UTC" } } };
+    for (const envelope of [planEnvelope, createStepEnvelope()]) {
+      const results = await Promise.all([request(c.worker, c.db, "/api/commands", envelope), request(c.worker, c.db, "/api/commands", envelope)]);
+      assert(results.every(result => result.response.status === 200));
+      assert.equal(results.filter(result => result.body.applied).length, 1);
+      assert.equal(results.filter(result => result.body.replayed).length, 1);
+      assert.deepEqual(results[0].body.result, results[1].body.result);
+    }
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM plans").get().n, 1);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM plan_steps").get().n, 1);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM tracker_journal WHERE event_type='STEP_CREATED'").get().n, 1);
+  } finally { c.db.sqlite.close(); }
+});
+
 test("failed event insert rolls back tracker receipt, checkpoint, opt-in, and owner sequence", async () => {
   const c = createContext();
   await createPlan(c);
