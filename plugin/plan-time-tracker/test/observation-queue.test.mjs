@@ -222,3 +222,24 @@ test("queue state uses private local permissions and stores only hashed owner/pl
     assert.equal(stored.includes(options.planContext), false);
   });
 });
+
+test("parallel plan queues retain separate delivery state across retries and acknowledgments", async () => {
+  await withQueue(async ({ options, setNow }) => {
+    const planB = "33333333-3333-4333-8333-333333333333";
+    const queueA = new ObservationQueue({ ...options, planContext: PLAN_ID });
+    const queueB = new ObservationQueue({ ...options, planContext: planB });
+    const a = envelope(1), b = { ...envelope(2), payload: { ...envelope(2).payload, planId: planB } };
+    await Promise.all([queueA.enqueue(a), queueB.enqueue(b)]);
+    await queueA.begin(a.commandId);
+    await queueA.fail(a.commandId, { retryable: true, errorCode: "SOURCE_UNAVAILABLE" });
+    assert.equal((await queueB.next()).status, "READY");
+    assert.deepEqual((await queueB.next()).envelope, b);
+    await queueB.begin(b.commandId);await queueB.acknowledge(b.commandId);
+    assert.equal((await queueB.next()).status, "EMPTY");
+    const restartedA = new ObservationQueue({ ...options, planContext: PLAN_ID });
+    const stateA = await restartedA.list();
+    assert.equal(stateA.count, 1);
+    setNow(1800000010000);assert.deepEqual((await restartedA.next()).envelope, a);
+    assert.equal(stateA.entries[0].status, "RETRY_WAIT");
+  });
+});

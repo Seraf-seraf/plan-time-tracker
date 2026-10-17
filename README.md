@@ -1,6 +1,6 @@
 # plan-time-tracker
 
-Time tracking uses explicit authenticated MCP commands and server work intervals. The current source removes Git integration from the product and uses repository-free file snapshots for check evidence. Historical records remain intact. This local change awaits review and publication.
+Version 3.0.0 tracks every user-authorized plan execution through authenticated MCP and server work intervals. Multiple plans can run independently. Owner-wide time counts the union of their intervals; per-plan totals and their sum remain available. Check evidence uses repository-free source snapshots. This release targets a fresh database; updating source on GitHub does not deploy the Worker or update the installed App.
 
 Application source and development instructions: [sites/plan-time-tracker](sites/plan-time-tracker/README.md).
 
@@ -13,4 +13,4 @@ codex plugin marketplace add Seraf-seraf/plan-time-tracker
 codex plugin add dev-9529b49da3708191b8f13f1e1e4b1e01@plan-time-tracker
 ```
 
-Start a fresh Codex session after installation. For a read-only smoke check, confirm `GetTrackerCapabilities` is available, then call `GetActivePlan` if the connected app exposes it. If either tool is unavailable or authentication fails, stop and report that; do not use another endpoint or supply an owner ID. This package references the existing private Site App. Local/private Site authentication was not verified here, and marketplace installation does not configure authentication or grant private Site access.
+Start a fresh Codex session after installation. For a read-only smoke check, confirm `GetTrackerCapabilities` is available, then call `ListPlans` with `statuses: ["RUNNING"]` and follow `nextCursor` to inspect every active plan. Require `parallelPlans: true`; refresh discovery after the matching Worker release. If either tool is unavailable or authentication fails, stop and report that; do not use another endpoint or supply an owner ID. This package references the existing private Site App. Local/private Site authentication was not verified here, and marketplace installation does not configure authentication or grant private Site access.

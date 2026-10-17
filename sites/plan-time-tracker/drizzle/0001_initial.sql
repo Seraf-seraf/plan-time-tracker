@@ -34,8 +34,8 @@ CREATE TABLE plans (
   PRIMARY KEY(owner_id, plan_id)
 );
 
-CREATE UNIQUE INDEX plans_one_running_per_owner
-  ON plans(owner_id) WHERE status='RUNNING';
+CREATE INDEX plans_owner_status_registered
+  ON plans(owner_id, status, registered_at DESC, plan_id DESC);
 CREATE INDEX plans_owner_registered ON plans(owner_id, registered_at DESC);
 CREATE INDEX plans_owner_finished ON plans(owner_id, finished_at DESC) WHERE status='COMPLETED';
 
@@ -307,8 +307,7 @@ BEGIN
   UPDATE plans
      SET status='RUNNING', first_started_at=NEW.server_now_ms, version=version+1
    WHERE owner_id=NEW.owner_id AND plan_id=NEW.plan_id
-     AND version=NEW.expected_version AND status='PLANNED'
-     AND NOT EXISTS(SELECT 1 FROM plans WHERE owner_id=NEW.owner_id AND status='RUNNING');
+     AND version=NEW.expected_version AND status='PLANNED';
   INSERT INTO plan_events(event_id, owner_id, plan_id, command_id, actor_id, actor_type,
                           event_type, server_occurred_at, version_before, version_after, reason)
   SELECT lower(hex(randomblob(16))), NEW.owner_id, NEW.plan_id, NEW.command_id, NEW.actor_id,
@@ -327,7 +326,6 @@ BEGIN
       WHEN NOT EXISTS(SELECT 1 FROM plans WHERE owner_id=NEW.owner_id AND plan_id=NEW.plan_id) THEN 'PLAN_NOT_FOUND'
       WHEN (SELECT version FROM plans WHERE owner_id=NEW.owner_id AND plan_id=NEW.plan_id)<>NEW.expected_version THEN 'VERSION_CONFLICT'
       WHEN (SELECT status FROM plans WHERE owner_id=NEW.owner_id AND plan_id=NEW.plan_id)<>'PLANNED' THEN 'INVALID_TRANSITION'
-      WHEN EXISTS(SELECT 1 FROM plans WHERE owner_id=NEW.owner_id AND status='RUNNING') THEN 'ACTIVE_PLAN_EXISTS'
       ELSE 'INTERNAL_ERROR' END,
     result_version=(SELECT version FROM plans WHERE owner_id=NEW.owner_id AND plan_id=NEW.plan_id),
     result_json=CASE WHEN EXISTS(SELECT 1 FROM plan_events WHERE owner_id=NEW.owner_id AND command_id=NEW.command_id)
@@ -377,8 +375,7 @@ BEGIN
   UPDATE plans SET status='RUNNING', version=version+1
    WHERE owner_id=NEW.owner_id AND plan_id=NEW.plan_id AND status='PAUSED'
      AND version=NEW.expected_version
-     AND EXISTS(SELECT 1 FROM work_intervals WHERE owner_id=NEW.owner_id AND plan_id=NEW.plan_id AND end_ms IS NOT NULL)
-     AND NOT EXISTS(SELECT 1 FROM plans WHERE owner_id=NEW.owner_id AND status='RUNNING');
+     AND EXISTS(SELECT 1 FROM work_intervals WHERE owner_id=NEW.owner_id AND plan_id=NEW.plan_id AND end_ms IS NOT NULL);
   INSERT INTO plan_events(event_id, owner_id, plan_id, command_id, actor_id, actor_type,
                           event_type, server_occurred_at, version_before, version_after, reason)
   SELECT lower(hex(randomblob(16))), NEW.owner_id, NEW.plan_id, NEW.command_id, NEW.actor_id,
@@ -394,7 +391,6 @@ BEGIN
       WHEN NOT EXISTS(SELECT 1 FROM plans WHERE owner_id=NEW.owner_id AND plan_id=NEW.plan_id) THEN 'PLAN_NOT_FOUND'
       WHEN (SELECT version FROM plans WHERE owner_id=NEW.owner_id AND plan_id=NEW.plan_id)<>NEW.expected_version THEN 'VERSION_CONFLICT'
       WHEN (SELECT status FROM plans WHERE owner_id=NEW.owner_id AND plan_id=NEW.plan_id)<>'PAUSED' THEN 'INVALID_TRANSITION'
-      WHEN EXISTS(SELECT 1 FROM plans WHERE owner_id=NEW.owner_id AND status='RUNNING') THEN 'ACTIVE_PLAN_EXISTS'
       ELSE 'INTERNAL_ERROR' END,
     result_version=(SELECT version FROM plans WHERE owner_id=NEW.owner_id AND plan_id=NEW.plan_id),
     result_json=CASE WHEN EXISTS(SELECT 1 FROM plan_events WHERE owner_id=NEW.owner_id AND command_id=NEW.command_id)

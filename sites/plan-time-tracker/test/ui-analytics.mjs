@@ -77,7 +77,7 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1200 } });await routePage(page);await analytics(page);
   assert.equal(await page.title(), "Трекер планов");assert.equal(await page.locator("h1").innerText(), "Трекер планов");
   assert.equal(await page.locator(".nav button").count(), 4);assert.equal(await page.locator(".barrow").count() > 0, true);
-  assert.equal(await page.locator(".metric").filter({ hasText: "Активное время за период" }).count() > 0, true);
+  assert.equal(await page.locator(".metric").filter({ hasText: "Общее время за период" }).count() > 0, true);
   const main = card(page);await main.locator("summary.row").click();await main.locator(".step-column").first().waitFor();
   assert.equal(await main.getAttribute("open"), "");assert.equal(await main.locator(".step-column").count(), 6);
   const first = main.locator(".step-column").nth(0), zero = main.locator(".step-column").nth(3), missing = main.locator(".step-column").nth(5);

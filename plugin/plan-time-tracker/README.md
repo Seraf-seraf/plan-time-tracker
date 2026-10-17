@@ -1,6 +1,6 @@
 # Plan Time Tracker plugin
 
-Authenticated MCP commands register plans, explicitly start/pause/resume/finish server-timed work intervals, manage fenced checkpoint attempts, and record checks tied to result revisions. The web UI uses the same command layer. No repository, synchronization, commit/push integration or external token is required.
+Version 3.0.0 requires tracking whenever executing any user-authorized plan, even without an explicit tracker request. Drafting or discussing plans does not register them or run time. The request to execute/continue a specific plan supplies intent to register/start or resume it; pause and finish require their corresponding user intent. Authenticated MCP commands manage independent parallel plans, fenced checkpoint attempts and checks tied to current result revisions. The web UI uses the same command layer. No repository, synchronization, commit/push integration or external token is required.
 
 Read [track-plan](skills/track-plan/SKILL.md) for lifecycle intent, lease/replay rules and honest evidence handling. This package points to the existing private Site App; local source preparation does not update its installed tools or live publication. Clients must refresh tool discovery after the reviewed release.
 
@@ -9,3 +9,7 @@ Read [track-plan](skills/track-plan/SKILL.md) for lifecycle intent, lease/replay
 `observation-queue.mjs` accepts one stdin JSON object and an operation (`enqueue`, `next`, `begin`, `acknowledge`, `fail`, `requeue-pending`, `list`). Supply authenticated `ownerScope` and `planContext` (assigned plan ID). It never authenticates, performs network calls or changes lifecycle. Queue files are local-only. Old repository-scoped queue files remain untouched and are not automatically replayed.
 
 Run `node --test test/*.test.mjs`. Test fixtures contain only synthetic metadata and local temporary directories. No runtime credentials or authentication bypass are bundled.
+
+`ListPlans({statuses, limit, cursor})` replaces singular active-plan discovery. It returns `{plans, nextCursor, serverNow}`; the default page is 50, the maximum 100, ordered by registeredAt then planId descending. RUNNING may contain many plans; continue known PAUSED/PLANNED work by explicit ID without duplicates. A separate plan/checkpoint/attempt/session/queue context is required for every executor. Missing authenticated tracking blocks accounted execution and must be reported honestly. MCP does not globally intercept clients that never call it.
+
+Owner-wide `totalActiveMs` and `activeByDay` count the union of intervals; `sumPlanActiveMs` is the sum of plan durations. A 10:00–11:00 plan and a 10:30–11:30 plan each have 60 minutes: sum 120, unique total 90. These v3 contract changes require a matching Worker on a fresh database using the revised canonical migration chain; there is no old-database upgrade or singular API compatibility layer. The package preserves existing App identity, connection, presentation and audience. It does not deploy, reset live data or replace the installed manifest.

@@ -212,7 +212,7 @@ test("an open tab is not required for the server to report elapsed running time"
   assert.equal(response.body.plan.intervals[0].end_ms, null);
 });
 
-test("Start of two plans at once permits one RUNNING plan only", async () => {
+test("Start of two plans at once opens independent RUNNING intervals", async () => {
   const c = context();
   await createPlan(c.worker, c.db, PLAN_A, "Plan A");
   await createPlan(c.worker, c.db, PLAN_B, "Plan B");
@@ -220,10 +220,9 @@ test("Start of two plans at once permits one RUNNING plan only", async () => {
     transition(c.worker, c.db, "StartPlan", PLAN_A, 0),
     transition(c.worker, c.db, "StartPlan", PLAN_B, 0),
   ]);
-  assert.deepEqual(outcomes.map((x) => x.response.status).sort(), [200, 409]);
-  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM plans WHERE owner_id=? AND status='RUNNING'").bind(OWNER).first()).n, 1);
-  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM work_intervals WHERE owner_id=? AND end_ms IS NULL").bind(OWNER).first()).n, 1);
-  assert.equal(outcomes.find((x) => x.response.status === 409).body.error.code, "ACTIVE_PLAN_EXISTS");
+  assert.deepEqual(outcomes.map((x) => x.response.status).sort(), [200, 200]);
+  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM plans WHERE owner_id=? AND status='RUNNING'").bind(OWNER).first()).n, 2);
+  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM work_intervals WHERE owner_id=? AND end_ms IS NULL").bind(OWNER).first()).n, 2);
 });
 
 test("same commandId returns its original receipt before checking newer version", async () => {
@@ -541,7 +540,7 @@ test("MCP tools call the same command service and data discovery contains no pri
   const startTool = listBody.result.tools.find((x) => x.name === "StartPlan");
   assert.deepEqual(startTool.inputSchema.required, ["schemaVersion", "commandId", "payload", "expectedVersion"]);
   const noAuth = await c.worker.fetch(request("/mcp", {
-    method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "GetActivePlan", arguments: {} } }),
+    method: "POST", body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "ListPlans", arguments: {} } }),
   }, null), { DB: c.db });
   assert.equal(noAuth.status, 401);
   await createPlan(c.worker, c.db, PLAN_A);

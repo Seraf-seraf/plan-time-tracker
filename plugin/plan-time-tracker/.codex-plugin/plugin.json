@@ -3,17 +3,17 @@
   "author": {
     "name": "App developer"
   },
-  "description": "Private tracker for explicit plan work intervals, repository context, and active-time analytics.",
+  "description": "Private tracker for parallel plan execution, checkpoint evidence, and unique active-time analytics.",
   "interface": {
     "capabilities": [],
     "category": "Other",
     "defaultPrompt": null,
     "developerName": "App developer",
     "displayName": "Plan Time Tracker",
-    "longDescription": "Private tracker for explicit plan work intervals, repository context, and active-time analytics.",
+    "longDescription": "Private tracker for parallel plan execution, checkpoint evidence, and unique active-time analytics.",
     "shortDescription": "Track plan execution",
     "websiteURL": "https://plan-time-tracker.seraf-k.chatgpt.site"
   },
   "name": "dev-9529b49da3708191b8f13f1e1e4b1e01",
-  "version": "1.1.0"
+  "version": "3.0.0"
 }

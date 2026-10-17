@@ -1,26 +1,38 @@
 ---
 name: track-plan
-description: Track explicitly assigned Plan Time Tracker work through authenticated MCP commands and source snapshot evidence.
+description: Track every user-authorized plan execution automatically through authenticated MCP, including parallel plans, with source snapshot evidence.
 ---
 
-# Track an explicitly assigned plan
+# Track every authorized plan execution
 
-Use this skill only for a plan or checkpoint explicitly assigned by the user. MCP is the command transport; the server's work intervals are the source of truth for time. File snapshots identify check inputs. Neither a tool call, observation, checkpoint attempt nor snapshot starts or stops the timer.
+Use this skill whenever actually executing any plan authorized by the user, even when the user never mentions tracking. Drafting, discussing or designing a plan alone does not register it or start time. A request to execute a specific plan authorizes registration when needed and StartPlan; a request to continue a known paused plan authorizes ResumePlan. No separate tracker opt-in or start confirmation is required. MCP is the command transport; the server's work intervals are the source of truth for time. File snapshots identify check inputs. Neither a tool call, observation, checkpoint attempt nor snapshot starts or stops the timer.
 
 ## Authenticate and inspect
 
-1. Use only the authenticated Plan Time Tracker MCP tools. Call `GetTrackerCapabilities`, then `GetPlanExecutionSnapshot` for the supplied plan ID. Stop on missing tools or authentication failure; never accept `ownerId`, forge identity headers, or use an alternate endpoint.
-2. Confirm the requested checkpoint, scope, expected result, required checks, current result revision, attempts and server readiness. Do not choose a plan merely because it is active.
-3. Use current tool discovery. Removed repository/synchronization/commit/push tools and fields are unsupported, including replay of old commands. Historical evidence is retained internally and is never a prerequisite for a new result.
+1. Use only authenticated Plan Time Tracker MCP tools. Call `GetTrackerCapabilities`; require `parallelPlans` and the `ListPlans` contract. Missing tools, incompatible capabilities or authentication failure block required accounting: report the blocker, do not claim recorded time or invent records, and stop tracked execution until access is restored. Never accept `ownerId`, forge identity headers or use an alternate endpoint.
+2. Bind the user's intended work to an explicit `planId`. For a supplied ID, read `GetPlanExecutionSnapshot`. Otherwise use read-only `ListPlans` with `statuses` and follow every `nextCursor` needed to identify the intended plan; use RUNNING, PAUSED and PLANNED as appropriate. Match the user's known identity, scope or reference, never the first active plan or title alone when ambiguous. If identity is ambiguous, clarify before a write. Continue a known plan without creating a duplicate. If this is new authorized execution, register it once with `CreatePlan` using its real title/scope/date, preserve the returned ID (recover an unknown response via its exact command receipt), then read its snapshot.
+3. Confirm the requested checkpoint, scope, expected result, required checks, current result revision, attempts and server readiness. `GetPlan` and `GetPlanExecutionSnapshot` always take the bound `planId`.
+4. Use current tool discovery. Removed repository/synchronization/commit/push tools and fields are unsupported, including replay of old commands. Historical evidence is retained internally and is never a prerequisite for a new result.
 
 ## Explicit time and checkpoint lifecycle
 
-- `CreatePlan` only registers a plan. `StartPlan`, `PausePlan`, `ResumePlan` and `FinishPlan` each require direct user intent. Never infer intent from conversation, elapsed time, night, weekend, a turn ending or a tool event. Server timestamps define all interval boundaries.
-- A plan must already be `RUNNING` before working on a checkpoint. `PLANNED` and `PAUSED` do not authorize starting or resuming time.
+- `CreatePlan` only registers a plan. On the user's request to execute that specific plan, call `StartPlan` when PLANNED; on their request to continue that specific paused plan, call `ResumePlan`. These requests already provide the required lifecycle intent. An already RUNNING plan needs neither registration nor another start. A completed plan is not silently duplicated or reopened.
+- `PausePlan` and `FinishPlan` still require the user's corresponding intent. A completed answer, silence, observations, elapsed time, night, weekend, a tool event or an expired attempt lease never changes intervals. Server timestamps define all interval boundaries.
+- Confirm the bound plan is `RUNNING` before working on its checkpoint. Never pause or finish another plan to free a global slot: several plans may be RUNNING together.
 - `CreateStep` takes `planId`, `ordinal`, `title`, `expectedResult` and `requiredChecks`. Do not supply policy fields or repository context. Update only user-authorized checkpoint fields with `UpdateStep` and a reason.
 - Claim an attempt only for the assigned checkpoint. Preserve its `attemptId`, `fence` and current step version. Start only that attempt with `StartStep`. Renew its lease about every three minutes. An expired lease cannot be revived; reread the snapshot before recovery. `BlockStep` records a reason without changing plan time.
-- Closing an attempt or reaching its lease deadline does not finish the checkpoint or change plan time. Inspect `step.execution` (`state`, `canClaim`, `canStart`, `canRecordResult`) rather than raw RUNNING alone. For an assigned RUNNING plan, recover a closed/expired attempt with a new ClaimStepAttempt and its increased fence, then StartStep; never renew/reuse a closed or expired fence. If a live attempt was claimed but not started, start that attempt. Resolve ambiguous Claim/Start outcomes with the identical envelope or its receipt before any new action. A paused plan needs a separate explicit ResumePlan command.
+- Closing an attempt or reaching its lease deadline does not finish the checkpoint or change plan time. Inspect `step.execution` (`state`, `canClaim`, `canStart`, `canRecordResult`) rather than raw RUNNING alone. For an assigned RUNNING plan, recover a closed/expired attempt with a new ClaimStepAttempt and its increased fence, then StartStep; never renew/reuse a closed or expired fence. If a live attempt was claimed but not started, start that attempt. Resolve ambiguous Claim/Start outcomes with the identical envelope or its receipt before any new action. A paused plan needs ResumePlan authorized by the user’s request to continue that plan.
 - Completed checkpoint rework must be assigned by the owner through the web UI with a reason. Do not send `reworkReason` through MCP or treat a failed check as rework authorization.
+
+## Independent parallel contexts
+
+Maintain a separate execution context per `planId`: assigned checkpoint/step ID, plan version and step version, attempt ID/fence, current result revision/digest, session/source sequencing, pending exact command envelopes and observation queue. Every executor, including a subagent, receives an explicit plan/checkpoint binding; never choose a “current” plan globally. A command, recovery, completion or check for A must not alter or borrow B's state, attempt, result, checks or readiness.
+
+Use isolated source directories for concurrent writers, or coordinate writes and stop all writers while capturing snapshots and running checks. Verify the same digest before and after every check. A changed shared-source snapshot cannot attest a passed check for either context; record truthful outcomes, capture a new authorized result revision and rerun affected checks. Do not reuse another plan's evidence merely because its check key or digest matches.
+
+`ListPlans` returns `{plans, nextCursor, serverNow}` with optional nonempty unique `statuses`, `limit` 1–100 (default 50), and opaque `cursor` from `nextCursor`. Order is registeredAt descending then planId descending; continue until `nextCursor` is null. Filter RUNNING to discover all active plans, PAUSED/PLANNED to find known work for continuation. Listing is read-only and never changes time.
+
+Analytics count each plan's own intervals normally. Owner-wide `totalActiveMs` and `activeByDay` are unique elapsed work time (the union of intervals across plans); `sumPlanActiveMs` is the separate sum of plan durations and may be larger. All durations are milliseconds.
 
 ## Source evidence without a repository
 
@@ -54,4 +66,6 @@ Queue durability is local-only. Cloud/web sessions are ephemeral; report unavail
 
 ## Report
 
-Report plan/time state, checkpoint/result revision and source digest, actual check outcomes, authoritative readiness and unmet conditions separately. Do not claim hosted operation from local SQLite/browser tests or successful tool discovery. No publication, source-control operation or plan finish is implied by a completed checkpoint.
+Report each bound plan/time state separately, checkpoint/result revision and source digest, actual check outcomes, authoritative readiness and unmet conditions separately. Do not claim hosted operation from local SQLite/browser tests or successful tool discovery. No publication, source-control operation or plan finish is implied by a completed checkpoint.
+
+MCP cannot discover local client plans unless that client calls it. Mandatory tracking is a connected-client instruction, not a platform-wide interception guarantee.
