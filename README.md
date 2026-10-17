@@ -2,6 +2,8 @@
 
 Version 3.0.0 tracks every user-authorized plan execution through authenticated MCP and server work intervals. Multiple plans can run independently. Owner-wide time counts the union of their intervals; per-plan totals and their sum remain available. Check evidence uses repository-free source snapshots. This release targets a fresh database; updating source on GitHub does not deploy the Worker or update the installed App.
 
+Live private Site: [Трекер планов](https://plan-time-tracker-v3.seraf-k.chatgpt.site). The fresh v3 Site uses a new App connection; the GitHub package 3.0.1 points to it while retaining its marketplace package name. The Site-generated plugin is version 3.0.0 and must be installed/connected separately from the old Site.
+
 Application source and development instructions: [sites/plan-time-tracker](sites/plan-time-tracker/README.md).
 
 ## Codex CLI

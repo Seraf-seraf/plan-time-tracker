@@ -12,8 +12,8 @@
     "displayName": "Plan Time Tracker",
     "longDescription": "Private tracker for parallel plan execution, checkpoint evidence, and unique active-time analytics.",
     "shortDescription": "Track plan execution",
-    "websiteURL": "https://plan-time-tracker.seraf-k.chatgpt.site"
+    "websiteURL": "https://plan-time-tracker-v3.seraf-k.chatgpt.site"
   },
   "name": "dev-9529b49da3708191b8f13f1e1e4b1e01",
-  "version": "3.0.0"
+  "version": "3.0.1"
 }

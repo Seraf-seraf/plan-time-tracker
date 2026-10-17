@@ -28,6 +28,12 @@ Version 3.0.0 targets a new empty database. Apply canonical migrations in order 
 
 Other historical migrations/tables and historical documents under `docs/` are retained. Existing local historical-schema tests cover those structures on the revised fresh-install chain; they do not attest upgrade support for the old single-plan deployment. Historical evidence semantics and public redaction remain unchanged. Do not deploy an older Worker against v3 data.
 
+## Current hosted installation
+
+The fresh private v3 Site is https://plan-time-tracker-v3.seraf-k.chatgpt.site (`appgprj_6ad342fe722481919f98177e1c447931`). Its first published version uses Site source commit `b3f392358e73e3881113ed611aff5c5194dabc74`, built from GitHub `74a86a25d98f5965e9ce7801f06e4d15889c003e` with the new project identity. Deployment `appgdep_6ad3434ca4848191b36fcaf34371485e` succeeded with MCP enabled; database overview confirmed the full schema and empty plans/work intervals. Archive checksum: `sha256:ff5e6f46149c12aadfa542d90d568ce93961c6a97774543687ee3bbeb695a135`.
+
+The new Site plugin `plugin_asdk_app_sites_ae77444ef43481919c2588ef24f70c84` was updated to 3.0.0 with the mandatory tracking skill, fixtures and local helpers. GitHub's retained marketplace package is 3.0.1 because its App binding changed. Installed clients need the new connection. The old Site was not deleted by deployment; deleting an entire Site is unavailable through the current Sites connector and must be done in Sites settings. This report does not claim an authenticated end-to-end execution against the new App.
+
 ## Local verification
 
 ```sh
