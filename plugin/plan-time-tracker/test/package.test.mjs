@@ -22,7 +22,7 @@ test("portable package has one manifest with the marketplace identity and existi
   assert.equal(extension.apps, "./.app.json");
   assert.equal(extension.interface.displayName, "Трекер планов");
   const apps = readJson(join(pluginRoot, extension.apps));
-  assert.equal(apps.apps[manifest.name].id, "asdk_app_sites_ae77444ef43481919c2588ef24f70c84");
+  assert.equal(apps.apps[manifest.name].id, "asdk_app_sites_ebf8a3fb6b58819181eff586bb18937a");
   assert.ok(existsSync(join(pluginRoot, "skills/track-plan/SKILL.md")));
 });
 
