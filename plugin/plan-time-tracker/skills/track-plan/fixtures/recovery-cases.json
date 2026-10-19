@@ -18,7 +18,7 @@
           "data": {}
         }
       },
-      "retry": "Send the identical command envelope again, or call GetCommandReceipt for the same commandId.",
+      "retry": "Повторите идентичный конверт команды или вызовите GetCommandReceipt с тем же commandId.",
       "expectedReplay": {
         "eventId": "a0000000-0000-4000-8000-000000000002",
         "sameServerSequence": true,
@@ -31,14 +31,14 @@
         "status": "PENDING",
         "commandId": "a0000000-0000-4000-8000-000000000005"
       },
-      "nextAction": "Poll GetCommandReceipt using the same commandId; do not generate a replacement write."
+      "nextAction": "Опрашивайте GetCommandReceipt с тем же commandId; не создавайте новую команду записи взамен прежней."
     },
     {
       "name": "stale_version",
       "error": {
         "code": "VERSION_CONFLICT"
       },
-      "nextAction": "Read the plan execution snapshot and obtain renewed user intent before issuing a new command."
+      "nextAction": "Прочитайте снимок состояния выполнения плана и заново получите намерение пользователя перед новой командой."
     },
     {
       "name": "ordered_offline_delivery",
@@ -61,7 +61,7 @@
           "expectedClassification": "CORRECTION"
         }
       ],
-      "invariant": "Server sequence orders receipt; late, gap, and correction observations never transition a plan or checkpoint."
+      "invariant": "Порядок получения задаётся серверной последовательностью; наблюдения late, gap и correction никогда не меняют состояние плана или этапа."
     },
     {
       "name": "current_required_checks_ready",
@@ -94,7 +94,7 @@
         ],
         "readyToFinish": true
       },
-      "nextAction": "Report readiness; only send FinishPlan after the user explicitly requests it. No separate checkpoint approval command exists."
+      "nextAction": "Сообщите о готовности; отправляйте FinishPlan только по явной просьбе пользователя. Отдельной команды одобрения этапа нет."
     },
     {
       "name": "same_timestamp_later_failed_check",
@@ -124,7 +124,7 @@
         }
       ],
       "readyToFinish": false,
-      "nextAction": "Report the latest failure, even if the timestamps match. NOT_RUN has the same readiness consequence; never choose an earlier pass."
+      "nextAction": "Сообщите о последней неудачной проверке, даже если отметки времени совпадают. NOT_RUN так же отменяет готовность; никогда не выбирайте более раннюю успешную проверку."
     },
     {
       "name": "new_result_or_rework_invalidates_old_checks",
@@ -145,7 +145,7 @@
         "currentChecks": [],
         "readyToFinish": false
       },
-      "nextAction": "Run and record the required check against revision 3. A reworked non-DONE checkpoint or an active attempt also prevents normal finish."
+      "nextAction": "Выполните и запишите обязательную проверку для ревизии 3. Повторно назначенный этап не в DONE или активная попытка также препятствуют обычному завершению."
     },
     {
       "name": "new_required_key_or_historical_waiver_does_not_pass",
@@ -164,7 +164,7 @@
       ],
       "historicalWaiverRowsRetained": true,
       "readyToFinish": false,
-      "nextAction": "Record the missing build check for the current revision. Historical waiver rows do not satisfy required checks."
+      "nextAction": "Запишите недостающую проверку build для текущей ревизии. Исторические записи освобождения от проверок не заменяют обязательные проверки."
     },
     {
       "name": "no_required_checks_adds_no_sha_requirement",
@@ -187,7 +187,7 @@
         "currentChecks": [],
         "readyToFinish": true
       },
-      "nextAction": "Do not invent a SHA or require an approval. The user must still explicitly request FinishPlan."
+      "nextAction": "Не выдумывайте SHA и не требуйте одобрения. Пользователь по-прежнему должен явно запросить FinishPlan."
     },
     {
       "name": "explicit_incomplete_finish_exception",
@@ -199,11 +199,11 @@
         "payload": {
           "planId": "a0000000-0000-4000-8000-000000000003",
           "allowIncomplete": true,
-          "reason": "The user explicitly chose to finish with the missing build check recorded as an exception."
+          "reason": "Пользователь явно выбрал завершение с фиксацией отсутствующей проверки build как исключения."
         }
       },
-      "requires": "A direct user instruction for this exception; never choose it automatically.",
-      "invariant": "The exception snapshot records unmet conditions. It does not change missing, failed, stale, or not-run checks to PASSED."
+      "requires": "Прямое указание пользователя на это исключение; никогда не выбирайте его автоматически.",
+      "invariant": "Снимок исключения фиксирует невыполненные условия. Он не меняет отсутствующие, неудачные, устаревшие или невыполненные проверки на PASSED."
     },
     {
       "name": "bounded_local_queue",
@@ -220,7 +220,7 @@
       },
       "afterAttempts": 5,
       "expectedState": "PENDING",
-      "invariant": "The exact AppendObservation envelope and commandId remain queued in FIFO order; only local state is durable, and no lifecycle command is queued or auto-replayed."
+      "invariant": "Точный конверт AppendObservation и commandId остаются в очереди FIFO; постоянно хранится только локальное состояние, команды жизненного цикла не ставятся в очередь и автоматически не воспроизводятся."
     },
     {
       "name": "source_snapshot_binds_current_checks",
@@ -236,7 +236,7 @@
         "exitCode": 0,
         "testedSnapshotDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
       },
-      "invariant": "Capture real source bytes and verify their digest before and after every check without requiring a repository. Each check belongs to its exact result revision."
+      "invariant": "Создавайте снимок фактических байтов исходников и проверяйте digest до и после каждой проверки без требования репозитория. Каждая проверка относится к своей точной ревизии результата."
     },
     {
       "name": "legacy_prose_cannot_be_attested_after_migration",
@@ -254,13 +254,13 @@
         "currentChecks": [],
         "readyToFinish": false
       },
-      "nextAction": "Report the missing source and checks. Never invent a digest or rewrite r1. A new result needs explicit authorized rework; finish exception needs separate user intent and a reason."
+      "nextAction": "Сообщите об отсутствующих исходниках и проверках. Никогда не выдумывайте digest и не переписывайте r1. Новый результат требует явно разрешённой повторной работы; исключение при завершении требует отдельного намерения пользователя и причины."
     },
     {
       "name": "draft_only_does_not_track",
       "userRequest": "Составь план рефакторинга",
       "expectedTools": [],
-      "invariant": "Discuss or draft only: no CreatePlan, StartPlan or ResumePlan."
+      "invariant": "Только обсуждение или составление плана; не вызывайте CreatePlan, StartPlan или ResumePlan."
     },
     {
       "name": "execute_without_tracker_keyword",
@@ -273,7 +273,7 @@
         "GetPlanExecutionSnapshot",
         "StartPlan"
       ],
-      "invariant": "A confirmed new plan is registered and started once without a separate tracker confirmation."
+      "invariant": "Подтверждённый новый план регистрируется и запускается один раз без отдельного подтверждения трекера."
     },
     {
       "name": "continue_known_paused_without_duplicate",
@@ -290,7 +290,7 @@
       "forbiddenTools": [
         "CreatePlan"
       ],
-      "invariant": "Bind the known plan; user continuation request supplies resume intent."
+      "invariant": "Привяжите известный план; просьба пользователя продолжить выражает намерение возобновить выполнение."
     },
     {
       "name": "two_running_contexts_are_independent",
@@ -298,7 +298,7 @@
         "a0000000-0000-4000-8000-000000000003",
         "b0000000-0000-4000-8000-000000000003"
       ],
-      "invariant": "Executors have explicit plan/checkpoint bindings, separate versions, attempts/fences, result revisions, sessions, pending commands and queues. Pausing/finishing A never changes B."
+      "invariant": "Исполнители явно привязаны к плану и этапу; у них отдельные версии, попытки и fence, ревизии результатов, сессии, ожидающие команды и очереди. Пауза или завершение A никогда не меняют B."
     },
     {
       "name": "ambiguous_plan_identity",
@@ -313,20 +313,20 @@
         "StartPlan",
         "ResumePlan"
       ],
-      "invariant": "Clarify identity instead of choosing the first active plan or duplicating known work."
+      "invariant": "Уточните, какой план нужен, вместо выбора первого активного плана или дублирования известной работы."
     },
     {
       "name": "required_tracker_unavailable",
       "capabilitiesAvailable": false,
       "expectedState": "ACCOUNTING_BLOCKED",
-      "invariant": "Report mandatory accounting blocked, stop tracked execution; never invent a timer or records."
+      "invariant": "Сообщите о блокировке обязательного учёта и остановите выполнение с учётом; никогда не выдумывайте таймер или записи."
     },
     {
       "name": "shared_source_changes_during_check",
       "snapshotBefore": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "snapshotAfter": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "expectedCheckState": "NOT_ATTESTED",
-      "invariant": "Coordinate writers or isolate directories. A changed snapshot does not attest a pass for either plan."
+      "invariant": "Согласуйте запись исходников или изолируйте каталоги. Изменившийся снимок не подтверждает успешную проверку ни для одного плана."
     },
     {
       "name": "end_of_turn_is_not_pause_or_finish",
@@ -336,7 +336,7 @@
         "PausePlan",
         "FinishPlan"
       ],
-      "invariant": "Silence, observations and expired attempt leases do not close time intervals."
+      "invariant": "Молчание, наблюдения и истёкшая аренда попытки не закрывают интервалы времени."
     }
   ]
 }
