@@ -104,7 +104,7 @@ npm test
 node --test ../../plugin/plan-time-tracker/test/*.test.mjs
 ```
 
-Build пересоздаёт `dist/`: копирует Worker в `dist/server/index.js`, а конфигурацию — в `dist/.openai/hosting.json`. Worker содержит UI и MCP endpoint `/mcp`. `validate` проверяет ESM и экспорт `default.fetch`. Тесты приложения используют SQLite в памяти; тесты плагина проверяют единственный manifest, App-привязку и упаковку через `tar`.
+Build пересоздаёт `dist/`: копирует Worker в `dist/server/index.js`, конфигурацию — в `dist/.openai/hosting.json`, SQL и имеющиеся migration metadata — в `dist/.openai/drizzle/`. Это [формат официального Sites packager](https://github.com/openai/sites/blob/7eb9d4b9cf93ad7e64aebc8a5ca70e29ec2cfb94/packages/sites-vite-plugin/README.md). Worker содержит UI и MCP endpoint `/mcp`. `validate` проверяет ESM и экспорт `default.fetch`. Тесты приложения используют SQLite в памяти; тесты плагина проверяют единственный manifest, App-привязку и упаковку через `tar`.
 
 Браузерные проверки требуют Playwright и Chromium; команда и переменные `PLAYWRIGHT_MODULE`, `CHROMIUM_EXECUTABLE`, `UI_ACCEPTANCE_ARTIFACT_DIR` описаны в [README приложения](sites/plan-time-tracker/README.md#local-verification). Локальные тесты не проверяют вход и рабочую D1 в Sites.
 
@@ -118,7 +118,9 @@ Build пересоздаёт `dist/`: копирует Worker в `dist/server/in
 
 Новой установке v3 нужна пустая D1 с привязкой `DB` и все 16 SQL-файлов из [drizzle](sites/plan-time-tracker/drizzle), применённые в порядке имён от `0001_initial.sql` до `0016_plan_deletion.sql`. Старая база с ограничением на один RUNNING-план этим выпуском не обновляется. Не повторяйте начальную цепочку на рабочей базе и не обнуляйте уже подготовленную v3-базу при публикации.
 
-**Блокер новой установки:** подтверждённой команды применения SQL к hosted Sites D1 здесь нет; build не выполняет миграции, а `read_database_overview` только читает схему — до публикации владелец должен применить цепочку поддерживаемым способом и подтвердить схему.
+Sites применяет hosted-миграции перед загрузкой Worker; для этого SQL и существующая Drizzle metadata входят в deployment archive под `.openai/drizzle/`. Build только упаковывает их и не изменяет БД. Отдельная shell-команда hosted SQL не требуется и здесь не предлагается. Применённые SQL и записи migration journal изменять нельзя.
+
+Перед обновлением существующей базы необходимо подтвердить её историю миграций и то, что runner применит только новую 0016 после 0015. Наличие таблиц через `read_database_overview` и колонок через `read_database_table_rows` не подтверждает migration ledger или триггеры. Если это состояние не удаётся проверить поддерживаемым способом, публикация блокируется; не создавайте фиктивный journal и не повторяйте 0001–0015 на рабочей базе.
 
 ### Публикация
 
@@ -136,7 +138,7 @@ Build пересоздаёт `dist/`: копирует Worker в `dist/server/in
    tar -tzf "$tracker_archive_dir/plan-time-tracker.tar.gz"
    ```
 
-   В архиве должны быть `./server/index.js` и `./.openai/hosting.json`. Исходники, `.git`, учётные данные и миграции в него не входят. Сохраните абсолютный путь к архиву до окончания загрузки.
+   В архиве должны быть `./server/index.js`, `./.openai/hosting.json` и `./.openai/drizzle/` с неизменёнными SQL и имеющейся metadata. Остальные исходники, `.git` и учётные данные в него не входят. Сохраните абсолютный путь к архиву до окончания загрузки.
 6. Вызовите `save_site_version` с `project_id`, `commit_sha` и абсолютным путём `archive`. Сохраните возвращённый `id` как `version_id`.
 7. Для подтверждённого приватного проекта вызовите `deploy_private_site_version` с `project_id` и `version_id`. Если аудитория не совпадает, остановитесь. Проверяйте `get_deployment_status` по возвращённому deployment ID до `succeeded` или `failed`: URL публикации ведёт на рабочий сайт.
 8. После успеха проверьте вход владельца в UI, `GetTrackerCapabilities` и все страницы `ListPlans`. Обновите плагин и обнаружение инструментов в клиентах отдельно.
