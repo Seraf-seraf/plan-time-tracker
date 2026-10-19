@@ -173,6 +173,8 @@ for (const [client, type, code] of [
   ["tracker", "RecordCheck", "RESULT_REVISION_STALE"],
   ["tracker", "ClaimStepAttempt", "REWORK_REQUIRED"],
   ["main", "FinishPlan", "CHECKPOINTS_INCOMPLETE"],
+  ["main", "DeletePlan", "PLAN_DELETED"],
+  ["main", "RestorePlan", "PLAN_NOT_DELETED"],
 ]) {
   test(`${client} ${type} unlocks only the matching FINAL refusal and preserves every ambiguous receipt`, async () => {
     const { scripts } = await clientScripts();

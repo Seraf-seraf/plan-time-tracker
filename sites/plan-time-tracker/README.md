@@ -4,6 +4,28 @@ The tracker records work time through explicit authenticated MCP commands and th
 
 The current contract removes repository management/filters, synchronization, commit attribution, commit/push policies and Git observations. It requires no external integration token. GitHub source publication does not deploy the Worker or update installed tools.
 
+## Удаление и восстановление планов (3.1.0)
+
+`DeletePlan` выполняет мягкое удаление атомарно: записывает `plans.deleted_at`, увеличивает версию плана, закрывает его открытый рабочий интервал и все OPEN-попытки как ABANDONED. RUNNING-план становится PAUSED. Этапы RUNNING становятся BLOCKED; версии и `current_fence` этапов увеличиваются, поэтому прежние исполнители не могут продолжить работу после восстановления. Результаты, проверки, интервалы, квитанции и события не удаляются. Новые события — DELETED/RESTORED в истории плана и PLAN_DELETED/PLAN_RESTORED в tracker timeline, если учёт этапов включён.
+
+`RestorePlan` снимает отметку удаления и увеличивает версию. PLANNED, PAUSED и COMPLETED сохраняются; прежний RUNNING остаётся PAUSED. Интервал и попытка не открываются. Исторические результаты и текущие проверки сохраняют силу, если их ревизия и исходники по-прежнему совпадают. Календарная длительность заморожена на удалённом плане, после восстановления снова учитывает прошедшие паузы; активное время за удалённый период не добавляется.
+
+Обе команды требуют аутентифицированного владельца и текущую `expectedVersion`. MCP выбирает имя инструмента, HTTP использует `POST /api/commands` с `commandType`. Пример HTTP-конверта (подставьте ID плана и его версию):
+
+```json
+{"schemaVersion":1,"commandId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","commandType":"DeletePlan","expectedVersion":1,"payload":{"planId":"11111111-1111-4111-8111-111111111111","reason":"План больше не нужен"}}
+```
+
+Для MCP передайте этот объект без `commandType` в `DeletePlan`; для восстановления выберите `RestorePlan`, новый `commandId` и актуальную версию. `reason` необязателен, до 1000 символов. Успешный результат содержит `planId`, `status`, `deletedAt`, `version`, `serverNow` внутри стандартной квитанции. Один `commandId` с тем же конвертом возвращает сохранённый результат, даже если план впоследствии восстановлен; повтор не применяет действие заново. Изменение конверта с тем же ID даёт IDEMPOTENCY_KEY_REUSED. Квитанции отказов также сохраняются.
+
+`ListPlans({deleted:true,...})` и `GET /api/plans?deleted=true` возвращают только удалённые планы. По умолчанию `deleted:false`; значения статусов, размер и порядок страниц, `nextCursor` не меняются. `GetPlan` и execution snapshot доступны по явному ID владельца и содержат `deletedAt`; изменения удалённого плана запрещены. Обычная аналитика целиком исключает удалённые планы, в том числе completion median и inactivePlans; аналитика этапов такого плана возвращает 404. Восстановление возвращает сохранённые интервалы в отчёты. Экспорт включает удалённые планы для сохранности истории.
+
+Ошибки: PLAN_NOT_FOUND (404, в том числе чужой план), VERSION_CONFLICT (409), PLAN_DELETED (409: повторное удаление с новой командой либо запись в удалённый план), PLAN_NOT_DELETED (409: восстановление обычного плана), VALIDATION_ERROR (400 для некорректного конверта/фильтра). MCP возвращает те же коды в `isError`/`structuredContent`. Не повторяйте конфликтную команду автоматически с новой версией: сначала перечитайте план и получите новое явное намерение. Все записи и конкурентные команды проверяются в одной SQL-операции; частичный отказ откатывает отметку, интервалы, попытки, события и квитанцию вместе.
+
+`GetTrackerCapabilities` сообщает `version: "3.1.0"`, `planDeletion: {softDelete:true, deleteTool:"DeletePlan", restoreTool:"RestorePlan", deletedFilter:"deleted", restoreStartsTimer:false}` и `planList.deletedDefault:false`. MCP initialize также возвращает 3.1.0. Команды удаления/восстановления требуют отдельного намерения пользователя; они не следуют из окончания этапа или ответа.
+
+Обновление существующей параллельной v3-базы: примените только `drizzle/0016_plan_deletion.sql` после 0015, затем опубликуйте Worker 3.1.0 и обновите пакет/обнаружение MCP-инструментов. Для новой базы нужна вся цепочка 0001–0016. Миграция добавляет nullable-поле и триггеры, сохраняя строки и активные интервалы до явного удаления. Это не путь обновления старой single-plan-базы. Не возвращайте старый Worker после появления удалённых планов: он не фильтрует их в чтении. Команды применения SQL к hosted Sites D1 в репозитории нет; её должен обеспечить владелец через поддерживаемый механизм провайдера. В этой работе публикация и изменение установленного App не выполняются.
+
 ## Analytics by plan section
 
 The «Трекер планов» Analytics page preserves the period metrics and day bars. Each plan expands to a section chart in ordinal order. Its read-only web endpoint is `GET /api/analytics/plans/:planId/steps?from=YYYY-MM-DD&to=YYYY-MM-DD&timeZone=...&asOf=...`; section details retain their per-plan semantics; owner-wide totals use the v3 union semantics below. Owner authorization and inclusive local-date boundaries use the existing Worker behavior. `asOf` limits counted time and section membership (`created_at <= asOf`) to the accepted period report; titles and ordinals use their current values, not reconstructed historical metadata. A snapshot before the first start remains unmeasured even if the plan starts later; the exact start timestamp can be measured zero.
@@ -24,7 +46,7 @@ Normal finish is guarded by current successful results, closed attempts and the 
 
 ## Fresh installation and retained history
 
-Version 3.0.0 targets a new empty database. Apply canonical migrations in order through `0015_source_snapshots.sql`; the revised `0001_initial.sql` permits parallel RUNNING plans from creation. One open interval and nonoverlapping intervals per plan remain enforced. There is no upgrade path from a deployed single-plan database in this patch and no extra migration for dropping the old constraint. Do not apply only the revised Worker to that database. A future release must provision an empty database and deploy the matching Worker/package deliberately; source publication does not reset existing data or deploy anything.
+Version 3.0.0 targets a new empty database. Apply canonical migrations in order through `0016_plan_deletion.sql`; the revised `0001_initial.sql` permits parallel RUNNING plans from creation. One open interval and nonoverlapping intervals per plan remain enforced. There is no upgrade path from a deployed single-plan database in this patch and no extra migration for dropping the old constraint. Do not apply only the revised Worker to that database. A future release must provision an empty database and deploy the matching Worker/package deliberately; source publication does not reset existing data or deploy anything.
 
 Other historical migrations/tables and historical documents under `docs/` are retained. Existing local historical-schema tests cover those structures on the revised fresh-install chain; they do not attest upgrade support for the old single-plan deployment. Historical evidence semantics and public redaction remain unchanged. Do not deploy an older Worker against v3 data.
 

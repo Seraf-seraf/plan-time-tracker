@@ -694,7 +694,10 @@ test("command guard migration preserves existing plans, events and receipt repla
   for (const name of readdirSync(migrationsDirectory).filter(name=>name.endsWith(".sql")&&name!=="0001_initial.sql").sort()) {
     db.sqlite.exec(readFileSync(new URL(name,migrationsDirectory),"utf8"));
   }
-  assert.deepEqual(["plans","plan_events","command_receipts"].map(table=>db.sqlite.prepare("SELECT * FROM "+table).all()),before);
+  const after=["plans","plan_events","command_receipts"].map(table=>db.sqlite.prepare("SELECT * FROM "+table).all());
+  // 0016 adds a nullable tombstone; every pre-existing field remains unchanged.
+  after[0]=after[0].map(row=>{assert.equal(row.deleted_at,null);delete row.deleted_at;return row;});
+  assert.deepEqual(after,before);
   const replay=await executeCommand(db,{ownerId:OWNER},envelope,"ui",2000);
   assert.equal(replay.replayed,true);assert.deepEqual(replay.result,created.body.result);
   db.sqlite.close();
