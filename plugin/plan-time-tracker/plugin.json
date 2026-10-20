@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "dev-9529b49da3708191b8f13f1e1e4b1e01",
   "version": "3.1.2",
-  "description": "Приватный трекер параллельных планов, доказательств выполнения этапов и аналитики активного времени без двойного учёта.",
+  "description": "Планы и учёт времени",
   "author": {
     "name": "App developer"
   },
@@ -15,8 +15,8 @@
         "defaultPrompt": null,
         "developerName": "App developer",
         "displayName": "Трекер планов",
-        "longDescription": "Приватный трекер параллельных планов, доказательств выполнения этапов и аналитики активного времени без двойного учёта.",
-        "shortDescription": "Учёт выполнения планов",
+        "longDescription": "Планы и учёт времени",
+        "shortDescription": "Планы и учёт времени",
         "websiteURL": "https://plan-time-tracker.seraf-k.chatgpt.site"
       }
     }
