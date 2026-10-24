@@ -24,6 +24,9 @@ test("portable package has one manifest with the marketplace identity and existi
   const apps = readJson(join(pluginRoot, extension.apps));
   assert.equal(apps.apps[manifest.name].id, "asdk_app_sites_ebf8a3fb6b58819181eff586bb18937a");
   assert.ok(existsSync(join(pluginRoot, "skills/track-plan/SKILL.md")));
+  assert.ok(existsSync(join(pluginRoot, "skills/assess-task/SKILL.md")));
+  assert.equal(manifest.version, "0.4.0");
+  assert.equal(readJson(join(repositoryRoot, "sites/plan-time-tracker/package.json")).version, manifest.version);
 });
 
 test("runtime package survives a tar roundtrip with one manifest and its App, skill and helpers", () => {
@@ -42,6 +45,7 @@ test("runtime package survives a tar roundtrip with one manifest and its App, sk
     assert.deepEqual(entries.filter(entry => entry.endsWith("plugin.json")), ["plugin.json"]);
     assert.ok(entries.includes(".app.json"));
     assert.ok(entries.includes("skills/track-plan/SKILL.md"));
+    assert.ok(entries.includes("skills/assess-task/SKILL.md"));
     assert.ok(entries.includes("scripts/source-snapshot.mjs"));
     assert.ok(entries.includes("scripts/observation-queue.mjs"));
     assert.ok(entries.every(entry => !entry.split("/").includes(".codex-plugin")));

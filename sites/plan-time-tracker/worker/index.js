@@ -1,4 +1,4 @@
-const TRACKER_VERSION = "3.1.0";
+const TRACKER_VERSION = "0.4.0";
 const BODY_LIMIT = 128 * 1024;
 const TRACKER_LEASE_MS = 10 * 60 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -6,9 +6,9 @@ const SHA = /^[0-9a-f]{40}$/i;
 const SNAPSHOT_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const isSnapshotDigest = value => typeof value === "string" && value.length === 71 && SNAPSHOT_DIGEST.test(value);
 const WRITE_COMMANDS = new Set(["CreatePlan", "StartPlan", "PausePlan", "ResumePlan", "FinishPlan", "UpdatePlanMetadata", "DeletePlan", "RestorePlan"]);
-const TRACKER_COMMANDS = new Set(["CreateStep", "UpdateStep", "ClaimStepAttempt", "RenewStepLease", "CloseStepAttempt", "StartStep", "BlockStep", "RecordStepResult", "RecordCheck", "AppendObservation"]);
+const TRACKER_COMMANDS = new Set(["CreateStep", "UpdateStep", "ClaimStepAttempt", "RenewStepLease", "CloseStepAttempt", "StartStep", "BlockStep", "RecordStepResult", "RecordCheck", "AppendObservation", "RecordAssessment"]);
 const TRACKER_VERSIONED_COMMANDS = new Set(["UpdateStep", "ClaimStepAttempt", "StartStep", "BlockStep", "RecordStepResult"]);
-const TRACKER_READ_TOOLS = new Set(["GetTrackerCapabilities", "GetPlanExecutionSnapshot", "GetTimeline", "GetCommandReceipt"]);
+const TRACKER_READ_TOOLS = new Set(["GetTrackerCapabilities", "GetPlanExecutionSnapshot", "GetTimeline", "GetCommandReceipt", "GetAssessment", "GetEstimationHistory"]);
 const OBSERVATION_TYPES = new Set(["turn_started", "turn_finished", "tool_started", "tool_finished", "heartbeat", "gap", "correction"]);
 const UI_TIME_ZONES = [{ value: "Europe/Moscow", label: "Москва (UTC+3)" }, { value: "Asia/Omsk", label: "Омск (UTC+6)" }];
 export function resolveUiTimeZone(value) { return UI_TIME_ZONES.some((option) => option.value === value) ? value : "Asia/Omsk"; }
@@ -210,6 +210,9 @@ function messageFor(code) {
     REWORK_REQUIRED: "Для повторной работы по завершённому этапу укажите явное разрешение и причину.",
     CHECKPOINTS_INCOMPLETE: "Завершите этапы и обязательные проверки текущих результатов либо укажите причину завершения с исключением.",
     RESULT_REVISION_STALE: "Основание проверки не совпадает с указанной ревизией результата.",
+    ASSESSMENT_TARGET_CONFLICT: "Серия оценки уже привязана к другой цели.",
+    ASSESSMENT_CONTEXT_CHANGED: "Требования изменились после анализа задачи. Перечитайте контекст и пересмотрите оценку.",
+    ASSESSMENT_SOURCE_NOT_FOUND: "Исторический источник оценки недоступен.",
     ACTIVE_ATTEMPT_EXISTS: "У этапа уже есть активная попытка.",
     LEASE_CONFLICT: "Попытка больше не владеет действующей арендой.",
     ATTEMPT_CLOSED: "Попытка уже закрыта.",
@@ -245,7 +248,7 @@ function resultFromReceipt(row, replayed) {
       snapshot.error = code;
       if (code === "VERSION_CONFLICT" && Number.isSafeInteger(row.result_version) && snapshot.currentVersion === undefined) snapshot.currentVersion = row.result_version;
     }
-    const status = ["VERSION_CONFLICT", "STEP_ALREADY_EXISTS", "ACTIVE_ATTEMPT_EXISTS", "LEASE_CONFLICT", "ATTEMPT_CLOSED", "RESULT_REVISION_STALE", "REPOSITORY_NOT_ATTACHED", "REPOSITORY_UNAVAILABLE", "STEP_NOT_STARTED", "LEASE_EXPIRED", "LEASE_FENCED", "REPOSITORY_ALREADY_ATTACHED", "CHECKPOINTS_INCOMPLETE", "REWORK_REQUIRED", "OBSERVATION_CONFLICT", "IDEMPOTENCY_KEY_REUSED", "COMMIT_EXCLUDED", "PLAN_DELETED", "PLAN_NOT_DELETED"].includes(code) ? 409 :
+    const status = ["ASSESSMENT_TARGET_CONFLICT", "ASSESSMENT_CONTEXT_CHANGED", "VERSION_CONFLICT", "STEP_ALREADY_EXISTS", "ACTIVE_ATTEMPT_EXISTS", "LEASE_CONFLICT", "ATTEMPT_CLOSED", "RESULT_REVISION_STALE", "REPOSITORY_NOT_ATTACHED", "REPOSITORY_UNAVAILABLE", "STEP_NOT_STARTED", "LEASE_EXPIRED", "LEASE_FENCED", "REPOSITORY_ALREADY_ATTACHED", "CHECKPOINTS_INCOMPLETE", "REWORK_REQUIRED", "OBSERVATION_CONFLICT", "IDEMPOTENCY_KEY_REUSED", "COMMIT_EXCLUDED", "PLAN_DELETED", "PLAN_NOT_DELETED"].includes(code) ? 409 :
       ["PLAN_NOT_FOUND", "STEP_NOT_FOUND", "ATTEMPT_NOT_FOUND", "SESSION_NOT_FOUND", "EVENT_NOT_FOUND", "GITHUB_REPOSITORY_UNAVAILABLE"].includes(code) ? 404 :
           code === "PLAN_PAUSED" || code === "PLAN_COMPLETED" ? 409 :
         code === "GITHUB_AUTH_INVALID" ? 401 : code === "GITHUB_ACCESS_DENIED" ? 403 :
@@ -323,7 +326,218 @@ function validateObservationPayload(payload) {
   assertSafeMetadataText(canonical(data), "data");
 }
 
+const FORECAST_METRICS = ["PLAN_ACTIVE", "CALENDAR", "PAUSED", "STEP_ATTRIBUTED", "ATTEMPT", "TOOL"];
+const assessmentPayloadSchema = {
+  type: "object", additionalProperties: false,
+  required: ["assessmentId", "planId", "expectedRequirementsDigest", "context", "method", "complexity", "unknowns", "assumptions", "dependencies", "forecast", "sources", "approach", "phase"],
+  properties: {
+    assessmentId: { type: "string", format: "uuid" }, planId: { type: "string", format: "uuid" }, stepId: { type: "string", format: "uuid" },
+    expectedRequirementsDigest: { type: "string", pattern: "^sha256:[a-f0-9]{64}$", description: "Digest of the requirements read by the agent before assessing; never refresh it just to retry a write" },
+    context: { type: "object", description: "Bounded JSON: expected result, scope and checks" },
+    method: { type: "object", additionalProperties: false, required: ["id", "version", "scale"], properties: {
+      id: { type: "string", minLength: 1, maxLength: 128 }, version: { type: "string", minLength: 1, maxLength: 128 }, scale: { description: "Agent-declared scale, bounded JSON" },
+    } },
+    complexity: { type: "object", additionalProperties: false, required: ["status", "value", "rationale"], properties: {
+      status: { enum: ["KNOWN", "UNKNOWN"] }, value: { description: "Bounded JSON; null when UNKNOWN" }, rationale: { type: "string", minLength: 1, maxLength: 4000 },
+    } },
+    ...Object.fromEntries(["unknowns", "assumptions", "dependencies"].map(key => [key, { type: "array", maxItems: 20, items: { type: "string", minLength: 1, maxLength: 1000 } }])),
+    forecast: { type: "object", additionalProperties: false, required: ["status", "metric", "lowerMs", "upperMs", "confidence", "basis", "sampleCount"], properties: {
+      status: { enum: ["KNOWN", "UNKNOWN"] }, metric: { enum: FORECAST_METRICS },
+      lowerMs: { type: ["integer", "null"], minimum: 0 }, upperMs: { type: ["integer", "null"], minimum: 0 },
+      confidence: { enum: ["HIGH", "MEDIUM", "LOW", "UNKNOWN"] }, basis: { type: "string", minLength: 1, maxLength: 4000 }, sampleCount: { type: "integer", minimum: 0 },
+    } },
+    sources: { type: "array", maxItems: 20, items: { type: "object", additionalProperties: false, required: ["planId"], properties: { planId: { type: "string", format: "uuid" }, stepId: { type: "string", format: "uuid" } } } },
+    approach: { type: "object", additionalProperties: false, required: ["description", "rationale"], properties: {
+      description: { type: "string", minLength: 1, maxLength: 4000 }, rationale: { type: "string", minLength: 1, maxLength: 4000 },
+    } },
+    phase: { type: "string", minLength: 1, maxLength: 100 }, reason: { type: "string", minLength: 1, maxLength: 1000 },
+  },
+};
+// Used by these new tools at runtime as well as discovery; free JSON remains neutral.
+function validateAssessmentValue(value, schema, path = "input", depth = 0) {
+  if (depth > 10) throw appError("VALIDATION_ERROR", "JSON depth exceeds 10.");
+  if (schema.enum && !schema.enum.includes(value)) throw appError("VALIDATION_ERROR", path + ": invalid enum.");
+  const type = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+  const types = schema.type ? [].concat(schema.type) : null;
+  if (types && !types.includes(type) && !(type === "number" && types.includes("integer") && Number.isSafeInteger(value))) throw appError("VALIDATION_ERROR", path + ": invalid type.");
+  if (typeof value === "number" && (!Number.isFinite(value) || (schema.minimum !== undefined && value < schema.minimum) || (schema.maximum !== undefined && value > schema.maximum))) throw appError("VALIDATION_ERROR", path + ": invalid number.");
+  if (typeof value === "string") {
+    if (value.length > (schema.maxLength ?? 4000) || value.trim().length < (schema.minLength ?? 0) || (schema.format === "uuid" && !UUID.test(value))) throw appError("VALIDATION_ERROR", path + ": invalid string.");
+    assertSafeMetadataText(value, path);
+  }
+  if (Array.isArray(value)) {
+    if (value.length > (schema.maxItems ?? 100) || value.length < (schema.minItems ?? 0)) throw appError("VALIDATION_ERROR", path + ": invalid array.");
+    value.forEach(item => validateAssessmentValue(item, schema.items || {}, path, depth + 1));
+  } else if (value && typeof value === "object") {
+    if (Object.keys(value).length > 100) throw appError("VALIDATION_ERROR", path + ": too many keys.");
+    for (const key of schema.required || []) if (!Object.hasOwn(value, key)) throw appError("VALIDATION_ERROR", path + ": missing " + key);
+    if (schema.additionalProperties === false) assertExactKeys(value, new Set(Object.keys(schema.properties || {})), path);
+    for (const [key, item] of Object.entries(value)) {
+      if (key.length > 128) throw appError("VALIDATION_ERROR", path + ": key too long.");
+      validateAssessmentValue(item, schema.properties?.[key] || {}, path + "." + key, depth + 1);
+    }
+  }
+}
+function validateAssessmentCommand(envelope) {
+  assertExactKeys(envelope, new Set(["schemaVersion", "commandId", "commandType", "expectedVersion", "payloadHash", "payload"]), "RecordAssessment");
+  if (envelope.schemaVersion !== 1 || !UUID.test(envelope.commandId || "") || !Number.isSafeInteger(envelope.expectedVersion) || envelope.expectedVersion < 0) throw appError("VALIDATION_ERROR", "Invalid assessment envelope.");
+  if (envelope.payloadHash !== undefined && !/^[a-f0-9]{64}$/i.test(envelope.payloadHash)) throw appError("VALIDATION_ERROR", "Invalid payloadHash.");
+  validateAssessmentValue(envelope.payload, assessmentPayloadSchema);
+  if (new TextEncoder().encode(JSON.stringify(envelope.payload)).length > 24000) throw appError("VALIDATION_ERROR", "Assessment exceeds 24000 UTF-8 bytes.");
+  const p = envelope.payload, f = p.forecast, c = p.complexity;
+  if (!isSnapshotDigest(p.expectedRequirementsDigest)) throw appError("VALIDATION_ERROR", "expectedRequirementsDigest must identify the requirements assessed by the agent.");
+  if (p.method.scale === null || p.method.scale === "") throw appError("VALIDATION_ERROR", "Declare the assessment scale.");
+  if ((c.status === "UNKNOWN") !== (c.value === null)) throw appError("VALIDATION_ERROR", "Unknown complexity requires null; known complexity requires a value.");
+  if (f.status === "UNKNOWN" ? f.lowerMs !== null || f.upperMs !== null : !Number.isSafeInteger(f.lowerMs) || !Number.isSafeInteger(f.upperMs) || f.lowerMs < 0 || f.upperMs < f.lowerMs) throw appError("VALIDATION_ERROR", "Invalid duration range in milliseconds.");
+  if (envelope.expectedVersion > 0 && !p.reason?.trim()) throw appError("VALIDATION_ERROR", "Revision reason required.");
+}
+async function assessmentTarget(db, ownerId, planId, stepId) {
+  return dbFirst(db, "SELECT * FROM assessment_targets WHERE owner_id=? AND plan_id=? AND step_id IS ?", ownerId, planId, stepId ?? null);
+}
+async function assessmentView(db, ownerId, row) {
+  const target = await assessmentTarget(db, ownerId, row.plan_id, row.step_id);
+  const digest = target ? "sha256:" + await hashCommandInput(JSON.parse(target.requirements_json)) : null;
+  return { sequence: row.sequence, assessmentId: row.assessment_id, revision: row.revision, previousRevision: row.previous_revision,
+    planId: row.plan_id, stepId: row.step_id, authorId: row.author_id, recordedAt: row.recorded_at,
+    requirementsDigest: row.requirements_digest, currentRequirementsDigest: digest, needsRevision: digest !== row.requirements_digest,
+    requirements: JSON.parse(row.requirements_json), assessment: { formatVersion: 1, ...JSON.parse(row.assessment_json) } };
+}
+const getAssessmentSchema = { type: "object", additionalProperties: false, required: ["planId"], properties: {
+  planId: { type: "string", format: "uuid" }, stepId: { type: "string", format: "uuid", description: "Context-only read; omit assessmentId and revision" },
+  assessmentId: { type: "string", format: "uuid" }, revision: { type: "integer", minimum: 1 },
+} };
+async function readAssessment(db, ownerId, args, nowMs) {
+  validateAssessmentValue(args, getAssessmentSchema);
+  if (args.assessmentId === undefined) {
+    if (args.revision !== undefined) throw appError("VALIDATION_ERROR", "revision requires assessmentId.");
+    const plan = await dbFirst(db, "SELECT plan_id FROM plans WHERE owner_id=? AND plan_id=?", ownerId, args.planId);
+    if (!plan) throw appError("PLAN_NOT_FOUND", messageFor("PLAN_NOT_FOUND"), 404);
+    const target = await assessmentTarget(db, ownerId, args.planId, args.stepId);
+    if (!target) throw appError("STEP_NOT_FOUND", messageFor("STEP_NOT_FOUND"), 404);
+    const requirements = JSON.parse(target.requirements_json);
+    return { contextOnly: true, planId: args.planId, stepId: args.stepId ?? null, requirements,
+      currentRequirementsDigest: "sha256:" + await hashCommandInput(requirements), serverNow: nowMs };
+  }
+  if (args.stepId !== undefined) throw appError("VALIDATION_ERROR", "stepId is only used for a context-only read.");
+  const rows = await dbAll(db, "SELECT * FROM assessment_revisions WHERE owner_id=? AND plan_id=? AND assessment_id=? ORDER BY revision DESC LIMIT 1", ownerId, args.planId, args.assessmentId);
+  if (!rows.length) throw appError("ASSESSMENT_NOT_FOUND", "Assessment not found.", 404);
+  const row = args.revision === undefined ? rows[0] : await dbFirst(db, "SELECT * FROM assessment_revisions WHERE owner_id=? AND plan_id=? AND assessment_id=? AND revision=?", ownerId, args.planId, args.assessmentId, args.revision);
+  if (!row) throw appError("ASSESSMENT_NOT_FOUND", "Assessment revision not found.", 404);
+  return { ...await assessmentView(db, ownerId, row), revisionCount: rows[0].revision, serverNow: nowMs };
+}
+
+const estimationHistorySchema = { type: "object", additionalProperties: false, required: ["targets", "from", "to", "timeZone"], properties: {
+  targets: { type: "array", minItems: 1, maxItems: 20, items: assessmentPayloadSchema.properties.sources.items },
+  from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, timeZone: { type: "string" },
+  asOf: { type: "integer", minimum: 0 }, afterSequence: { type: "integer", minimum: 0 }, throughSequence: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 },
+} };
+function durationStatistics(values) {
+  const measured = values.filter(value => value !== null);
+  return { sampleCount: measured.length, unknownCount: values.length - measured.length,
+    minMs: measured.length ? Math.min(...measured) : null, medianMs: median(measured),
+    maxMs: measured.length ? Math.max(...measured) : null, status: measured.length ? "AVAILABLE" : "INSUFFICIENT_DATA" };
+}
+async function readEstimationHistory(db, ownerId, args, nowMs) {
+  validateAssessmentValue(args, estimationHistorySchema);
+  const timeZone = checkTimeZone(args.timeZone), range = inclusiveDateRange(args.from, args.to, timeZone);
+  const asOf = args.asOf ?? nowMs, limit = args.limit ?? 50;
+  const throughSequence = args.throughSequence ?? (await dbFirst(db, "SELECT COALESCE(MAX(sequence),0) AS seq FROM assessment_revisions WHERE owner_id=?", ownerId)).seq;
+  if (asOf > nowMs) throw appError("VALIDATION_ERROR", "asOf exceeds server time.");
+  const targetKeys = args.targets.map(t => t.planId + ":" + (t.stepId || ""));
+  if (new Set(targetKeys).size !== targetKeys.length) throw appError("VALIDATION_ERROR", "Duplicate targets.");
+  const facts = [], allIntervals = [], planCache = new Map();
+  const clip = (start, end) => [Math.max(start, range.startMs), Math.min(end, range.endMs, asOf)];
+  const elapsed = intervals => unionIntervals(intervals.filter(([s, e]) => e > s)).reduce((n, [s, e]) => n + e - s, 0);
+  for (const target of args.targets) {
+    let cached = planCache.get(target.planId);
+    if (!cached) {
+      const plan = await dbFirst(db, "SELECT * FROM plans WHERE owner_id=? AND plan_id=? AND deleted_at IS NULL", ownerId, target.planId);
+      if (!plan) throw appError("PLAN_NOT_FOUND", messageFor("PLAN_NOT_FOUND"), 404);
+      const intervals = await dbAll(db, "SELECT interval_id,start_ms,end_ms FROM work_intervals WHERE owner_id=? AND plan_id=? AND start_ms<=? ORDER BY start_ms", ownerId, target.planId, asOf);
+      const windows = intervals.map(i => clip(i.start_ms, i.end_ms ?? asOf));
+      allIntervals.push(...windows);
+      const stepReport = await buildStepAnalytics(db, ownerId, target.planId, { ...args, timeZone, asOf }, nowMs);
+      cached = { plan, intervals, windows, stepReport }; planCache.set(target.planId, cached);
+    }
+    const { plan, intervals, windows, stepReport } = cached;
+    const step = target.stepId ? stepReport.steps.find(s => s.stepId === target.stepId) : null;
+    if (target.stepId && !step) throw appError("STEP_NOT_FOUND", messageFor("STEP_NOT_FOUND"), 404);
+    const calendarMeasured = plan.first_started_at !== null && plan.first_started_at <= asOf;
+    const activeMeasured = calendarMeasured && intervals.length > 0;
+    const planActiveMs = activeMeasured ? elapsed(windows) : null;
+    const calendarMs = calendarMeasured ? elapsed([clip(plan.first_started_at, plan.finished_at ?? asOf)]) : null;
+    const attempts = await dbAll(db, `WITH attempts AS (
+      SELECT a.attempt_id,a.step_id,a.started_at AS claimed_at,a.closed_at,a.lease_until,
+      (SELECT MIN(j.occurred_at) FROM tracker_journal j WHERE j.owner_id=a.owner_id AND j.attempt_id=a.attempt_id AND j.event_type='STEP_STARTED' AND j.command_id IS NOT NULL AND j.occurred_at<=?) AS execution_started_at
+      FROM step_attempts a JOIN plan_steps s ON s.owner_id=a.owner_id AND s.step_id=a.step_id
+      WHERE s.owner_id=? AND s.plan_id=? AND (? IS NULL OR s.step_id=?) AND a.started_at<=?
+    ), windows AS (
+      SELECT attempts.*,MIN(COALESCE(closed_at,?),lease_until,?) AS execution_ended_at FROM attempts
+    ) SELECT * FROM windows
+      WHERE (execution_started_at IS NULL AND claimed_at>=? AND claimed_at<?)
+        OR (execution_started_at<=? AND execution_started_at<? AND
+          (execution_ended_at>? OR (execution_ended_at=execution_started_at AND execution_started_at>=?)))
+      ORDER BY claimed_at,attempt_id LIMIT 101`, asOf, ownerId, target.planId, target.stepId ?? null, target.stepId ?? null, asOf,
+      asOf, asOf, range.startMs, range.endMs, asOf, range.endMs, range.startMs, range.startMs);
+    const observations = await dbAll(db, `SELECT j.event_id,j.step_id,j.source_id,j.session_id,j.occurred_at,j.classification,j.payload_json,
+      (SELECT COUNT(*) FROM tracker_journal start WHERE start.owner_id=j.owner_id AND start.plan_id=j.plan_id
+        AND start.source_id=j.source_id AND start.session_id=j.session_id AND start.event_type='tool_started'
+        AND json_extract(start.payload_json,'$.data.operationId')=json_extract(j.payload_json,'$.data.operationId')
+        AND start.step_id IS j.step_id AND start.classification='NORMAL'
+        AND NOT EXISTS(SELECT 1 FROM tracker_journal correction WHERE correction.owner_id=start.owner_id
+          AND correction.correction_of_event_id=start.event_id AND correction.received_at<=?)
+        AND start.occurred_at<=j.occurred_at AND start.received_at<=?) AS matching_starts,
+      (SELECT COUNT(*) FROM tracker_journal finish WHERE finish.owner_id=j.owner_id AND finish.plan_id=j.plan_id
+        AND finish.source_id=j.source_id AND finish.session_id=j.session_id AND finish.event_type='tool_finished'
+        AND json_extract(finish.payload_json,'$.data.operationId')=json_extract(j.payload_json,'$.data.operationId') AND finish.received_at<=?) AS matching_finishes,
+      EXISTS(SELECT 1 FROM tracker_journal correction WHERE correction.owner_id=j.owner_id AND correction.correction_of_event_id=j.event_id AND correction.received_at<=?) AS corrected
+      FROM tracker_journal j WHERE j.owner_id=? AND j.plan_id=? AND (? IS NULL OR j.step_id=?)
+        AND j.event_type='tool_finished' AND j.received_at<=? AND j.occurred_at>=? AND j.occurred_at<? AND j.occurred_at<=?
+      ORDER BY j.server_sequence LIMIT 101`, asOf, asOf, asOf, asOf, ownerId, target.planId, target.stepId ?? null, target.stepId ?? null, asOf, range.startMs, range.endMs, asOf);
+    const tools = observations.slice(0, 100).map(o => {
+      const data = JSON.parse(o.payload_json).data;
+      return { eventId: o.event_id, stepId: o.step_id, sourceId: o.source_id, sessionId: o.session_id,
+        operationId: data.operationId, toolName: data.toolName, status: data.status, classification: o.classification,
+        reportedDurationMs: data.durationMs ?? null, matchedStart: o.matching_starts === 1,
+        durationMs: o.matching_starts === 1 && o.matching_finishes === 1 && !o.corrected && o.classification === "NORMAL" ? data.durationMs ?? null : null,
+        measurement: "client-reported duration of a finished call; selected by finish time, not clipped or treated as task time" };
+    });
+    const snapshot = await readPlanExecutionSnapshot(db, ownerId, target.planId, nowMs);
+    facts.push({ ...target, source: "server work_intervals and STEP_STARTED; client tool observations", units: "ms",
+      planStatus: plan.status, planActiveMs, calendarMs, pausedMs: activeMeasured ? Math.max(0, calendarMs - planActiveMs) : null,
+      stepAttributedMs: step?.activeMs ?? null, ambiguousMs: step ? step.ambiguousMs : stepReport.ambiguousMs,
+      unattributedMs: stepReport.unattributedMs, intervals,
+      attempts: attempts.slice(0, 100).map(a => ({ ...a, durationMs: a.execution_started_at === null ? null : elapsed([clip(a.execution_started_at, a.execution_ended_at)]),
+        measurement: "execution window bounded by lease; not full task duration" })),
+      tools, truncation: { attempts: attempts.length > 100, tools: observations.length > 100, sampleLimit: 100 },
+      currentReadiness: target.stepId ? snapshot.steps.find(s => s.step_id === target.stepId)?.readyToFinish ?? false : snapshot.plan.completion.readyToFinish,
+      limitations: ["readiness is current, not historical asOf", "step attribution may be partial or ambiguous", "attempt and tool windows are not task duration", "tool measurements are client reported; missing, corrected, duplicate or non-normal observations are not trusted"] });
+  }
+  const selection = args.targets.map(() => "(plan_id=? AND step_id IS ?)").join(" OR ");
+  const history = await dbAll(db, `SELECT * FROM assessment_revisions WHERE owner_id=? AND (${selection}) AND sequence>? AND sequence<=? AND recorded_at<=? ORDER BY sequence LIMIT ?`,
+    ownerId, ...args.targets.flatMap(t => [t.planId, t.stepId ?? null]), args.afterSequence ?? 0, throughSequence, asOf, limit + 1);
+  const statistics = [];
+  for (const scope of ["plan", "step"]) {
+    const selected = facts.filter(f => scope === "step" ? f.stepId : !f.stepId);
+    for (const [metric, field] of scope === "plan" ? [["PLAN_ACTIVE", "planActiveMs"], ["CALENDAR", "calendarMs"], ["PAUSED", "pausedMs"]] : [["STEP_ATTRIBUTED", "stepAttributedMs"]]) {
+      statistics.push({ scope, metric, units: "ms", ...durationStatistics(selected.map(f => f[field])) });
+    }
+    for (const [metric, field] of [["ATTEMPT", "attempts"], ["TOOL", "tools"]]) {
+      statistics.push({ scope, metric, units: "ms", ...durationStatistics(selected.flatMap(f => f[field].map(item => item.durationMs))),
+        truncated: selected.some(f => f.truncation[field]), source: metric === "TOOL" ? "matched client-reported call durations" : "lease-bounded execution windows",
+        limitations: "bounded samples, not complete task durations; TOOL calls selected by finish time" });
+    }
+  }
+  return { asOf, throughSequence, serverNow: nowMs, period: { from: args.from, to: args.to, timeZone, ...range }, targets: args.targets,
+    facts, statistics, totalActiveMs: [...planCache.values()].some(p => p.plan.first_started_at !== null && p.plan.first_started_at <= asOf && p.intervals.length) ? elapsed(allIntervals) : null,
+    totalActiveMeasurement: "union of selected parent plan intervals; never add step or attempt durations",
+    assessments: await Promise.all(history.slice(0, limit).map(row => assessmentView(db, ownerId, row))),
+    nextAfterSequence: history.length > limit ? history[limit - 1].sequence : null,
+    assessmentStatistics: "not aggregated across methods, scales or metrics", selectionResponsibility: "agent" };
+}
+
 function validateTrackerCommand(envelope) {
+  if (envelope?.commandType === "RecordAssessment") return validateAssessmentCommand(envelope);
   if (!envelope || envelope.schemaVersion !== 1) throw appError("VALIDATION_ERROR", "Неподдерживаемая schemaVersion.");
   if (!UUID.test(envelope.commandId || "")) throw appError("VALIDATION_ERROR", "commandId должен быть UUID.");
   if (!TRACKER_COMMANDS.has(envelope.commandType)) throw appError("VALIDATION_ERROR", "Неизвестная tracker-команда.");
@@ -490,7 +704,14 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
     eventPayloadHash: await hashCommandInput(event),
   });
 
-  if (envelope.commandType === "CreateStep") {
+  if (envelope.commandType === "RecordAssessment") {
+    const target = await assessmentTarget(db, identity.ownerId, input.planId, input.stepId);
+    const requirementsJson = target?.requirements_json || "{}";
+    Object.assign(payload, { assessmentJson: JSON.stringify(input), requirementsJson,
+      requirementsDigest: "sha256:" + await hashCommandInput(JSON.parse(requirementsJson)),
+      ...await addEvent({ assessmentId: input.assessmentId, revision: envelope.expectedVersion + 1 }),
+    });
+  } else if (envelope.commandType === "CreateStep") {
     payload.commitPolicy = "NEVER";
     payload.pushPolicy = "NEVER";
     const stepId = crypto.randomUUID();
@@ -763,6 +984,11 @@ async function readTrackerCapabilities(db, ownerId) {
   const ownerScope = await hashCommandInput({ purpose: "plan-time-tracker-local-observation-queue-v1", ownerId: ownerId });
   return {
     available: true, schemaVersion: 1, version: TRACKER_VERSION,
+    assessments: { formatVersion: 1, recordTool: "RecordAssessment", getTool: "GetAssessment", historyTool: "GetEstimationHistory",
+      immutableRevisions: true, agentDefinedMethods: true, maxPayloadBytes: 24000, maxJsonDepth: 10,
+      forecastUnits: "ms", forecastMetrics: FORECAST_METRICS, initialExpectedVersion: 0, requirementsDigest: true,
+      contextRead: { tool: "GetAssessment", omitAssessmentId: true }, expectedRequirementsDigestRequired: true,
+      historyMaxTargets: 20, historyMaxLimit: 100, methodologyControlsExecution: false },
     planDeletion: { softDelete: true, deleteTool: "DeletePlan", restoreTool: "RestorePlan", deletedFilter: "deleted", restoreStartsTimer: false }, enabledPlanCount: row.enabled_plan_count,
     parallelPlans: true, planList: { tool: "ListPlans", statuses: PLAN_STATUSES, defaultLimit: 50, maxLimit: MAX_PLAN_PAGE_SIZE, order: "registeredAt DESC, planId DESC", deletedDefault: false },
     analytics: { totalActiveMs: "union of owner intervals", activeByDay: "union by local day", sumPlanActiveMs: "sum of per-plan intervals" },
@@ -1501,7 +1727,7 @@ function publicView(value) {
   if(!value || typeof value!=="object") return value;
   const hidden=new Set(["repositories","commits","commitConflicts","repositoryId","repositoryIds","repositoryRefs","repository_id","revisionSha","revision_sha","testedSha","tested_sha","baseRevisionSha","base_revision_sha","commitPolicy","pushPolicy","commit_policy","push_policy","gitEvidence"]);
   const result={};
-  for(const [key,item] of Object.entries(value)) if(!hidden.has(key)) result[key]=publicView(item);
+  for(const [key,item] of Object.entries(value)) if(!hidden.has(key)) result[key]=key === "assessment" && item?.formatVersion === 1 ? item : publicView(item);
   if(["COMMIT","WORKTREE_SNAPSHOT"].includes(result.source_kind)) result.source_kind="HISTORICAL";
   if(["commit_created","commit_pushed","push_failed"].includes(result.eventType)) {result.eventType="HISTORICAL_EVENT";result.payload={historical:true};}
   return result;
@@ -1545,6 +1771,8 @@ async function apiRoute(request, env, url, channel, now) {
     return json({ exportedAt: now, timezone: settings.timezone, plans }, 200, { "content-disposition": "attachment; filename=plan-time-tracker-export.json" });
   }
   if (request.method === "GET" && url.pathname === "/api/tracker/capabilities") return json(await readTrackerCapabilities(env.DB, identity.ownerId));
+  if (request.method === "POST" && url.pathname === "/api/tracker/assessment") return json(await readAssessment(env.DB, identity.ownerId, await bodyJson(request), now));
+  if (request.method === "POST" && url.pathname === "/api/tracker/estimation-history") return json(await readEstimationHistory(env.DB, identity.ownerId, await bodyJson(request), now));
   const trackerReceiptMatch = url.pathname.match(/^\/api\/tracker\/commands\/([^/]+)$/);
   if (request.method === "GET" && trackerReceiptMatch) return json(await readCommandReceipt(env.DB, identity.ownerId, decodeURIComponent(trackerReceiptMatch[1])));
   const executionMatch = url.pathname.match(/^\/api\/tracker\/plans\/([^/]+)\/execution$/);
@@ -1585,6 +1813,11 @@ async function apiRoute(request, env, url, channel, now) {
 const TOOL_NAMES = ["CreatePlan", "GetPlan", "ListPlans", "StartPlan", "PausePlan", "ResumePlan", "FinishPlan", "DeletePlan", "RestorePlan", "UpdatePlanMetadata", "GetAnalytics", ...TRACKER_READ_TOOLS, ...TRACKER_COMMANDS];
 function mcpTools() {
   const writeNames = new Set([...WRITE_COMMANDS, ...TRACKER_COMMANDS]);
+  const assessmentDescriptions = {
+    RecordAssessment: "Записать оценку или неизменяемую ревизию. expectedVersion=0 создаёт серию; затем укажите revision и reason. Метод и шкалу выбирает агент, прогноз отдельно в ms. Обязателен expectedRequirementsDigest из GetAssessment без assessmentId, прочитанный до анализа. Таймер не запускается.",
+    GetAssessment: "Без assessmentId: прочитать текущие requirements/currentRequirementsDigest для анализа до первой оценки или пересмотра; stepId необязателен. С assessmentId: прочитать сохранённую ревизию (revision необязателен) и needsRevision; requirements в этом ответе относятся к сохранённому снимку.",
+    GetEstimationHistory: "Факты и оценки по явным targets. Метрики ms раздельны, общий активный итог — объединение интервалов родителей. При пагинации сохраняйте asOf, throughSequence и nextAfterSequence как afterSequence. Окно дат относится к фактам времени, оценки читаются до asOf. Статистики относятся ко всей выборке фактов; readiness текущая. Попытки и вызовы не равны длительности задачи.",
+  };
   return TOOL_NAMES.map((name) => {
     let inputSchema = { type: "object", additionalProperties: false };
     if (name === "GetPlan") inputSchema = { type: "object", required: ["planId"], properties: { planId: { type: "string", format: "uuid" } }, additionalProperties: false };
@@ -1599,6 +1832,13 @@ function mcpTools() {
     else if (name === "GetTimeline") inputSchema = { type: "object", required: ["planId"], properties: { planId: { type: "string", format: "uuid" }, afterSequence: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 } }, additionalProperties: false };
     else if (name === "GetCommandReceipt") inputSchema = { type: "object", required: ["commandId"], properties: { commandId: { type: "string", format: "uuid" } }, additionalProperties: false };
     else if (name === "GetAnalytics") inputSchema = { type: "object", required: ["from", "to", "timeZone"], properties: { from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, timeZone: { type: "string" } }, additionalProperties: false };
+    else if (name === "GetAssessment") inputSchema = getAssessmentSchema;
+    else if (name === "GetEstimationHistory") inputSchema = estimationHistorySchema;
+    else if (name === "RecordAssessment") inputSchema = { type: "object", additionalProperties: false,
+      required: ["schemaVersion", "commandId", "expectedVersion", "payload"], properties: {
+        schemaVersion: { const: 1 }, commandId: { type: "string", format: "uuid" }, expectedVersion: { type: "integer", minimum: 0 },
+        payloadHash: { type: "string", pattern: "^[a-f0-9]{64}$" }, payload: assessmentPayloadSchema,
+      } };
     else if (writeNames.has(name)) {
       const required = ["schemaVersion", "commandId", "payload"];
       if ((WRITE_COMMANDS.has(name) && name !== "CreatePlan") || TRACKER_VERSIONED_COMMANDS.has(name)) required.push("expectedVersion");
@@ -1712,6 +1952,7 @@ function mcpTools() {
         }, additionalProperties: false,
       };
     }
+    if (assessmentDescriptions[name]) return { name, description: assessmentDescriptions[name], inputSchema };
     return { name: name, description: name === "DeletePlan" ? "Переместить план в удалённые: остановить его таймер и попытки, сохранить историю. Требует явной просьбы пользователя и текущей версии." : name === "RestorePlan" ? "Восстановить удалённый план без запуска таймера. Требует явной просьбы пользователя и текущей версии." : name === "ListPlans" ? "Список планов владельца с фильтрами statuses, deleted (по умолчанию false) и стабильной пагинацией nextCursor; RUNNING возвращает все активные планы. Не выбирает план для исполнителя." : name === "GetAnalytics" ? "Общее totalActiveMs и activeByDay — объединение интервалов; sumPlanActiveMs — сумма времени планов. Все значения времени в миллисекундах." : ["StartPlan", "ResumePlan", "PausePlan", "FinishPlan"].includes(name) ? name + ": меняет только указанный planId; другие планы продолжаются независимо." : name === "CreatePlan" ? "Создать план и дату составления; таймер не запускается." : name === "CreateStep" ? "Создать checkpoint в плане; таймер плана не меняется." : name === "AppendObservation" ? "Добавить bounded metadata observation; не меняет состояние шага или таймер." : name + " через общий командный/API слой Sites.", inputSchema: inputSchema };
   });
 }
@@ -1738,6 +1979,8 @@ async function mcpRoute(request, env, now) {
     await ensureOwner(env.DB, identity, now);
     let result;
     if (name === "GetPlan") result = await readPlan(env.DB, identity.ownerId, args.planId, now);
+    else if (name === "GetAssessment") result = await readAssessment(env.DB, identity.ownerId, args, now);
+    else if (name === "GetEstimationHistory") result = await readEstimationHistory(env.DB, identity.ownerId, args, now);
     else if (name === "ListPlans") result = await listPlans(env.DB, identity.ownerId, now, args);
     else if (name === "GetAnalytics") result = await buildAnalytics(env.DB, identity.ownerId, args, now);
     else if (name === "GetTrackerCapabilities") result = await readTrackerCapabilities(env.DB, identity.ownerId);

@@ -1,8 +1,29 @@
 # Plan Time Tracker
 
-The tracker records work time through explicit authenticated MCP commands and the owner UI. `CreatePlan` registers a plan; only Start/Pause/Resume/Finish change server-timed intervals. Observations, tools, attempts and source changes never accrue or stop time on their own. One owner may run several plans at once. Start/Resume/Pause/Finish only affect the supplied planId. Calendar/active/paused durations remain per-plan. The connected skill requires tracking for every actual authorized plan execution; drafting alone does not register or start a plan.
+The tracker records work time through explicit authenticated MCP commands and the owner UI. `CreatePlan` registers a plan; only Start/Pause/Resume/Finish change server-timed intervals. Observations, tools, attempts and source changes never accrue or stop time on their own. One owner may run several plans at once. Start/Resume/Pause/Finish only affect the supplied planId. Calendar/active/paused durations remain per-plan. The connected skills register plans, substantial steps and assessments during planning, including /plan, without implementation or a timer; they also track authorized execution and continuation.
 
 The current contract removes repository management/filters, synchronization, commit attribution, commit/push policies and Git observations. It requires no external integration token. GitHub source publication does not deploy the Worker or update installed tools.
+
+## Оценки задач (0.4.0)
+
+Нейтральные RecordAssessment/GetAssessment/GetEstimationHistory и независимые
+assess-task/track-plan описаны в [контракте](../../docs/assessments.md).
+Версии package.json, plugin.json, serverInfo и capabilities согласованы на 0.4.0;
+schemaVersion команд остаётся 1, версия методики задаётся агентом отдельно.
+Для HTTP запись использует POST /api/commands, чтение — POST
+/api/tracker/assessment и /api/tracker/estimation-history с теми же JSON-полями,
+что MCP. GetTrackerCapabilities сообщает assessments; ни балл, ни методика не
+служат условием исполнения. Перед оценкой GetAssessment({planId, stepId?}) без assessmentId возвращает текущий контекст и digest; запись требует expectedRequirementsDigest этого контекста. Изменение требований после анализа отклоняет запись с ASSESSMENT_CONTEXT_CHANGED, без создания ревизии.
+
+На заполненной базе после 0016 применяется только новая 0017_assessments.sql.
+Тесты проверяют сохранность всех старых строк и отсутствие выдуманных baseline.
+Новой базе нужна полная цепочка 0001–0017. Ревизии оценок нельзя менять/удалять;
+откат приложения не должен удалять эту таблицу или повторять миграцию. Миграция
+добавляет таблицу, индексы, view и триггеры без переписывания существующих таблиц;
+локальная SQLite-проверка не измеряет production-блокировки или объём D1.
+
+Исходники ещё не развёрнуты. Секция ниже документирует сохранённый контракт удаления,
+введённый в 3.1.0; его историческая миграция не изменялась.
 
 ## Удаление и восстановление планов (3.1.0)
 
@@ -22,7 +43,7 @@ The current contract removes repository management/filters, synchronization, com
 
 Ошибки: PLAN_NOT_FOUND (404, в том числе чужой план), VERSION_CONFLICT (409), PLAN_DELETED (409: повторное удаление с новой командой либо запись в удалённый план), PLAN_NOT_DELETED (409: восстановление обычного плана), VALIDATION_ERROR (400 для некорректного конверта/фильтра). MCP возвращает те же коды в `isError`/`structuredContent`. Не повторяйте конфликтную команду автоматически с новой версией: сначала перечитайте план и получите новое явное намерение. Все записи и конкурентные команды проверяются в одной SQL-операции; частичный отказ откатывает отметку, интервалы, попытки, события и квитанцию вместе.
 
-`GetTrackerCapabilities` сообщает `version: "3.1.0"`, `planDeletion: {softDelete:true, deleteTool:"DeletePlan", restoreTool:"RestorePlan", deletedFilter:"deleted", restoreStartsTimer:false}` и `planList.deletedDefault:false`. MCP initialize также возвращает 3.1.0. Команды удаления/восстановления требуют отдельного намерения пользователя; они не следуют из окончания этапа или ответа.
+`GetTrackerCapabilities` сообщает `version: "0.4.0"`, `planDeletion: {softDelete:true, deleteTool:"DeletePlan", restoreTool:"RestorePlan", deletedFilter:"deleted", restoreStartsTimer:false}` и `planList.deletedDefault:false`. MCP initialize также возвращает 0.4.0 в подготовленном Worker. Команды удаления/восстановления требуют отдельного намерения пользователя; они не следуют из окончания этапа или ответа.
 
 Обновление существующей параллельной v3-базы: примените только `drizzle/0016_plan_deletion.sql` после 0015, затем опубликуйте Worker 3.1.0 и обновите пакет/обнаружение MCP-инструментов. Для новой базы нужна вся цепочка 0001–0016. Миграция добавляет nullable-поле и триггеры, сохраняя строки и активные интервалы до явного удаления. Это не путь обновления старой single-plan-базы. Не возвращайте старый Worker после появления удалённых планов: он не фильтрует их в чтении. Build сохраняет неизменённые migration sidecars в `dist/.openai/drizzle/` по [официальному контракту упаковки Sites](https://github.com/openai/sites/blob/7eb9d4b9cf93ad7e64aebc8a5ca70e29ec2cfb94/packages/sites-vite-plugin/README.md). Sites применяет hosted-миграции до загрузки Worker; отдельной shell-команды hosted SQL здесь нет. Перед публикацией существующей базы подтвердите историю применения 0001–0015 и выбор только новой 0016. Не создавайте фиктивный journal и не запускайте старую цепочку заново. Локальные тесты упакованной миграции не подтверждают состояние hosted migration ledger.
 
@@ -46,11 +67,11 @@ Normal finish is guarded by current successful results, closed attempts and the 
 
 ## Fresh installation and retained history
 
-Version 3.0.0 targets a new empty database. Apply canonical migrations in order through `0016_plan_deletion.sql`; the revised `0001_initial.sql` permits parallel RUNNING plans from creation. One open interval and nonoverlapping intervals per plan remain enforced. There is no upgrade path from a deployed single-plan database in this patch and no extra migration for dropping the old constraint. Do not apply only the revised Worker to that database. A future release must provision an empty database and deploy the matching Worker/package deliberately; source publication does not reset existing data or deploy anything.
+Version 3.0.0 targets a new empty database. For a fresh 0.4.0 installation apply canonical migrations in order through `0017_assessments.sql`; the revised `0001_initial.sql` permits parallel RUNNING plans from creation. One open interval and nonoverlapping intervals per plan remain enforced. There is no upgrade path from a deployed single-plan database in this patch and no extra migration for dropping the old constraint. Do not apply only the revised Worker to that database. A future release must provision an empty database and deploy the matching Worker/package deliberately; source publication does not reset existing data or deploy anything.
 
 Other historical migrations/tables and historical documents under `docs/` are retained. Existing local historical-schema tests cover those structures on the revised fresh-install chain; they do not attest upgrade support for the old single-plan deployment. Historical evidence semantics and public redaction remain unchanged. Do not deploy an older Worker against v3 data.
 
-## Current hosted installation
+## Historical hosted installation (3.0.0)
 
 The fresh private v3 Site is https://plan-time-tracker-v3.seraf-k.chatgpt.site (`appgprj_6ad342fe722481919f98177e1c447931`). Its first published version uses Site source commit `b3f392358e73e3881113ed611aff5c5194dabc74`, built from GitHub `74a86a25d98f5965e9ce7801f06e4d15889c003e` with the new project identity. Deployment `appgdep_6ad3434ca4848191b36fcaf34371485e` succeeded with MCP enabled; database overview confirmed the full schema and empty plans/work intervals. Archive checksum: `sha256:ff5e6f46149c12aadfa542d90d568ce93961c6a97774543687ee3bbeb695a135`.
 

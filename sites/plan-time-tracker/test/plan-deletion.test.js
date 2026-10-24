@@ -80,7 +80,7 @@ test("MCP exposes versioned delete/restore and deleted-only pagination with stri
       assert.deepEqual(Object.keys(schema.properties.payload.properties), ["planId", "reason"]);
     }
     const capabilities = (await mcp(c, "GetTrackerCapabilities")).value.result.structuredContent;
-    assert.equal(capabilities.version, "3.1.0");assert.equal(capabilities.planDeletion.restoreStartsTimer, false);
+    assert.equal(capabilities.version, "0.4.0");assert.equal(capabilities.planDeletion.restoreStartsTimer, false);
     assert.equal(capabilities.planList.deletedDefault, false);
     const id = crypto.randomUUID();
     const args = { schemaVersion: 1, commandId: id, expectedVersion: 0, payload: { planId: PLAN } };
@@ -101,7 +101,7 @@ test("MCP exposes versioned delete/restore and deleted-only pagination with stri
     for (const flag of ["yes", "1", ""]) assert.equal((await call(c, "/api/plans?deleted=" + flag)).status, 400);
     const restored = await mcp(c, "RestorePlan", { ...args, commandId: crypto.randomUUID(), expectedVersion: 1 });
     assert.equal(restored.value.result.structuredContent.result.deletedAt, null);
-    assert.equal((await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "initialize" })).value.result.serverInfo.version, "3.1.0");
+    assert.equal((await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "initialize" })).value.result.serverInfo.version, "0.4.0");
   } finally { c.close(); }
 });
 
