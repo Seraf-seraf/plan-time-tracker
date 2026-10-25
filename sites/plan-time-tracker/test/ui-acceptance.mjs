@@ -25,7 +25,7 @@ await page.route("**/*", async route => {
 try {
   await page.goto("http://localhost");await page.locator('#plans[data-loaded="true"]').waitFor({ state: "attached" });
   const widths = [];
-  for (const width of [360, 390, 768, 1440]) {
+  for (const width of [320, 360, 390, 768, 1440]) {
     await page.setViewportSize({ width, height: 1000 });
     await page.locator('[data-view="overview"]').click();
     await page.locator("#newPlan").click();await page.locator("#title").fill("Draft preserved until close");
@@ -40,7 +40,25 @@ try {
     }
     widths.push(width);
     await page.screenshot({ path: resolve(artifacts, "settings-" + width + ".png"), fullPage: true });
+    assert.equal(await page.locator('.nav [data-view="deleted"]').count(), 0);
+    await page.locator("#openDeleted").focus();await page.keyboard.press("Enter");
+    await page.getByText("Удалённых планов нет.", { exact: true }).waitFor();
+    assert.equal(await page.locator('[data-view="settings"]').getAttribute("aria-current"), "page");
+    assert.equal(await page.locator("#deletedHeading").evaluate(node => node === document.activeElement), true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.locator("#backSettings").click();
+    assert.equal(await page.locator("#openDeleted").evaluate(node => node === document.activeElement), true);
   }
+  await page.locator("#tz").selectOption("Europe/Moscow");
+  await page.locator('#settings button').click();
+  await page.getByText("Часовой пояс сохранён.", { exact: true }).waitFor();
+  assert.equal(c.db.sqlite.prepare("SELECT timezone FROM owners WHERE owner_id=?").get(OWNER).timezone, "Europe/Moscow");
+  await page.locator("#tz").selectOption("Asia/Omsk");
+  await page.locator('#settings button').click();
+  await page.waitForFunction(() => document.querySelector('#settings').getAttribute('aria-busy') !== 'true');
+  const downloadPromise = page.waitForEvent("download");
+  await page.locator('.settings-export').click();
+  assert.equal((await downloadPromise).suggestedFilename(), "plan-time-tracker-export.json");
   assert.equal(await page.locator('#repoIds,#sync,#repos,#overviewRepo,#planRepo,#analyticsRepo').count(), 0);
   assert(!/GitHub|Репозитории|Коммиты/.test(await page.locator("body").innerText()));
   await page.locator('[data-view="overview"]').click();await page.locator("#newPlan").click();

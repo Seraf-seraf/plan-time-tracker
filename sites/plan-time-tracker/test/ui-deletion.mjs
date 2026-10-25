@@ -22,11 +22,14 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXE
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 page.setDefaultTimeout(10000);
 const posts = [], errors = [], paths = [];
-let loseDelete = true, loseRestore = true, holdDelete = false, releaseDelete;
+let loseDelete = true, loseRestore = true, holdDelete = false, releaseDelete, failDeleted = true;
 page.on("pageerror", error => errors.push(error.message));
 await page.route("**/*", async route => {
   const request = route.request(), url = new URL(request.url());assert.equal(url.origin, "http://localhost", "external requests forbidden");
   paths.push(url.pathname + url.search);const body = request.postDataJSON();if (body) posts.push(body);
+  if (url.pathname === "/api/plans" && url.searchParams.get("deleted") === "true" && failDeleted) {
+    failDeleted = false;return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "UNAVAILABLE", message: "Временная ошибка" } }) });
+  }
   const response = await c.worker.fetch(new Request(request.url(), { method: request.method(), headers: { "content-type": "application/json", "oai-authenticated-user-id": OWNER }, ...(request.postData() ? { body: request.postData() } : {}) }), { DB: c.db });
   if (body?.commandType === "DeletePlan" && loseDelete) { loseDelete = false;return route.abort("failed"); }
   if (body?.commandType === "RestorePlan" && loseRestore) { loseRestore = false;return route.abort("failed"); }
@@ -46,10 +49,18 @@ try {
   confirm();await active(PLAN).getByRole("button", { name: "Удалить", exact: true }).click();await active(PLAN).waitFor({ state: "detached" });
   const deletes = posts.filter(p => p.commandType === "DeletePlan");assert.equal(deletes.length, 2);assert.deepEqual(deletes[0], deletes[1]);
   assert.equal(bState(), beforeB);assert.equal(c.db.sqlite.prepare("SELECT status FROM step_attempts WHERE attempt_id=?").get(lease.attemptId).status, "ABANDONED");
-  await page.locator('[data-view="deleted"]').click();
+  await page.locator('[data-view="settings"]').click();
+  await page.locator("#openDeleted").click();
+  await page.locator('#deleted').getByRole("button", { name: "Повторить", exact: true }).click();
   await page.waitForFunction(() => document.querySelectorAll("#deleted>.row").length === 102);
+  assert.equal(await page.locator('[data-view="settings"]').getAttribute("aria-current"), "page");
   assert(paths.some(path => path.startsWith("/api/plans?deleted=true&limit=100&cursor=")));
   await page.locator('#deleted [data-plan-id="' + PLAN + '"]').getByRole("button", { name: "План A", exact: true }).click();
+  await page.getByText("План удалён. Этапы и история доступны только для чтения.", { exact: true }).waitFor();
+  assert.equal(await page.locator("#backPlans").innerText(), "← К удалённым планам");
+  assert.equal(await page.locator('[data-view="settings"]').getAttribute("aria-current"), "page");
+  await page.locator("#backPlans").click();
+  await page.locator('#deleted [data-plan-id="' + PLAN + '"] .plan-open').click();
   await page.getByText("План удалён. Этапы и история доступны только для чтения.", { exact: true }).waitFor();
   assert.equal(await page.locator("#planDetail form").count(), 0);
   assert.equal(await page.locator("#planDetail").getByRole("button", { name: "Восстановить", exact: true }).count(), 1);
@@ -66,6 +77,12 @@ try {
   const restores = posts.filter(p => p.commandType === "RestorePlan");assert.equal(restores.length, 2);assert.deepEqual(restores[0], restores[1]);
   assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM work_intervals WHERE plan_id=? AND end_ms IS NULL").get(PLAN).n, 0);
   assert.equal(c.db.sqlite.prepare("SELECT status FROM plans WHERE plan_id=?").get(PLAN).status, "PAUSED");
+  assert.equal(await page.locator("#backPlans").innerText(), "← К удалённым планам");
+  await page.locator("#backPlans").click();
+  await page.waitForFunction(() => document.querySelectorAll("#deleted>.row").length === 101);
+  assert.equal(await page.locator('#deleted [data-plan-id="' + PLAN + '"]').count(), 0);
+  await page.locator("#backSettings").click();
+  assert.equal(await page.locator("#view-settings").isVisible(), true);
   await page.locator('[data-view="plans"]').click();
   await page.locator('#plans [data-plan-id="' + PLAN + '"]').getByRole("button", { name: "Продолжить", exact: true }).click();
   assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM work_intervals WHERE plan_id=? AND end_ms IS NULL").get(PLAN).n, 1);
@@ -97,7 +114,10 @@ try {
   for (const width of [320, 360, 390, 600, 1440]) {
     await page.setViewportSize({ width, height: 1100 });
     for (const view of ["plans", "overview", "deleted"]) {
-      await page.locator('[data-view="' + view + '"]').click();
+      if (view === "deleted") {
+        await page.locator('[data-view="settings"]').click();
+        await page.locator("#openDeleted").click();
+      } else await page.locator('[data-view="' + view + '"]').click();
       if (view === "deleted") await page.waitForFunction(() => document.querySelectorAll("#deleted>.row").length === 103);
       const geometry = await page.locator('#view-' + view).evaluate((root) => {
         const failures = [];
