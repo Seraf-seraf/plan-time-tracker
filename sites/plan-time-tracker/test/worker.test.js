@@ -587,7 +587,7 @@ test("owner export includes audit data and never includes another owner's plans"
   assert.equal(exported.response.headers.get("content-disposition"), "attachment; filename=plan-time-tracker-export.json");
   assert.equal(exported.body.plans.length, 1);
   assert.equal(exported.body.plans[0].title, "<script>not markup</script>");
-  assert.ok(Array.isArray(exported.body.plans[0].events));
+  assert.ok(Array.isArray(exported.body.plans[0].timeline));
   assert.ok(Array.isArray(exported.body.plans[0].intervals));
   assert.equal(Object.hasOwn(exported.body.plans[0], "commits"), false);
   assert.equal(Object.hasOwn(exported.body.plans[0], "repositories"), false);

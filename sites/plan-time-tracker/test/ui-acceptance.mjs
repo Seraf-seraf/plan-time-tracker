@@ -1,6 +1,6 @@
 // Browser QA against the actual Worker and isolated SQLite, with every request intercepted.
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { context, OWNER } from "./fixtures/tracker-db.mjs";
@@ -58,7 +58,13 @@ try {
   await page.waitForFunction(() => document.querySelector('#settings').getAttribute('aria-busy') !== 'true');
   const downloadPromise = page.waitForEvent("download");
   await page.locator('.settings-export').click();
-  assert.equal((await downloadPromise).suggestedFilename(), "plan-time-tracker-export.json");
+  const download = await downloadPromise;
+  assert.equal(download.suggestedFilename(), "plan-time-tracker-export.json");
+  const downloadedReport = JSON.parse(readFileSync(await download.path(), "utf8"));
+  assert.equal(downloadedReport.formatVersion, 1);
+  assert.equal(downloadedReport.timezone, "Asia/Omsk");
+  assert.equal(downloadedReport.summary.planCount, 0);
+  assert.deepEqual(downloadedReport.plans, []);
   assert.equal(await page.locator('#repoIds,#sync,#repos,#overviewRepo,#planRepo,#analyticsRepo').count(), 0);
   assert(!/GitHub|Репозитории|Коммиты/.test(await page.locator("body").innerText()));
   await page.locator('[data-view="overview"]').click();await page.locator("#newPlan").click();

@@ -979,6 +979,196 @@ async function readPlan(db, ownerId, planId, nowMs) {
   return plan;
 }
 
+// One statement gives every exported collection the same SQLite/D1 read snapshot.
+// Return one JSON record per row rather than one unbounded JSON aggregate cell.
+const EXPORT_SOURCES = {
+  settings: ["owners", "timezone"],
+  plans: ["plans", "plan_id,title,description,acceptance_criteria,plan_created_precision,plan_created_at_ms,plan_created_on,plan_created_timezone,registered_at,status,deleted_at,first_started_at,finished_at,source_reference"],
+  intervals: ["work_intervals", "interval_id,plan_id,start_ms,end_ms"],
+  events: ["plan_events", "event_id,plan_id,command_id,actor_type,event_type,server_occurred_at,reason"],
+  dates: ["plan_date_history", "history_id,plan_id,old_precision,old_at_ms,old_on,old_timezone,changed_at,reason"],
+  config: ["tracker_plan_config", "plan_id,enabled"],
+  steps: ["plan_steps", "step_id,plan_id,ordinal,title,status,expected_result,required_checks_json,current_result_revision,created_at,updated_at"],
+  attempts: ["step_attempts", "attempt_id,step_id,session_id,status,lease_until,rework_reason,started_at,closed_at"],
+  sessions: ["tracker_sessions", "session_id,client_type,executor_label"],
+  results: ["tracker_result_sources", "step_id,result_id,attempt_id,revision,outcome,summary,source_repository_id,source_kind,snapshot_digest,snapshot_format_version,payload_hash,created_at"],
+  checks: ["tracker_checks_with_source", "step_id,check_id,result_revision,event_id,check_key,status,exit_code,evidence_summary,evidence_url,tested_snapshot_digest,result_repository_id,matches_result,created_at,server_sequence"],
+  journal: ["tracker_journal", "event_id,plan_id,step_id,attempt_id,command_id,server_sequence,event_type,payload_json,occurred_at,received_at,classification,correction_of_event_id,payload_hash"],
+  assessments: ["assessment_revisions", "assessment_id,revision,plan_id,step_id,recorded_at,requirements_digest,requirements_json,assessment_json"],
+  targets: ["assessment_targets", "plan_id,step_id,requirements_json"],
+  exceptions: ["tracker_finish_exceptions", "plan_id,reason,snapshot_json,created_at"],
+  incomplete: ["tracker_incomplete_steps", "plan_id,step_id"],
+  repositories: ["repositories", "repository_id,is_private,access_state"],
+};
+
+function groupExportRows(rows, key) {
+  const groups = new Map();
+  for (const row of rows) {
+    const value = row[key];
+    if (!groups.has(value)) groups.set(value, []);
+    groups.get(value).push(row);
+  }
+  return groups;
+}
+
+function exportPlanDate(precision, at, on, timeZone) {
+  return precision === "instant" ? { precision, value: new Date(at).toISOString(), timeZone } : { precision, on, timeZone };
+}
+
+function exportTimeline(journal, legacy, results, checks, protectedResult) {
+  const referenced = new Set(journal.map(e => e.correction_of_event_id).filter(Boolean));
+  const byCommand = new Map();
+  const resultEvents = new Map(results.map(r => [r.step_id + ":" + r.attempt_id + ":" + r.created_at + ":" + r.payload_hash, r]));
+  const checkEvents = new Map(checks.map(c => [c.event_id, c]));
+  const events = [];
+  for (const row of journal) {
+    if (["heartbeat", "LEASE_RENEWED"].includes(row.event_type) && row.classification === "NORMAL" && !referenced.has(row.event_id)) continue;
+    const payload = JSON.parse(row.payload_json), check = checkEvents.get(row.event_id);
+    const result = row.event_type === "CHECK_RECORDED"
+      ? results.find(r => r.step_id === row.step_id && r.revision === payload.resultRevision)
+      : row.event_type === "STEP_RESULT_RECORDED" ? resultEvents.get(row.step_id + ":" + row.attempt_id + ":" + row.occurred_at + ":" + row.payload_hash) : null;
+    const event = {
+      eventId: row.event_id, eventType: row.event_type, stepId: row.step_id, attemptId: row.attempt_id,
+      occurredAt: row.occurred_at, recordedAt: row.received_at, classification: row.classification,
+    };
+    if (row.correction_of_event_id) event.correctionOfEventId = row.correction_of_event_id;
+    if (["commit_created", "commit_pushed", "push_failed"].includes(row.event_type)) {
+      event.eventType = "HISTORICAL_EVENT";event.details = { historical: true };
+    } else if (result && protectedResult(result.source_repository_id)) {
+      event.details = { protectedDetailsHidden: true };
+    } else if (OBSERVATION_TYPES.has(row.event_type)) {
+      event.details = publicView(payload.data || {});
+    } else {
+      // Event envelopes have an explicit projection; arbitrary assessment data is handled separately.
+      event.details = Object.fromEntries(["reason", "changedFields", "ordinal", "resultRevision", "checkKey", "status", "outcome", "assessmentId", "revision", "allowIncomplete", "rework", "disposition"]
+        .filter(key => Object.hasOwn(payload, key)).map(key => [key, payload[key]]));
+      if (row.event_type === "STEP_RESULT_RECORDED" && result) event.details.resultId = result.result_id;
+      if (check) event.details.checkId = check.check_id;
+    }
+    if (row.command_id) byCommand.set(row.command_id + ":" + event.eventType, event);
+    events.push({ event, order: row.server_sequence });
+  }
+  for (const row of legacy) {
+    const eventType = "PLAN_" + row.event_type;
+    const duplicate = byCommand.get(row.command_id + ":" + eventType);
+    if (duplicate) {
+      duplicate.actorType = row.actor_type;
+      if (row.reason) duplicate.details.reason = row.reason;
+    } else events.push({ event: {
+      eventId: row.event_id, eventType, actorType: row.actor_type,
+      occurredAt: row.server_occurred_at, recordedAt: row.server_occurred_at,
+      details: row.reason ? { reason: row.reason } : {},
+    }, order: -1 });
+  }
+  return events.sort((a, b) => a.event.recordedAt - b.event.recordedAt || a.order - b.order || a.event.eventId.localeCompare(b.event.eventId)).map(item => item.event);
+}
+
+async function buildExportReport(db, ownerId, nowMs) {
+  const sql = Object.entries(EXPORT_SOURCES).map(([kind, [table, columns]]) =>
+    `SELECT '${kind}' AS kind,json_object(${columns.split(",").map(column => `'${column}',${column}`).join(",")}) AS record FROM ${table} WHERE owner_id=?1`).join(" UNION ALL ");
+  const data = Object.fromEntries(Object.keys(EXPORT_SOURCES).map(key => [key, []]));
+  const snapshot = await db.prepare(sql).bind(ownerId).all();
+  if (snapshot.success === false || !Array.isArray(snapshot.results)) throw appError("INTERNAL_ERROR", "Не удалось прочитать полный отчёт.", 500);
+  for (const row of snapshot.results) data[row.kind].push(JSON.parse(row.record));
+  const sort = (rows, time, id) => rows.sort((a, b) => a[time] - b[time] || String(a[id]).localeCompare(String(b[id])));
+  const byPlan = Object.fromEntries(["intervals", "events", "dates", "steps", "journal", "assessments", "exceptions", "incomplete"].map(key => [key, groupExportRows(data[key], "plan_id")]));
+  const byStep = Object.fromEntries(["attempts", "results", "checks"].map(key => [key, groupExportRows(data[key], "step_id")]));
+  const allowedRepositories = new Set(data.repositories.filter(r => !r.is_private || r.access_state === "available").map(r => r.repository_id));
+  const protectedResult = repositoryId => Boolean(repositoryId && !allowedRepositories.has(repositoryId));
+  const sessions = new Map(data.sessions.map(s => [s.session_id, s]));
+  const configs = new Map(data.config.map(c => [c.plan_id, c.enabled]));
+  const targetDigests = new Map();
+  for (const target of data.targets) targetDigests.set(target.plan_id + ":" + (target.step_id || ""), "sha256:" + await hashCommandInput(JSON.parse(target.requirements_json)));
+  const assessmentViewForExport = row => {
+    const payload = JSON.parse(row.assessment_json);
+    // Only remove known envelope fields. Preserve every key in user-defined context, scale, etc.
+    const { assessmentId, planId, stepId, expectedRequirementsDigest, ...assessment } = payload;
+    return { assessmentId: row.assessment_id, revision: row.revision, recordedAt: row.recorded_at,
+      requirements: JSON.parse(row.requirements_json), needsRevision: row.requirements_digest !== targetDigests.get(row.plan_id + ":" + (row.step_id || "")),
+      assessment: { formatVersion: 1, ...assessment } };
+  };
+  const plans = sort(data.plans, "registered_at", "plan_id").map(row => {
+    const related = key => byPlan[key].get(row.plan_id) || [];
+    const intervals = sort(related("intervals"), "start_ms", "interval_id");
+    const journal = related("journal");
+    const steps = sort(related("steps"), "ordinal", "step_id");
+    const results = steps.flatMap(s => byStep.results.get(s.step_id) || []);
+    const checks = steps.flatMap(s => byStep.checks.get(s.step_id) || []);
+    const attempts = steps.flatMap(s => byStep.attempts.get(s.step_id) || []);
+    const starts = new Map();
+    for (const event of journal) if (event.event_type === "STEP_STARTED" && event.command_id) {
+      const previous = starts.get(event.attempt_id);
+      starts.set(event.attempt_id, Math.min(previous ?? Infinity, event.occurred_at));
+    }
+    const startedAttempts = attempts.filter(a => starts.has(a.attempt_id)).map(a => ({ ...a, execution_started_at: starts.get(a.attempt_id) }));
+    const end = row.finished_at ?? row.deleted_at ?? nowMs;
+    const measured = row.first_started_at != null;
+    const activeMs = measured ? calculateActiveMs(intervals, nowMs) : null;
+    const calendarMs = measured ? Math.max(0, end - row.first_started_at) : null;
+    const timing = attributeStepTime(row, steps, intervals, startedAttempts, { startMs: 0, endMs: end }, Math.min(nowMs, end));
+    const stepTiming = new Map(timing.steps.map(s => [s.stepId, s]));
+    const incomplete = new Set(related("incomplete").map(s => s.step_id));
+    const assessments = related("assessments").sort((a, b) => a.recorded_at - b.recorded_at || a.assessment_id.localeCompare(b.assessment_id) || a.revision - b.revision);
+    return {
+      planId: row.plan_id, title: row.title, description: row.description, acceptanceCriteria: row.acceptance_criteria,
+      planCreatedAt: exportPlanDate(row.plan_created_precision, row.plan_created_at_ms, row.plan_created_on, row.plan_created_timezone),
+      registeredAt: row.registered_at, status: row.status, deletedAt: row.deleted_at, firstStartedAt: row.first_started_at, finishedAt: row.finished_at,
+      sourceReference: row.source_reference,
+      completion: { trackerEnabled: Boolean(configs.get(row.plan_id)), incompleteStepCount: incomplete.size,
+        readyToFinish: row.deleted_at == null && (!configs.get(row.plan_id) || incomplete.size === 0) },
+      activeMs, calendarMs, pausedMs: measured ? Math.max(0, calendarMs - activeMs) : null,
+      unattributedMs: timing.unattributedMs, ambiguousMs: timing.ambiguousMs,
+      intervals: intervals.map(i => ({ intervalId: i.interval_id, startMs: i.start_ms, endMs: i.end_ms })),
+      dateHistory: sort(related("dates"), "changed_at", "history_id").map(d => ({
+        previous: exportPlanDate(d.old_precision, d.old_at_ms, d.old_on, d.old_timezone), changedAt: d.changed_at, reason: d.reason,
+      })),
+      assessments: assessments.filter(a => a.step_id == null).map(assessmentViewForExport),
+      steps: steps.map(step => ({
+        stepId: step.step_id, ordinal: step.ordinal, title: step.title, expectedResult: step.expected_result,
+        requiredChecks: JSON.parse(step.required_checks_json), status: step.status, createdAt: step.created_at, updatedAt: step.updated_at,
+        currentResultRevision: step.current_result_revision, readyToFinish: !incomplete.has(step.step_id),
+        activeMs: stepTiming.get(step.step_id).activeMs, ambiguousMs: stepTiming.get(step.step_id).ambiguousMs,
+        attempts: sort(byStep.attempts.get(step.step_id) || [], "started_at", "attempt_id").map(a => {
+          const start = starts.get(a.attempt_id) ?? null, session = sessions.get(a.session_id);
+          return { attemptId: a.attempt_id, status: a.status,
+            executionState: a.status !== "OPEN" ? a.status : a.lease_until <= nowMs ? "LEASE_EXPIRED" : start == null ? "AWAITING_START" : "RUNNING",
+            claimedAt: a.started_at, startedAt: start, closedAt: a.closed_at,
+            executionEndAt: start == null ? null : Math.min(a.closed_at ?? nowMs, a.lease_until, nowMs),
+            reworkReason: a.rework_reason, executor: { clientType: session?.client_type ?? "UNKNOWN", label: session?.executor_label ?? null } };
+        }),
+        results: sort(byStep.results.get(step.step_id) || [], "revision", "result_id").map(r => ({
+          resultId: r.result_id, attemptId: r.attempt_id, revision: r.revision, outcome: r.outcome, summary: r.summary, recordedAt: r.created_at,
+          source: { kind: ["COMMIT", "WORKTREE_SNAPSHOT"].includes(r.source_kind) ? "HISTORICAL" : r.source_kind,
+            snapshotDigest: protectedResult(r.source_repository_id) ? null : r.snapshot_digest,
+            formatVersion: r.snapshot_format_version, protectedDetailsHidden: protectedResult(r.source_repository_id) },
+        })),
+        checks: sort(byStep.checks.get(step.step_id) || [], "server_sequence", "check_id").map(c => ({
+          checkId: c.check_id, resultRevision: c.result_revision, checkKey: c.check_key, status: c.status, exitCode: c.exit_code,
+          evidenceSummary: c.evidence_summary, evidenceUrl: protectedResult(c.result_repository_id) ? null : c.evidence_url,
+          testedSnapshotDigest: protectedResult(c.result_repository_id) ? null : c.tested_snapshot_digest,
+          matchesResult: Boolean(c.matches_result), recordedAt: c.created_at, protectedEvidenceHidden: protectedResult(c.result_repository_id),
+        })),
+        assessments: assessments.filter(a => a.step_id === step.step_id).map(assessmentViewForExport),
+      })),
+      finishExceptions: sort(related("exceptions"), "created_at", "reason").map(e => ({
+        reason: e.reason, recordedAt: e.created_at,
+        incompleteSteps: JSON.parse(e.snapshot_json).map(s => ({ stepId: s.stepId, ordinal: s.ordinal, status: s.status, currentResultRevision: s.currentResultRevision })),
+      })),
+      timeline: exportTimeline(journal, related("events"), results, checks, protectedResult),
+    };
+  });
+  const included = plans.filter(p => p.deletedAt == null);
+  const measured = included.filter(p => p.activeMs != null);
+  const union = unionIntervals(included.flatMap(p => p.intervals.map(i => [i.startMs, i.endMs ?? nowMs])));
+  return {
+    formatVersion: 1, exportedAt: nowMs, timezone: data.settings[0]?.timezone || "UTC",
+    summary: { planCount: included.length, deletedPlanCount: plans.length - included.length,
+      measuredPlanCount: measured.length, totalActiveMs: measured.length ? union.reduce((sum, [start, end]) => sum + Math.max(0, end - start), 0) : null,
+      sumPlanActiveMs: measured.length ? measured.reduce((sum, p) => sum + p.activeMs, 0) : null },
+    plans,
+  };
+}
+
 async function readTrackerCapabilities(db, ownerId) {
   const row = await dbFirst(db, "SELECT COUNT(*) AS enabled_plan_count FROM tracker_plan_config c JOIN plans p ON p.owner_id=c.owner_id AND p.plan_id=c.plan_id WHERE c.owner_id=? AND c.enabled=1 AND p.deleted_at IS NULL", ownerId);
   const ownerScope = await hashCommandInput({ purpose: "plan-time-tracker-local-observation-queue-v1", ownerId: ownerId });
@@ -1187,6 +1377,14 @@ export async function buildStepAnalytics(db, ownerId, planId, filter, nowMs) {
     JOIN tracker_journal j ON j.owner_id=a.owner_id AND j.step_id=a.step_id AND j.attempt_id=a.attempt_id
       AND j.event_type='STEP_STARTED' AND j.command_id IS NOT NULL
     WHERE s.owner_id=? AND s.plan_id=? GROUP BY a.attempt_id`, ownerId, planId);
+  return {
+    period: { from: filter.from, to: filter.to, timeZone, startMs: range.startMs, endMs: range.endMs }, asOf,
+    ...attributeStepTime(plan, steps, intervals, attempts, range, asOf),
+  };
+}
+
+// Shared by period analytics and the complete export; claim time is never execution time.
+function attributeStepTime(plan, steps, intervals, attempts, range, asOf) {
   const measured = plan.first_started_at != null && plan.first_started_at <= asOf && intervals.length > 0;
   const started = new Set(attempts.filter(a => a.execution_started_at <= asOf).map(a => a.step_id));
   const totals = new Map(steps.map(s => [s.step_id, 0]));
@@ -1229,7 +1427,6 @@ export async function buildStepAnalytics(db, ownerId, planId, filter, nowMs) {
     previous = at;
   }
   return {
-    period: { from: filter.from, to: filter.to, timeZone, startMs: range.startMs, endMs: range.endMs }, asOf,
     totalActiveMs: measured ? totalActiveMs : null,
     unattributedMs: measured ? unattributedMs : null, ambiguousMs: measured ? ambiguousMs : null,
     steps: steps.map(s => {
@@ -1703,7 +1900,7 @@ function uiHtml() {
     "<section id=\"view-plans\" class=\"hidden\"><div class=\"toolbar\"><h2 style=\"flex:1\">Все планы</h2><button class=\"primary\" id=\"newPlan2\">Создать план</button></div><div id=\"plans\" class=\"list\"></div></section>",
     "<section id=\"view-deleted\" class=\"hidden\"><button id=\"backSettings\" type=\"button\">← К настройкам</button><article class=\"panel\"><h2 tabindex=\"-1\" id=\"deletedHeading\">Удалённые планы</h2><p class=\"muted\">История сохранена. Восстановление не запускает таймер.</p><div id=\"deleted\" class=\"list\" aria-live=\"polite\"></div></article></section><section id=\"view-detail\" class=\"hidden\"><button id=\"backPlans\">← К планам</button><article id=\"planDetail\" class=\"panel\"></article></section>",
     "<section id=\"view-analytics\" class=\"hidden\"><article class=\"panel\"><h2>Отчёт за период</h2><div class=\"toolbar\"><div class=\"field\"><label for=\"from\">С</label><input id=\"from\" type=\"date\" aria-label=\"Дата начала периода\"></div><div class=\"field\"><label for=\"to\">По</label><input id=\"to\" type=\"date\" aria-label=\"Дата конца периода\"></div><button class=\"primary\" id=\"apply\">Применить</button></div><div id=\"stats\" class=\"metrics\" style=\"margin-top:16px\"></div><div id=\"chart\" class=\"chart\"></div><div id=\"analyticPlans\" class=\"list\" style=\"margin-top:15px\"></div></article></section>",
-    "<section id=\"view-settings\" class=\"hidden\"><h2>Настройки</h2><div class=\"settings-grid\"><article class=\"panel\"><h2>Настройки времени</h2><form id=\"settings\" class=\"form\"><div class=\"field\"><label for=\"tz\">Часовой пояс</label><select id=\"tz\" required>" + UI_TIME_ZONES.map((option) => "<option value=\"" + option.value + "\"" + (option.value === "Asia/Omsk" ? " selected" : "") + ">" + option.label + "</option>").join("") + "</select></div><button class=\"primary\">Сохранить</button></form><p class=\"muted\">Все отметки времени хранятся в UTC. Часовой пояс используется для отображения дат и отчётов.</p></article><article class=\"panel\"><h2>Экспорт данных</h2><p class=\"muted\">Скачайте JSON-отчёт со всеми планами, включая удалённые, и сохранённой историей.</p><a class=\"settings-export\" href=\"/api/export\">Скачать JSON отчет</a></article><article class=\"panel settings-deleted\"><h2>Удалённые планы</h2><p class=\"muted\">Просматривайте сохранённую историю и восстанавливайте планы. Восстановление не запускает таймер.</p><button id=\"openDeleted\" type=\"button\">Открыть удалённые планы</button></article></div></section>",
+    "<section id=\"view-settings\" class=\"hidden\"><h2>Настройки</h2><div class=\"settings-grid\"><article class=\"panel\"><h2>Настройки времени</h2><form id=\"settings\" class=\"form\"><div class=\"field\"><label for=\"tz\">Часовой пояс</label><select id=\"tz\" required>" + UI_TIME_ZONES.map((option) => "<option value=\"" + option.value + "\"" + (option.value === "Asia/Omsk" ? " selected" : "") + ">" + option.label + "</option>").join("") + "</select></div><button class=\"primary\">Сохранить</button></form><p class=\"muted\">Все отметки времени хранятся в UTC. Часовой пояс используется для отображения дат и отчётов.</p></article><article class=\"panel\"><h2>Экспорт данных</h2><p class=\"muted\">Скачайте аналитический JSON-отчёт: планы, этапы, оценки, результаты, проверки и история работы. Удалённые планы включены.</p><a class=\"settings-export\" href=\"/api/export\">Скачать JSON отчет</a></article><article class=\"panel settings-deleted\"><h2>Удалённые планы</h2><p class=\"muted\">Просматривайте сохранённую историю и восстанавливайте планы. Восстановление не запускает таймер.</p><button id=\"openDeleted\" type=\"button\">Открыть удалённые планы</button></article></div></section>",
     "<div id=\"modal\" class=\"modal hidden\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"modalTitle\"><div class=\"modalbox\"><div class=\"toolbar\"><h2 id=\"modalTitle\" style=\"flex:1\">Новый план</h2><button id=\"close\">Закрыть</button></div><form id=\"create\" class=\"form\"><div class=\"field\"><label for=\"title\">Название</label><input id=\"title\" maxlength=\"200\" required></div><div class=\"field\"><label for=\"description\">Описание</label><textarea id=\"description\"></textarea></div><div class=\"field\"><label for=\"criteria\">Критерии приёмки</label><textarea id=\"criteria\"></textarea></div><div class=\"field\"><label for=\"createdDate\">Дата составления</label><input id=\"createdDate\" type=\"date\" required></div><div class=\"actions\"><button type=\"button\" id=\"cancel\">Отмена</button><button class=\"primary\">Создать план</button></div></form></div></div><div id=\"toast\" class=\"toast hidden\" role=\"status\" aria-live=\"polite\"></div>",
     "</main>",
     "<script>(()=>{" + UI_ANALYTICS + "const q=s=>document.querySelector(s), all=s=>[...document.querySelectorAll(s)];const supportedZones=" + JSON.stringify(UI_TIME_ZONES.map((option) => option.value)) + ";const normalizeZone=value=>supportedZones.includes(value)?value:\"Asia/Omsk\";let plans=[],activePlans=[],deletedRequestId=0,currentDetailPlan=null,detailReturnView=\"plans\",receivedAt=Date.now(),todayActiveMs=0,todayDate=null,refreshRequestId=0,zone=\"Asia/Omsk\",serverNow=Date.now(),pending=new Map(),rejectedValidation=new Set(),rejectedVersion=new Map(),analyticsRequestId=0,detailRequestId=0,timer,modalReturnFocus=null;const uid=()=>crypto.randomUUID();const dateLocal=d=>{const value=Object.fromEntries(new Intl.DateTimeFormat(\"en-CA\",{timeZone:zone,year:\"numeric\",month:\"2-digit\",day:\"2-digit\"}).formatToParts(d).map(part=>[part.type,part.value]));return value.year+\"-\"+value.month+\"-\"+value.day};const duration=n=>{if(n==null)return\"—\";n=Math.max(0,Math.round(n/60000));const day=Math.floor(n/1440),h=Math.floor(n%1440/60),m=n%60;return day?day+\" д \"+h+\" ч \"+m+\" мин\":h?h+\" ч \"+m+\" мин\":m+\" мин\"};const formatPlanSample=n=>{const count=Number(n)||0,lastTwo=count%100;return\"по \"+count+\" \"+((lastTwo>=11&&lastTwo<=14)||count%10!==1?\"планам\":\"плану\")};const dateFmt=n=>n==null?\"—\":new Intl.DateTimeFormat(\"ru-RU\",{dateStyle:\"medium\",timeStyle:\"short\",timeZone:zone}).format(new Date(n));const statusText=status=>({PLANNED:\"Запланирован\",RUNNING:\"Выполняется\",PAUSED:\"На паузе\",COMPLETED:\"Завершён\"})[status]||status;function showToast(t,err){const x=q(\"#toast\");x.textContent=t;x.classList.toggle(\"error\",!!err);x.classList.remove(\"hidden\");clearTimeout(timer);timer=setTimeout(()=>x.classList.add(\"hidden\"),4500)}async function call(path,opt){const r=await fetch(path,{...opt,headers:{\"content-type\":\"application/json\",...(opt&&opt.headers||{})},cache:\"no-store\"});let v={};try{v=await r.json()}catch{}if(!r.ok){const e=new Error(v.error&&v.error.message||\"HTTP \"+r.status);e.status=r.status;e.code=v.error&&v.error.code;e.details=v.error&&v.error.details;throw e}return v}const rejectedTerminal=new Set();async function hasFinalPlanRejection(type,envelope,error){if(error.status!==409||!((type===\"FinishPlan\"&&error.code===\"CHECKPOINTS_INCOMPLETE\")||(type===\"DeletePlan\"&&error.code===\"PLAN_DELETED\")||(type===\"RestorePlan\"&&error.code===\"PLAN_NOT_DELETED\")))return false;try{const receipt=await call(\"/api/tracker/commands/\"+encodeURIComponent(envelope.commandId));return receipt.status===\"FINAL\"&&receipt.commandId===envelope.commandId&&receipt.commandType===envelope.commandType&&receipt.error?.code===error.code&&!receipt.result}catch{return false}}function makeCmd(type,plan,payload){const key=type+\":\"+(plan?plan.planId:\"new\"),nextPayload={...(plan?{planId:plan.planId}:{}),...(payload||{})};let c=pending.get(key);const newVersion=plan?plan.version:undefined;if(c&&rejectedTerminal.has(key)){c=null;pending.delete(key);rejectedTerminal.delete(key)}if(c&&rejectedValidation.has(key)&&JSON.stringify(c.payload)!==JSON.stringify(nextPayload)){c=null;pending.delete(key);rejectedValidation.delete(key)}if(c&&rejectedVersion.has(key)&&c.expectedVersion!==newVersion){c=null;pending.delete(key);rejectedVersion.delete(key)}if(c&&JSON.stringify(c.payload)!==JSON.stringify(nextPayload)){const e=new Error(\"Исход предыдущей команды неизвестен. Повторите её без изменения данных или обновите состояние перед новой командой.\");e.code=\"COMMAND_OUTCOME_UNKNOWN\";throw e}if(!c){c={schemaVersion:1,commandId:uid(),commandType:type,expectedVersion:newVersion,payload:nextPayload};pending.set(key,c)}return [key,c]}async function command(type,plan,payload){let prepared;try{prepared=makeCmd(type,plan,payload)}catch(e){showToast((e.code||\"ERROR\")+\": \"+e.message,true);throw e}const [key,c]=prepared;let r;try{r=await call(\"/api/commands\",{method:\"POST\",body:JSON.stringify(c)});if(r?.commandId!==c.commandId||r.outcome!==\"OK\"||typeof r.applied!==\"boolean\"||typeof r.replayed!==\"boolean\"||r.applied===r.replayed||!r.result||typeof r.result!==\"object\"||Array.isArray(r.result)||r.error){const e=new Error(\"Ответ команды не подтверждает её результат. Повторите запрос без изменения данных.\");e.code=\"COMMAND_OUTCOME_UNKNOWN\";throw e}}catch(e){if(e.code===\"VALIDATION_ERROR\")rejectedValidation.add(key);else if(await hasFinalPlanRejection(type,c,e))rejectedTerminal.add(key);if(e.code===\"VERSION_CONFLICT\"&&Number.isSafeInteger(e.details&&e.details.currentVersion)){rejectedVersion.set(key,e.details.currentVersion);if(plan)plan.version=e.details.currentVersion}showToast((e.code||\"ERROR\")+\": \"+e.message,true);if(e.code===\"VERSION_CONFLICT\")try{await refresh()}catch{}throw e}pending.delete(key);rejectedValidation.delete(key);rejectedVersion.delete(key);rejectedTerminal.delete(key);showToast(r.replayed?\"Повторный запрос обработан по сохранённому результату.\":\"Изменение сохранено.\");try{await refresh()}catch{showToast(\"Изменение сохранено, но данные не обновились. Перезагрузите страницу.\",true)}return r}window.addEventListener(\"plan-time-tracker:command\",event=>{const detail=event.detail||{};command(detail.commandType,detail.plan,detail.payload).then(detail.resolve,detail.reject)});window.addEventListener(\"plan-time-tracker:refresh-plan\",event=>{const detail=event.detail||{},navigationToken=detailRequestId;(async()=>{await refresh();if(navigationToken===detailRequestId&&!q(\"#view-detail\").classList.contains(\"hidden\")&&q(\"#planDetail\").dataset.planId===detail.planId)await openPlan(detail.planId,detail.successMessage)})().then(detail.resolve,detail.reject)});function btn(text,fn,cls){const b=document.createElement(\"button\");b.textContent=text;if(cls)b.className=cls;b.onclick=async e=>{e.stopPropagation();if(b.disabled)return;b.disabled=true;try{await fn()}catch{}finally{b.disabled=false}};return b}function deletionButton(p){const restoring=p.deletedAt!=null;return btn(restoring?\"Восстановить\":\"Удалить\",async()=>{if(!window.confirm(restoring?\"Восстановить план «\"+p.title+\"»? Таймер останется остановленным.\":\"Удалить план «\"+p.title+\"»? Активное время и попытки будут остановлены. План можно восстановить в настройках, в разделе «Удалённые планы».\"))return;const navigationToken=detailRequestId;await command(restoring?\"RestorePlan\":\"DeletePlan\",p);if(navigationToken===detailRequestId&&q(\"#planDetail\").dataset.planId===p.planId&&!q(\"#view-detail\").classList.contains(\"hidden\"))await openPlan(p.planId)},restoring?\"\":\"danger\")}async function loadDeleted(){const requestId=++deletedRequestId,list=q(\"#deleted\");list.textContent=\"Загружаю удалённые планы…\";try{let page=await call(\"/api/plans?deleted=true&limit=100\"),collected=[...page.plans];while(page.nextCursor){page=await call(\"/api/plans?deleted=true&limit=100&cursor=\"+encodeURIComponent(page.nextCursor));if(requestId!==deletedRequestId)return;collected.push(...page.plans)}if(requestId!==deletedRequestId)return;list.replaceChildren();if(!collected.length)list.textContent=\"Удалённых планов нет.\";else collected.forEach(p=>list.append(card(p)))}catch(error){if(requestId!==deletedRequestId)return;list.textContent=\"Не удалось загрузить удалённые планы. \"+error.message;list.append(btn(\"Повторить\",loadDeleted));}}function finishButton(p,confirmation){let b;if(p.completion&&!p.completion.readyToFinish){b=btn(\"Условия завершения\",()=>openPlan(p.planId));b.title=\"Не выполнены условия этапов: \"+p.completion.incompleteStepCount}else b=btn(\"Завершить\",async()=>{if(!window.confirm(confirmation))return;try{await command(\"FinishPlan\",p)}finally{if(q(\"#planDetail\").dataset.planId===p.planId&&!q(\"#view-detail\").classList.contains(\"hidden\"))await openPlan(p.planId)}},\"danger\");b.dataset.finishPlan=p.planId;return b}window.addEventListener(\"plan-time-tracker:completion-updated\",event=>{const next=event.detail;if(!next?.completion)return;const summaries=[...plans,...activePlans,currentDetailPlan].filter(p=>p&&p.planId===next.planId);for(const p of summaries)p.completion=next.completion;const p=summaries[0];if(p)for(const button of all(\"[data-finish-plan]\"))if(button.dataset.finishPlan===p.planId)button.replaceWith(finishButton(p,\"Завершить план? Сервер остановит таймер.\"))});function card(p){const row=document.createElement(\"div\");row.className=\"row\";row.dataset.planId=p.planId;const left=document.createElement(\"button\"),title=document.createElement(\"span\"),meta=document.createElement(\"span\");left.type=\"button\";left.className=\"plan-open\";left.onclick=()=>openPlan(p.planId);left.setAttribute(\"aria-label\",p.title);title.className=\"row-title\";title.textContent=p.title;meta.className=\"row-meta\";meta.textContent=(p.status===\"RUNNING\"?\"Выполняется\":p.status===\"PAUSED\"?\"Пауза\":p.status===\"COMPLETED\"?\"Завершён\":\"Запланирован\")+\" · активно \"+duration(p.activeMs)+\" · создан \"+dateFmt(p.registeredAt);left.append(title,meta);const right=document.createElement(\"div\");right.className=\"row-right\";const badge=document.createElement(\"span\");badge.className=\"badge \"+p.status.toLowerCase();badge.textContent=statusText(p.status);right.append(badge);if(p.deletedAt!=null){badge.textContent=\"Удалён\";meta.textContent=\"Удалён \"+dateFmt(p.deletedAt)+\" · активно \"+duration(p.activeMs);right.append(deletionButton(p));row.append(left,right);return row}if(p.status===\"PLANNED\")right.append(btn(\"Запустить\",()=>command(\"StartPlan\",p),\"primary\"));if(p.status===\"RUNNING\")right.append(btn(\"Пауза\",()=>command(\"PausePlan\",p)));if(p.status===\"PAUSED\")right.append(btn(\"Продолжить\",()=>command(\"ResumePlan\",p),\"primary\"));if(p.status===\"RUNNING\"||p.status===\"PAUSED\")right.append(finishButton(p,\"Завершить план? Сервер остановит таймер.\"));right.append(deletionButton(p));row.append(left,right);return row}async function openPlan(planId,successMessage){const returnView=!q(\"#view-detail\").classList.contains(\"hidden\")?detailReturnView:!q(\"#view-deleted\").classList.contains(\"hidden\")?\"deleted\":\"plans\";const requestToken=++detailRequestId;try{const p=(await call(\"/api/plans/\"+encodeURIComponent(planId))).plan;if(requestToken!==detailRequestId)return;detailReturnView=returnView;q(\"#backPlans\").textContent=returnView===\"deleted\"?\"← К удалённым планам\":\"← К планам\";currentDetailPlan=p;const box=q(\"#planDetail\");window.dispatchEvent(new CustomEvent(\"plan-time-tracker:plan-will-render\"));box.dataset.planId=planId;box.replaceChildren();const h=document.createElement(\"h2\");h.textContent=p.title;box.append(h);const m=document.createElement(\"p\");m.className=\"muted\";m.textContent=\"Дата плана: \"+(p.planCreatedAt.precision===\"dateOnly\"?p.planCreatedAt.on:dateFmt(Date.parse(p.planCreatedAt.value)))+\" · создан \"+dateFmt(p.registeredAt)+\" · \"+statusText(p.status);box.append(m);const deletionActions=document.createElement(\"div\");deletionActions.className=\"actions\";deletionActions.append(deletionButton(p));box.append(deletionActions);if(p.deletedAt!=null){const notice=document.createElement(\"p\");notice.className=\"notice\";notice.textContent=\"План удалён. История доступна только для чтения. Восстановление не запускает таймер.\";box.append(notice)}if(p.deletedAt==null&&(p.status===\"RUNNING\"||p.status===\"PAUSED\")){const actions=document.createElement(\"div\");actions.className=\"actions plan-completion-actions\";actions.append(finishButton(p,\"Завершить план? Сервер остановит таймер.\"));box.append(actions)}for(const label of [p.description||\"Описание не задано.\",\"Критерии приёмки: \"+(p.acceptanceCriteria||\"не заданы\"),\"Активно \"+duration(p.activeMs)+\" · календарное \"+duration(p.calendarMs)+\" · пауза \"+duration(p.pausedMs)]){const e=document.createElement(\"p\");e.textContent=label;box.append(e)}if(p.deletedAt==null){const edit=document.createElement(\"form\");edit.className=\"form\";edit.dataset.trackerForm=\"plan-metadata\";const title=document.createElement(\"input\");title.value=p.title;title.maxLength=200;title.setAttribute(\"aria-label\",\"Название плана\");const description=document.createElement(\"textarea\");description.value=p.description||\"\";description.maxLength=20000;description.setAttribute(\"aria-label\",\"Описание\");const criteria=document.createElement(\"textarea\");criteria.value=p.acceptanceCriteria||\"\";criteria.maxLength=20000;criteria.setAttribute(\"aria-label\",\"Критерии приёмки\");const date=document.createElement(\"input\");date.type=\"date\";date.value=p.planCreatedAt.precision===\"dateOnly\"?p.planCreatedAt.on:dateLocal(Date.parse(p.planCreatedAt.value));date.setAttribute(\"aria-label\",\"Дата составления\");const reason=document.createElement(\"input\");reason.placeholder=\"Причина правки даты\";reason.setAttribute(\"aria-label\",\"Причина правки даты\");const label=document.createElement(\"label\"),confirm=document.createElement(\"input\");confirm.type=\"checkbox\";confirm.dataset.draftField=\"confirmDateAnomaly\";label.append(confirm,document.createTextNode(\"Подтверждаю дату составления после первого старта\"));const save=document.createElement(\"button\");save.textContent=\"Сохранить изменения\";edit.append(title,description,criteria,date,reason,label,save);edit.onsubmit=async e=>{e.preventDefault();const draftSubmission={planId:p.planId,form:edit};window.dispatchEvent(new CustomEvent(\"plan-time-tracker:draft-submitted\",{detail:draftSubmission}));await command(\"UpdatePlanMetadata\",p,{title:title.value,description:description.value,acceptanceCriteria:criteria.value,planCreatedAt:p.planCreatedAt.precision===\"instant\"&&date.value===dateLocal(Date.parse(p.planCreatedAt.value))?p.planCreatedAt:{precision:\"dateOnly\",on:date.value,timeZone:zone},reason:reason.value,confirmDateAnomaly:confirm.checked});window.dispatchEvent(new CustomEvent(\"plan-time-tracker:draft-cleared\",{detail:{submission:draftSubmission.submission}}));await openPlan(p.planId)};box.append(edit);}const intervals=document.createElement(\"div\"),ih=document.createElement(\"h3\");ih.textContent=\"Интервалы\";intervals.append(ih);p.intervals.forEach(i=>{const e=document.createElement(\"p\");e.textContent=dateFmt(i.start_ms)+\" — \"+dateFmt(i.end_ms)+\" · \"+duration((i.end_ms||p.serverNow)-i.start_ms);intervals.append(e)});box.append(intervals);const events=document.createElement(\"div\"),eh=document.createElement(\"h3\");eh.textContent=\"История команд\";events.append(eh);p.events.forEach(x=>{const e=document.createElement(\"p\");e.textContent=({DELETED:\"План удалён\",RESTORED:\"План восстановлен\"}[x.event_type]||x.event_type)+\" · \"+dateFmt(x.server_occurred_at)+\" · \"+x.actor_type;events.append(e)});box.append(events);view(\"detail\");window.dispatchEvent(new CustomEvent(\"plan-time-tracker:plan-rendered\",{detail:{planId,successMessage}}))}catch(e){showToast((e.code||\"ERROR\")+\": \"+e.message,true)}}function renderActive(){const el=q(\"#active\");el.replaceChildren();q(\"#activeCount\").textContent=String(activePlans.length);if(!activePlans.length){const p=document.createElement(\"p\");p.className=\"muted\";p.textContent=\"Активных планов нет. Создайте план и запустите, когда начнёте работу.\";el.append(p,btn(\"Создать план\",openModal,\"primary\"));return}for(const plan of activePlans){const panel=document.createElement(\"section\");panel.className=\"active-plan\";panel.dataset.planId=plan.planId;panel.setAttribute(\"aria-label\",plan.title);const title=document.createElement(\"h3\");title.append(btn(plan.title,()=>openPlan(plan.planId),\"plan-open\"));const clock=document.createElement(\"div\");clock.className=\"timer\";clock.dataset.clockPlan=plan.planId;clock.setAttribute(\"aria-label\",\"Активное время: \"+plan.title);clock.textContent=duration(plan.activeMs+Math.max(0,Date.now()-receivedAt));const detail=document.createElement(\"div\");detail.className=\"muted\";detail.textContent=\"Начат \"+dateFmt(plan.firstStartedAt);const actions=document.createElement(\"div\");actions.className=\"actions\";actions.append(btn(\"Пауза\",()=>command(\"PausePlan\",plan)),finishButton(plan,\"Завершить план? Время будет остановлено сервером.\"),deletionButton(plan));panel.append(title,clock,detail,actions);el.append(panel)}}function render(){const list=q(\"#plans\"),recent=q(\"#recent\");list.replaceChildren();recent.replaceChildren();if(!plans.length){const p=document.createElement(\"p\");p.className=\"muted\";p.textContent=\"Планов пока нет.\";list.append(p);recent.append(p.cloneNode(true))}else{plans.forEach(p=>list.append(card(p)));plans.slice(0,4).forEach(p=>recent.append(card(p)))}renderActive();q(\"#plans\").dataset.loaded=\"true\";window.dispatchEvent(new Event(\"plan-time-tracker:plans-rendered\"));if(q(\"#count\"))q(\"#count\").textContent=String(plans.filter(p=>p.status===\"COMPLETED\"&&p.finishedAt>Date.now()-30*86400000).length);if(q(\"#today\"))q(\"#today\").textContent=duration(todayActiveMs)}async function refresh(){const requestId=++refreshRequestId;const [first,w,settings]=await Promise.all([call(\"/api/plans?limit=100\"),call(\"/api/whoami\"),call(\"/api/settings\")]);let collected=[...first.plans],cursor=first.nextCursor;while(cursor){const page=await call(\"/api/plans?limit=100&cursor=\"+encodeURIComponent(cursor));if(requestId!==refreshRequestId)return;collected.push(...page.plans);cursor=page.nextCursor}const nextZone=normalizeZone(settings.timezone),dateParts=Object.fromEntries(new Intl.DateTimeFormat(\"en-CA\",{timeZone:nextZone,year:\"numeric\",month:\"2-digit\",day:\"2-digit\"}).formatToParts(first.serverNow).map(part=>[part.type,part.value])),today=dateParts.year+\"-\"+dateParts.month+\"-\"+dateParts.day;const daily=await call(\"/api/analytics?\"+new URLSearchParams({from:today,to:today,timeZone:nextZone}));if(requestId!==refreshRequestId)return;plans=collected.map(plan=>plan.status===\"RUNNING\"?{...plan,activeMs:plan.activeMs+Math.max(0,daily.serverNow-plan.serverNow),calendarMs:plan.calendarMs+Math.max(0,daily.serverNow-plan.serverNow),serverNow:daily.serverNow}:plan);activePlans=plans.filter(plan=>plan.status===\"RUNNING\");serverNow=daily.serverNow;receivedAt=Date.now();todayActiveMs=daily.totalActiveMs;todayDate=today;zone=nextZone;q(\"#who\").textContent=w.email||\"Личный аккаунт\";q(\"#tz\").value=zone;render();if(!q(\"#view-deleted\").classList.contains(\"hidden\"))await loadDeleted()}function openModal(){modalReturnFocus=document.activeElement;document.body.style.overflow=\"hidden\";q(\"#modal\").classList.remove(\"hidden\");q(\"#createdDate\").value=dateLocal(Date.now());q(\"#title\").focus();}function closeModal(){if(q(\"#create\").getAttribute(\"aria-busy\")===\"true\")return;q(\"#modal\").classList.add(\"hidden\");document.body.style.overflow=\"\";if(modalReturnFocus?.isConnected)modalReturnFocus.focus()}async function loadAnalytics(){const requestId=++analyticsRequestId;const d=new Date(),from=new Date(d);from.setDate(from.getDate()-29);if(!q(\"#from\").value)q(\"#from\").value=dateLocal(from);if(!q(\"#to\").value)q(\"#to\").value=dateLocal(d);const u=new URLSearchParams({from:q(\"#from\").value,to:q(\"#to\").value,timeZone:zone});let a;try{a=await call(\"/api/analytics?\"+u)}catch(error){if(requestId!==analyticsRequestId)return;throw error}if(requestId!==analyticsRequestId)return;const stats=q(\"#stats\");stats.replaceChildren();const medianText=duration(a.completedMedianActiveMs)+(a.completedMedianActiveMs==null?\"\":\" · \"+formatPlanSample(a.completedMeasuredN));[[\"Общее время за период\",duration(a.totalActiveMs)],[\"Завершено планов\",String(a.completedPlans)],[\"Медиана активного времени\",medianText],[\"Сумма времени планов\",duration(a.sumPlanActiveMs)]].forEach(([k,v],index)=>{const box=document.createElement(\"div\"),small=document.createElement(\"small\"),strong=document.createElement(\"strong\");box.className=\"metric\";small.textContent=k;strong.textContent=v;box.append(small,strong);if(index===2&&a.completedSmallSample){const note=document.createElement(\"small\");note.className=\"sample-note\";note.textContent=\"Малая выборка\";note.title=\"Медиана рассчитана по менее чем пяти завершённым планам.\";note.setAttribute(\"aria-label\",\"Малая выборка: менее пяти завершённых планов.\");box.append(note)}stats.append(box)});const chart=q(\"#chart\");chart.replaceChildren();const max=Math.max(1,...a.activeByDay.map(x=>x.activeMs));a.activeByDay.forEach(x=>{const row=document.createElement(\"div\"),date=document.createElement(\"span\"),bar=document.createElement(\"div\"),fill=document.createElement(\"span\"),v=document.createElement(\"span\");row.className=\"barrow\";bar.className=\"bar\";fill.style.width=(100*x.activeMs/max)+\"%\";bar.append(fill);date.textContent=x.date;v.textContent=duration(x.activeMs);row.append(date,bar,v);chart.append(row)});const list=q(\"#analyticPlans\");list.replaceChildren();if(!a.plans.length){const p=document.createElement(\"p\");p.className=\"muted\";p.textContent=\"За выбранный период данных нет.\";list.append(p)}else renderAnalyticsPlanCards(list,a)}function view(name){if(name!==\"detail\")detailRequestId++;all(\"[id^=view-]\").forEach(x=>x.classList.toggle(\"hidden\",x.id!==\"view-\"+name));all(\".nav button\").forEach(b=>b.setAttribute(\"aria-current\",b.dataset.view===(name===\"deleted\"||(name===\"detail\"&&detailReturnView===\"deleted\")?\"settings\":name)?\"page\":\"false\"));if(name===\"deleted\")loadDeleted();if(name===\"analytics\")loadAnalytics().catch(e=>showToast(e.message,true));}all(\".nav button\").forEach(b=>b.onclick=()=>view(b.dataset.view));q(\"#backPlans\").onclick=()=>{view(detailReturnView);if(detailReturnView===\"deleted\")q(\"#deletedHeading\").focus()};q(\"#openDeleted\").onclick=()=>{view(\"deleted\");q(\"#deletedHeading\").focus()};q(\"#backSettings\").onclick=()=>{view(\"settings\");q(\"#openDeleted\").focus()};q(\"#newPlan\").onclick=openModal;q(\"#newPlan2\").onclick=openModal;q(\"#close\").onclick=closeModal;q(\"#cancel\").onclick=closeModal;q(\"#modal\").onclick=e=>{if(e.target.id===\"modal\")closeModal()};q(\"#create\").onsubmit=async e=>{e.preventDefault();const payload={title:q(\"#title\").value,description:q(\"#description\").value,acceptanceCriteria:q(\"#criteria\").value,planCreatedAt:{precision:\"dateOnly\",on:q(\"#createdDate\").value,timeZone:zone}};try{await command(\"CreatePlan\",null,payload);e.target.removeAttribute(\"aria-busy\");closeModal();e.target.reset();showToast(\"План создан. Таймер не запущен.\")}catch(x){showToast((x.code||\"ERROR\")+\": \"+x.message,true)}};q(\"#apply\").onclick=()=>loadAnalytics().catch(e=>showToast(e.message,true));q(\"#settings\").onsubmit=async e=>{e.preventDefault();try{const r=await call(\"/api/settings\",{method:\"POST\",body:JSON.stringify({timezone:q(\"#tz\").value})});zone=normalizeZone(r.timezone);q(\"#tz\").value=zone;window.dispatchEvent(new CustomEvent(\"plan-time-zone-changed\",{detail:zone}));await refresh();showToast(\"Часовой пояс сохранён.\")}catch(x){showToast((x.code||\"ERROR\")+\": \"+x.message,true)}};setInterval(()=>{const elapsed=Math.max(0,Date.now()-receivedAt);for(const plan of activePlans){const clock=all(\"[data-clock-plan]\").find(node=>node.dataset.clockPlan===plan.planId);if(clock)clock.textContent=duration(plan.activeMs+elapsed)}if(todayDate&&dateLocal(serverNow+elapsed)!==todayDate){todayDate=null;refresh().catch(e=>showToast(e.message,true))}else if(q(\"#today\"))q(\"#today\").textContent=duration(todayActiveMs+(activePlans.length?elapsed:0))},1000);refresh().catch(e=>{q(\"#who\").textContent=\"Требуется вход\";showToast(e.message,true)})})();</script></body></html>"
@@ -1737,6 +1934,10 @@ async function apiRoute(request, env, url, channel, now) {
   validateOrigin(request);
   const identity = requireOwner(request);
   if (!env.DB) throw appError("INTERNAL_ERROR", "D1 binding DB не настроен.", 503);
+  if (request.method === "GET" && url.pathname === "/api/export") {
+    return json(await buildExportReport(env.DB, identity.ownerId, now), 200,
+      { "content-disposition": "attachment; filename=plan-time-tracker-export.json" });
+  }
   await ensureOwner(env.DB, identity, now);
   if (request.method === "GET" && url.pathname === "/api/whoami") return json({ userId: identity.ownerId, email: identity.email, serverNow: now });
   if (request.method === "GET" && url.pathname === "/api/settings") {
@@ -1761,15 +1962,7 @@ async function apiRoute(request, env, url, channel, now) {
     }
     return json(await listPlans(env.DB, identity.ownerId, now, filter));
   }
-  if (request.method === "GET" && url.pathname === "/api/export") {
-    const rows = await dbAll(env.DB, "SELECT * FROM plans WHERE owner_id=? ORDER BY registered_at", identity.ownerId);
-    const plans = await Promise.all(rows.map(async (row) => {
-      const plan = await readPlan(env.DB, identity.ownerId, row.plan_id, now);
-      return plan;
-    }));
-    const settings = await dbFirst(env.DB, "SELECT timezone,locale FROM owners WHERE owner_id=?", identity.ownerId);
-    return json({ exportedAt: now, timezone: settings.timezone, plans }, 200, { "content-disposition": "attachment; filename=plan-time-tracker-export.json" });
-  }
+
   if (request.method === "GET" && url.pathname === "/api/tracker/capabilities") return json(await readTrackerCapabilities(env.DB, identity.ownerId));
   if (request.method === "POST" && url.pathname === "/api/tracker/assessment") return json(await readAssessment(env.DB, identity.ownerId, await bodyJson(request), now));
   if (request.method === "POST" && url.pathname === "/api/tracker/estimation-history") return json(await readEstimationHistory(env.DB, identity.ownerId, await bodyJson(request), now));

@@ -4,6 +4,12 @@ The tracker records work time through explicit authenticated MCP commands and th
 
 The current contract removes repository management/filters, synchronization, commit attribution, commit/push policies and Git observations. It requires no external integration token. GitHub source publication does not deploy the Worker or update installed tools.
 
+## Аналитический JSON-отчёт
+
+Аналитический JSON-экспорт: [состав, полнота, единицы времени и исключённый шум](../../docs/json-report.md).
+`GET /api/export` возвращает формат 1 с полной содержательной историей;
+это отчёт для анализа, не формат восстановления базы.
+
 ## Оценки задач (0.4.0)
 
 Нейтральные RecordAssessment/GetAssessment/GetEstimationHistory и независимые
