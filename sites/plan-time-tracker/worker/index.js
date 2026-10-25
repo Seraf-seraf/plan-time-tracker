@@ -985,7 +985,7 @@ const EXPORT_SOURCES = {
   settings: ["owners", "timezone"],
   plans: ["plans", "plan_id,title,description,acceptance_criteria,plan_created_precision,plan_created_at_ms,plan_created_on,plan_created_timezone,registered_at,status,deleted_at,first_started_at,finished_at,source_reference"],
   intervals: ["work_intervals", "interval_id,plan_id,start_ms,end_ms"],
-  events: ["plan_events", "event_id,plan_id,command_id,actor_type,event_type,server_occurred_at,reason"],
+  events: ["plan_events", "event_id,plan_id,command_id,actor_type,event_type,server_occurred_at,reason,version_after"],
   dates: ["plan_date_history", "history_id,plan_id,old_precision,old_at_ms,old_on,old_timezone,changed_at,reason"],
   config: ["tracker_plan_config", "plan_id,enabled"],
   steps: ["plan_steps", "step_id,plan_id,ordinal,title,status,expected_result,required_checks_json,current_result_revision,created_at,updated_at"],
@@ -1015,12 +1015,13 @@ function exportPlanDate(precision, at, on, timeZone) {
   return precision === "instant" ? { precision, value: new Date(at).toISOString(), timeZone } : { precision, on, timeZone };
 }
 
-function exportTimeline(journal, legacy, results, checks, protectedResult) {
+function exportTimeline(journal, legacy, results, checks, assessments, protectedResult) {
   const referenced = new Set(journal.map(e => e.correction_of_event_id).filter(Boolean));
   const byCommand = new Map();
   const resultEvents = new Map(results.map(r => [r.step_id + ":" + r.attempt_id + ":" + r.created_at + ":" + r.payload_hash, r]));
   const checkEvents = new Map(checks.map(c => [c.event_id, c]));
   const events = [];
+  const legacyOrder = [];
   for (const row of journal) {
     if (["heartbeat", "LEASE_RENEWED"].includes(row.event_type) && row.classification === "NORMAL" && !referenced.has(row.event_id)) continue;
     const payload = JSON.parse(row.payload_json), check = checkEvents.get(row.event_id);
@@ -1054,20 +1055,71 @@ function exportTimeline(journal, legacy, results, checks, protectedResult) {
     if (duplicate) {
       duplicate.actorType = row.actor_type;
       if (row.reason) duplicate.details.reason = row.reason;
-    } else events.push({ event: {
+      legacyOrder.push({ event: duplicate, version: row.version_after });
+    } else {
+      const event = {
       eventId: row.event_id, eventType, actorType: row.actor_type,
       occurredAt: row.server_occurred_at, recordedAt: row.server_occurred_at,
       details: row.reason ? { reason: row.reason } : {},
-    }, order: -1 });
+      };
+      legacyOrder.push({ event, version: row.version_after });
+      events.push({ event, order: -1 });
+    }
   }
-  return events.sort((a, b) => a.event.recordedAt - b.event.recordedAt || a.order - b.order || a.event.eventId.localeCompare(b.event.eventId)).map(item => item.event);
+  const recordedAssessments = new Set(events.filter(({ event }) => event.eventType === "ASSESSMENT_RECORDED")
+    .map(({ event }) => event.details.assessmentId + ":" + event.details.revision));
+  for (const row of assessments) {
+    if (recordedAssessments.has(row.assessment_id + ":" + row.revision)) continue;
+    events.push({ event: {
+      eventId: "assessment:" + row.assessment_id + ":" + row.revision,
+      eventType: "ASSESSMENT_RECORDED", stepId: row.step_id,
+      occurredAt: row.recorded_at, recordedAt: row.recorded_at,
+      details: { assessmentId: row.assessment_id, revision: row.revision },
+    }, order: 0 });
+  }
+  const ordered = events.sort((a, b) => a.event.recordedAt - b.event.recordedAt || a.order - b.order || a.event.eventId.localeCompare(b.event.eventId));
+  const output = [];
+  // Equal timestamps do not establish causality. Merge the two known chains
+  // (plan versions and journal sequence), sharing their deduplicated anchors.
+  for (let start = 0; start < ordered.length;) {
+    let end = start + 1;
+    while (end < ordered.length && ordered[end].event.recordedAt === ordered[start].event.recordedAt) end++;
+    const group = ordered.slice(start, end), members = new Set(group.map(i => i.event));
+    const edges = new Map(group.map(i => [i.event, new Set()]));
+    const chain = items => items.forEach((event, i) => { if (i) edges.get(items[i - 1]).add(event); });
+    chain(group.filter(i => i.order > 0).map(i => i.event));
+    chain(legacyOrder.filter(i => members.has(i.event)).sort((a, b) => a.version - b.version).map(i => i.event));
+    const series = groupExportRows(group.filter(i => i.event.eventType === "ASSESSMENT_RECORDED").map(i => i.event.details), "assessmentId");
+    for (const revisions of series.values()) chain(revisions.sort((a, b) => a.revision - b.revision)
+      .map(details => group.find(i => i.event.details === details).event));
+    const created = group.find(i => i.event.eventType === "PLAN_CREATED");
+    if (created) for (const item of group) if (item !== created) edges.get(created.event).add(item.event);
+    const ranks = new Map(group.map((item, index) => [item.event, index]));
+    const indegree = new Map(group.map(item => [item.event, 0]));
+    for (const targets of edges.values()) for (const target of targets) indegree.set(target, indegree.get(target) + 1);
+    const ready = group.filter(item => indegree.get(item.event) === 0).map(item => item.event);
+    while (ready.length) {
+      const next = ready.shift();output.push(next);members.delete(next);
+      for (const target of edges.get(next)) {
+        indegree.set(target, indegree.get(target) - 1);
+        if (indegree.get(target) === 0) {
+          const index = ready.findIndex(event => ranks.get(event) > ranks.get(target));
+          ready.splice(index < 0 ? ready.length : index, 0, target);
+        }
+      }
+    }
+    if (members.size) throw appError("INTERNAL_ERROR", "Противоречивый порядок истории отчёта.", 500);
+    start = end;
+  }
+  return output;
 }
 
-async function buildExportReport(db, ownerId, nowMs) {
+async function buildExportReport(db, ownerId, clock) {
   const sql = Object.entries(EXPORT_SOURCES).map(([kind, [table, columns]]) =>
     `SELECT '${kind}' AS kind,json_object(${columns.split(",").map(column => `'${column}',${column}`).join(",")}) AS record FROM ${table} WHERE owner_id=?1`).join(" UNION ALL ");
   const data = Object.fromEntries(Object.keys(EXPORT_SOURCES).map(key => [key, []]));
   const snapshot = await db.prepare(sql).bind(ownerId).all();
+  const nowMs = clock();
   if (snapshot.success === false || !Array.isArray(snapshot.results)) throw appError("INTERNAL_ERROR", "Не удалось прочитать полный отчёт.", 500);
   for (const row of snapshot.results) data[row.kind].push(JSON.parse(row.record));
   const sort = (rows, time, id) => rows.sort((a, b) => a[time] - b[time] || String(a[id]).localeCompare(String(b[id])));
@@ -1154,7 +1206,7 @@ async function buildExportReport(db, ownerId, nowMs) {
         reason: e.reason, recordedAt: e.created_at,
         incompleteSteps: JSON.parse(e.snapshot_json).map(s => ({ stepId: s.stepId, ordinal: s.ordinal, status: s.status, currentResultRevision: s.currentResultRevision })),
       })),
-      timeline: exportTimeline(journal, related("events"), results, checks, protectedResult),
+      timeline: exportTimeline(journal, related("events"), results, checks, assessments, protectedResult),
     };
   });
   const included = plans.filter(p => p.deletedAt == null);
@@ -1930,12 +1982,12 @@ function publicView(value) {
   return result;
 }
 
-async function apiRoute(request, env, url, channel, now) {
+async function apiRoute(request, env, url, channel, now, clock = () => now) {
   validateOrigin(request);
   const identity = requireOwner(request);
   if (!env.DB) throw appError("INTERNAL_ERROR", "D1 binding DB не настроен.", 503);
   if (request.method === "GET" && url.pathname === "/api/export") {
-    return json(await buildExportReport(env.DB, identity.ownerId, now), 200,
+    return json(await buildExportReport(env.DB, identity.ownerId, clock), 200,
       { "content-disposition": "attachment; filename=plan-time-tracker-export.json" });
   }
   await ensureOwner(env.DB, identity, now);
@@ -2216,7 +2268,7 @@ export function createWorker(clock) {
         const now = getNow();
         if (url.pathname === "/mcp") return await mcpRoute(request, env, now);
         if (url.pathname.startsWith("/api/")) {
-          const response=await apiRoute(request,env,url,"ui",now);
+          const response=await apiRoute(request,env,url,"ui",now,getNow);
           return new Response(JSON.stringify(publicView(await response.json())),{status:response.status,headers:response.headers});
         }
         if (request.method !== "GET" && request.method !== "HEAD") throw appError("NOT_FOUND", "Маршрут не найден.", 404);

@@ -220,3 +220,59 @@ test("export is read only for a new owner and returns a versioned empty report",
     assert.equal((await call(c, "/api/export", undefined, null)).status, 401);
   } finally { c.close(); }
 });
+
+test("report timestamp follows the read snapshot when a concurrent pause completes before it", async () => {
+  const c = context();
+  try {
+    await running(c, []);
+    const original = c.db.prepare.bind(c.db);
+    c.db.prepare = sql => {
+      const statement = original(sql);
+      if (!sql.includes(" UNION ALL ")) return statement;
+      return { bind: (...args) => ({ all: async () => {
+        c.advance(1000);
+        await ok(c, "PausePlan", { planId: PLAN }, 1);
+        return statement.bind(...args).all();
+      } }) };
+    };
+    const data = await report(c), plan = data.plans[0];
+    assert.equal(data.exportedAt, c.now());assert.equal(plan.calendarMs, 1000);
+    assert.equal(plan.activeMs, 1000);assert.equal(plan.steps[0].activeMs, 1000);
+    assert(plan.intervals.every(i => (i.endMs ?? data.exportedAt) <= data.exportedAt));
+  } finally { c.close(); }
+});
+
+test("assessments before tracker opt-in appear once in the unified timeline", async () => {
+  const c = context();
+  try {
+    await ok(c, "CreatePlan", { planId: PLAN, title: "Planning", planCreatedAt: { precision: "dateOnly", on: "2026-10-01", timeZone: "UTC" } });
+    const target = (await call(c, "/api/tracker/assessment", { planId: PLAN })).value;
+    const assessmentId = crypto.randomUUID();
+    const payload = { assessmentId, planId: PLAN, expectedRequirementsDigest: target.currentRequirementsDigest,
+      context: {}, method: { id: "expert", version: "1", scale: [1] },
+      complexity: { status: "UNKNOWN", value: null, rationale: "Unknown" }, unknowns: [], assumptions: [], dependencies: [], sources: [],
+      forecast: { status: "UNKNOWN", metric: "PLAN_ACTIVE", lowerMs: null, upperMs: null, confidence: "UNKNOWN", basis: "Unknown", sampleCount: 0 },
+      approach: { description: "Read", rationale: "Understand" }, phase: "planning" };
+    await ok(c, "RecordAssessment", payload, 0);
+    await ok(c, "RecordAssessment", { ...payload, reason: "Reconsider" }, 1);
+    const before = rows(c), data = await report(c);
+    assert.deepEqual(data.plans[0].timeline.filter(e => e.eventType === "ASSESSMENT_RECORDED").map(e => e.details.revision), [1, 2]);
+    assert.deepEqual(rows(c), before);
+    assert.equal(data.plans[0].timeline[0].eventType, "PLAN_CREATED");
+  } finally { c.close(); }
+});
+
+test("equal timestamps preserve plan versions and journal causality across opt-in", async () => {
+  const c = context();
+  try {
+    await ok(c, "CreatePlan", { planId: PLAN, title: "Order", planCreatedAt: { precision: "dateOnly", on: "2026-10-01", timeZone: "UTC" } });
+    await ok(c, "StartPlan", { planId: PLAN }, 0);
+    await ok(c, "PausePlan", { planId: PLAN }, 1);
+    await ok(c, "ResumePlan", { planId: PLAN }, 2);
+    await ok(c, "CreateStep", { planId: PLAN, ordinal: 0, title: "Step", expectedResult: "Done", requiredChecks: [] });
+    await ok(c, "FinishPlan", { planId: PLAN, allowIncomplete: true, reason: "Review anchor" }, 3);
+    const events = (await report(c)).plans[0].timeline;
+    assert.deepEqual(events.filter(e => e.eventType !== "STEP_CREATED").map(e => e.eventType), ["PLAN_CREATED", "PLAN_STARTED", "PLAN_PAUSED", "PLAN_RESUMED", "PLAN_FINISHED"]);
+    assert(events.findIndex(e => e.eventType === "STEP_CREATED") < events.findIndex(e => e.eventType === "PLAN_FINISHED"));
+  } finally { c.close(); }
+});
