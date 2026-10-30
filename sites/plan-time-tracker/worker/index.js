@@ -1593,12 +1593,14 @@ const UI_PLAN_LISTS_CSS = String.raw`
 #active>.active-plan{border:1px solid var(--line);border-radius:11px;padding:14px;margin:0;color:#18212b}
 #active>.active-plan .timer{font-size:1.7rem;letter-spacing:-.04em;margin:9px 0}
 #active>.active-plan .actions{margin-top:12px}
-.pager{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;color:var(--muted);font-size:.85rem}
-.pager-controls{display:flex;align-items:center;gap:9px}
+.pager{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:12px;margin-top:16px;color:var(--muted);font-size:.85rem}
+.pager-summary{min-width:0;overflow-wrap:anywhere}
+.pager-controls{grid-column:2;display:flex;align-items:center;gap:9px}
 .pager-page{min-width:3.5em;text-align:center;font-variant-numeric:tabular-nums}
 .pager-arrow{width:44px;height:44px;display:grid;place-items:center;padding:0;border:1px solid var(--line);background:white;color:#18212b;font-size:1.5rem;line-height:1}
 .pager-arrow:hover:not(:disabled){border-color:var(--green);color:var(--green)}
 .pager-arrow:disabled{opacity:.4}
+@media(max-width:600px){.pager{grid-template-columns:minmax(0,1fr);gap:8px}.pager-summary{grid-row:2;text-align:center}.pager-controls{grid-column:1;grid-row:1;justify-self:center}}
 `;
 
 // Inserted into the base client so metrics, day bars and disclosures share its accepted response.

@@ -144,6 +144,13 @@ try {
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `${view} overflows at ${width}`);
       const pager = page.locator(view === "overview" ? "#recentPager" : "#plansPager");
       assert.equal(await pager.locator("button").first().evaluate(node => node.getBoundingClientRect().width >= 44), true);
+      const alignment = await pager.evaluate(node => {
+        const bounds = node.getBoundingClientRect(), controls = node.querySelector('.pager-controls').getBoundingClientRect(), summary = node.querySelector('.pager-summary').getBoundingClientRect();
+        const overlaps = Math.min(controls.right, summary.right) > Math.max(controls.left, summary.left) && Math.min(controls.bottom, summary.bottom) > Math.max(controls.top, summary.top);
+        return { centerOffset: Math.abs((controls.left + controls.right - bounds.left - bounds.right) / 2), overlaps };
+      });
+      assert(alignment.centerOffset < 1, `${view} pagination is not centered at ${width}`);
+      assert.equal(alignment.overlaps, false, `${view} pagination overlaps its counter at ${width}`);
     }
     if (width === 360) {
       await page.locator("#toast").evaluate(node => node.classList.add("hidden"));
