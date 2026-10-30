@@ -1597,7 +1597,8 @@ const UI_PLAN_LISTS_CSS = String.raw`
 .pager-summary{min-width:0;overflow-wrap:anywhere}
 .pager-controls{grid-column:2;display:flex;align-items:center;gap:9px}
 .pager-page{min-width:3.5em;text-align:center;font-variant-numeric:tabular-nums}
-.pager-arrow{width:44px;height:44px;display:grid;place-items:center;padding:0;border:1px solid var(--line);background:white;color:#18212b;font-size:1.5rem;line-height:1}
+.pager-arrow{width:44px;height:44px;display:grid;place-items:center;padding:0;border:1px solid var(--line);background:white;color:#18212b}
+.pager-arrow svg{display:block;width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round}
 .pager-arrow:hover:not(:disabled){border-color:var(--green);color:var(--green)}
 .pager-arrow:disabled{opacity:.4}
 @media(max-width:600px){.pager{grid-template-columns:minmax(0,1fr);gap:8px}.pager-summary{grid-row:2;text-align:center}.pager-controls{grid-column:1;grid-row:1;justify-self:center}}
@@ -1707,7 +1708,8 @@ function renderPagedList(list,items,pageSize,page,kind,emptyText) {
     const summary=document.createElement("span"),controls=document.createElement("div"),previous=document.createElement("button"),indicator=document.createElement("span"),next=document.createElement("button");
     summary.className="pager-summary";controls.className="pager-controls";indicator.className="pager-page";indicator.setAttribute("aria-live","polite");
     previous.type=next.type="button";previous.className=next.className="pager-arrow";
-    previous.textContent="‹";next.textContent="›";previous.setAttribute("aria-label","Предыдущая страница");next.setAttribute("aria-label","Следующая страница");
+    const icon=pathData=>{const svg=document.createElementNS("http://www.w3.org/2000/svg","svg"),path=document.createElementNS("http://www.w3.org/2000/svg","path");svg.setAttribute("viewBox","0 0 24 24");svg.setAttribute("aria-hidden","true");svg.setAttribute("focusable","false");path.setAttribute("d",pathData);svg.append(path);return svg;};
+    previous.append(icon("M15 18 9 12 15 6"));next.append(icon("M9 18 15 12 9 6"));previous.setAttribute("aria-label","Предыдущая страница");next.setAttribute("aria-label","Следующая страница");
     previous.onclick=()=>{if(kind==="plans"){planPage--;renderPlanList();}else{recentPage--;renderRecentList();}};
     next.onclick=()=>{if(kind==="plans"){planPage++;renderPlanList();}else{recentPage++;renderRecentList();}};
     controls.append(previous,indicator,next);pager.append(summary,controls);list.after(pager);

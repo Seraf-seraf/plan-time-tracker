@@ -151,6 +151,19 @@ try {
       });
       assert(alignment.centerOffset < 1, `${view} pagination is not centered at ${width}`);
       assert.equal(alignment.overlaps, false, `${view} pagination overlaps its counter at ${width}`);
+      const iconAlignment = await pager.locator('.pager-arrow').evaluateAll(buttons => buttons.map(button => {
+        const icon = button.querySelector('svg'), path = icon?.querySelector('path');
+        if (!icon || !path) return null;
+        const buttonBox = button.getBoundingClientRect(), iconBox = icon.getBoundingClientRect(), pathBox = path.getBBox();
+        return {
+          x: Math.abs((buttonBox.left + buttonBox.right - iconBox.left - iconBox.right) / 2),
+          y: Math.abs((buttonBox.top + buttonBox.bottom - iconBox.top - iconBox.bottom) / 2),
+          pathX: Math.abs(pathBox.x + pathBox.width / 2 - 12),
+          pathY: Math.abs(pathBox.y + pathBox.height / 2 - 12),
+        };
+      }));
+      assert(iconAlignment.every(icon => icon && icon.x < 1 && icon.y < 1 && icon.pathX < 0.01 && icon.pathY < 0.01), `${view} arrow icons are not centered in their buttons at ${width}`);
+      if (width === 360 && view === "plans") await pager.screenshot({ path: resolve(artifacts, "pagination-icons.png") });
     }
     if (width === 360) {
       await page.locator("#toast").evaluate(node => node.classList.add("hidden"));
