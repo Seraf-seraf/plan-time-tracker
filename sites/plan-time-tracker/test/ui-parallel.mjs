@@ -37,7 +37,9 @@ const clock = id => card(id).locator(".timer");
 const bState = () => JSON.stringify({ plan: c.db.sqlite.prepare("SELECT * FROM plans WHERE plan_id=?").get(B), intervals: c.db.sqlite.prepare("SELECT * FROM work_intervals WHERE plan_id=?").all(B) });
 try {
   await page.goto("http://localhost");await page.locator('#plans[data-loaded="true"]').waitFor({ state: "attached" });
-  assert.equal(await page.locator("#plans>.row").count(), 102);
+  await page.locator('#plans[data-filtered="true"]').waitFor({ state: "attached" });
+  assert.equal(await page.locator("#plans>.row").count(), 8);
+  assert.equal(await page.locator("#plansPager .pager-summary").innerText(), "1–8 из 102");
   assert.equal(await page.locator("#activeCount").innerText(), "2");
   assert.equal(await clock(PLAN).innerText(), "1 ч 32 мин");
   assert.equal(await clock(B).innerText(), "1 ч 2 мин");
@@ -65,6 +67,11 @@ try {
   }, PLAN);
   assert.equal(await page.locator("#planDetail").getAttribute("data-plan-id"), B);assert.equal(await draft.inputValue(), "Несохранённый черновик B");
   await page.locator('[data-view="plans"]').click();
+  while (!await page.locator('#plans [data-plan-id="' + PLAN + '"]').count()) {
+    const next = page.locator('#plansPager [aria-label="Следующая страница"]');
+    assert.equal(await next.isEnabled(), true, "paused plan remains reachable through pagination");
+    await next.click();
+  }
   await page.locator('#plans [data-plan-id="' + PLAN + '"]').getByRole("button", { name: "Продолжить", exact: true }).click();
   await page.locator('[data-view="overview"]').click();await card(PLAN).waitFor();
   // A stale version refreshes A only; B keeps its own current version for the next action.

@@ -152,7 +152,7 @@ try {
         await page.locator("#active>.active-plan").first().screenshot({ path: resolve(artifacts, "card-active-" + width + ".png") });
         await page.locator("#recent").screenshot({ path: resolve(artifacts, "cards-recent-" + width + ".png") });
       }
-      if (view === "plans") await page.locator("#inactivePeriodPlans").screenshot({ path: resolve(artifacts, "cards-inactive-" + width + ".png") });
+      if (view === "plans") await page.locator("#plans").screenshot({ path: resolve(artifacts, "cards-plans-" + width + ".png") });
       layoutChecks.push({ view, width, ...geometry });
     }
   }

@@ -31,7 +31,7 @@ try{
   });
   try{
    await page.goto("http://localhost");await page.locator('#plans[data-loaded="true"]').waitFor({state:"attached"});
-   await page.locator('#recent [data-plan-id="'+PLAN+'"] .plan-open').click();
+   await page.locator((scenario==="PAUSED_CLOSED"?'#recent':'#active')+' [data-plan-id="'+PLAN+'"] .plan-open').click();
    const card=page.locator('.tracker-card[data-step-id="'+old.stepId+'"]');await card.locator(".tracker-card-status").waitFor();
    if(scenario==="PAUSED_CLOSED"){
     assert.equal(await card.locator(".tracker-card-status").textContent(),"План на паузе");

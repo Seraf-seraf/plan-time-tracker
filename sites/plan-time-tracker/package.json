@@ -7,7 +7,7 @@
     "validate": "node scripts/validate-artifact.mjs",
     "pretest": "npm run build",
     "test": "node --test test/*.test.js",
-    "test:ui": "node test/ui-acceptance.mjs && node test/ui-worktree.mjs && node test/ui-recovery.mjs && node test/ui-analytics.mjs && node test/ui-parallel.mjs && node test/ui-deletion.mjs"
+    "test:ui": "node test/ui-acceptance.mjs && node test/ui-worktree.mjs && node test/ui-recovery.mjs && node test/ui-analytics.mjs && node test/ui-parallel.mjs && node test/ui-deletion.mjs && node test/ui-pagination.mjs"
   },
   "version": "0.4.0"
 }

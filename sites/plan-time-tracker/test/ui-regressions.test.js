@@ -66,20 +66,23 @@ test("new checkpoint ordinal is one greater than the largest occupied ordinal", 
   assert(!scripts[2].includes("value:String(steps.length)"));
 });
 
-test("Plans period panel has 16px gaps and loads once the primary list is ready", async () => {
+test("period filters keep their metrics and drive the single paginated plan list", async () => {
   const { html, scripts } = await clientScripts();
   assert(scripts[1].includes('planFilter.panel.classList.add("plan-period-panel")'));
   assert(scripts[1].includes('await loadFilter(planFilter,false)'));
   assert(scripts[1].includes('window.addEventListener("plan-time-tracker:plans-rendered"'));
   assert(html.includes(".plan-period-panel>.metrics{margin-top:16px}"));
-  assert(html.includes(".plan-period-panel>#planPeriodPlans{margin-top:16px}"));
+  assert(!scripts[1].includes('planPeriodPlans'));
+  assert(!scripts[1].includes('overviewPeriodPlans'));
+  assert(scripts[1].includes('plan-time-tracker:period-plans'));
 });
 
-test("inactive Start and Resume are single-flight and use shared idempotent command state", async () => {
+test("plan list actions use shared idempotent command state", async () => {
   const { scripts } = await clientScripts();
-  const main = scripts[0], enhancements = scripts[1];
-  assert(enhancements.includes("if(action.disabled)return;\n          action.disabled=true"));
-  assert(enhancements.includes("await executePlanCommand(commandType,p)"));
+  const main = scripts[0];
+  assert(main.includes('if(p.status==="PLANNED")right.append(btn("Запустить",()=>command("StartPlan",p)'));
+  assert(main.includes('if(p.status==="PAUSED")right.append(btn("Продолжить",()=>command("ResumePlan",p)'));
+  assert(main.includes('if(b.disabled)return;b.disabled=true'));
   assert(main.includes('window.addEventListener("plan-time-tracker:command"'));
   assert(main.includes('e.code="COMMAND_OUTCOME_UNKNOWN"'));
   assert(main.includes('pending.delete(key);rejectedValidation.delete(key)'));
