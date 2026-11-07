@@ -153,7 +153,275 @@ export function median(values) {
   if (values.length === 0) return null;
   const sorted = values.slice().sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[middle] : Math.round((sorted[middle - 1] + sorted[middle]) / 2);
+  return sorted.length % 2 ? sorted[middle] : sorted[middle - 1] + Math.round((sorted[middle] - sorted[middle - 1]) / 2);
+}
+
+const ESTIMATE_METHOD = Object.freeze({ id: "reference-class-median", version: "1" });
+const ESTIMATE_PROFILE_FIELDS = Object.freeze(["workKind", "reuseState", "doneBoundary"]);
+const ESTIMATE_WORK_KINDS = new Set(["CREATE_MECHANISM", "MODIFY_MECHANISM", "RUN_EXISTING_PROCESS", "VERIFY_EXISTING", "MIGRATE_DATA", "INVESTIGATE", "MIXED", "UNKNOWN"]);
+const ESTIMATE_REUSE_STATES = new Set(["ABSENT", "PARTIAL", "READY", "UNKNOWN"]);
+const ESTIMATE_DONE_BOUNDARIES = new Set(["ANALYSIS", "LOCAL_VERIFIED", "LOCAL_STAGED", "PUBLISHED", "DEPLOYED_VERIFIED", "UNKNOWN"]);
+const ESTIMATE_DECISIONS = new Set(["INCLUDE", "DESCRIPTIVE", "EXCLUDE"]);
+const ESTIMATE_STATUSES = new Set(["PLANNED", "RUNNING", "PAUSED", "COMPLETED"]);
+const ESTIMATE_AUTHORITIES = new Set(["SERVER_PLAN_INTERVALS", "EXTERNAL_FIXTURE"]);
+const ESTIMATE_MAX_CANDIDATES = 1000;
+const ESTIMATE_MAX_CASES = 1000;
+const ESTIMATE_ID = /^[\x20-\x7e]{1,128}$/;
+
+function estimateValidation(message) {
+  throw new AppError("VALIDATION_ERROR", message);
+}
+
+function invalidEstimateSource(message) {
+  throw new AppError("INVALID_ESTIMATION_SOURCE", message);
+}
+
+function isPlainRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasExactKeys(value, keys, message) {
+  if (!isPlainRecord(value)) estimateValidation(message);
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) estimateValidation(message);
+}
+
+function isNonnegativeSafeInteger(value) {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function validateEstimateId(value, message) {
+  if (typeof value !== "string" || !ESTIMATE_ID.test(value)) estimateValidation(message);
+}
+
+function validateEstimateDigest(value, nullable, message) {
+  if (nullable && value === null) return;
+  if (!isSnapshotDigest(value)) estimateValidation(message);
+}
+
+function validateEstimateProfile(profile) {
+  hasExactKeys(profile, ESTIMATE_PROFILE_FIELDS, "profile должен содержать ровно три поля.");
+  if (!ESTIMATE_WORK_KINDS.has(profile.workKind) || !ESTIMATE_REUSE_STATES.has(profile.reuseState)
+    || !ESTIMATE_DONE_BOUNDARIES.has(profile.doneBoundary)) {
+    estimateValidation("profile содержит неизвестное значение.");
+  }
+}
+
+function validateEstimateCandidate(candidate, sourceAuthority) {
+  if (!isPlainRecord(candidate)) estimateValidation("candidate должен быть объектом.");
+  validateEstimateId(candidate.planId, "planId кандидата должен быть непустым ASCII ID до 128 символов.");
+  if (candidate.deleted === true) {
+    hasExactKeys(candidate, ["planId", "deleted"], "Удалённый кандидат содержит только planId и deleted=true.");
+    return;
+  }
+
+  hasExactKeys(candidate, [
+    "planId", "requirementsDigest", "profile", "decision", "scopeStability", "timeCoverage", "rationale", "deleted",
+    "planStatus", "firstStartedAtMs", "finishedAtMs", "sourceAvailableAtMs", "checksConfirmed", "measurement", "activeMs",
+    "intervalCount", "intervalsDigest",
+  ], "candidate содержит отсутствующие или неизвестные поля.");
+  if (candidate.deleted !== false) estimateValidation("deleted должен быть boolean.");
+  validateEstimateDigest(candidate.requirementsDigest, sourceAuthority === "EXTERNAL_FIXTURE", "requirementsDigest некорректен.");
+  validateEstimateProfile(candidate.profile);
+  if (!ESTIMATE_DECISIONS.has(candidate.decision)) estimateValidation("decision кандидата некорректен.");
+  if (!["STABLE", "CHANGED", "UNKNOWN"].includes(candidate.scopeStability)) estimateValidation("scopeStability некорректен.");
+  if (!["COMPLETE", "PARTIAL", "UNKNOWN"].includes(candidate.timeCoverage)) estimateValidation("timeCoverage некорректен.");
+  if (typeof candidate.rationale !== "string" || candidate.rationale.trim().length === 0 || Array.from(candidate.rationale).length > 128) {
+    estimateValidation("rationale должен содержать от 1 до 128 символов.");
+  }
+  if (!ESTIMATE_STATUSES.has(candidate.planStatus)) estimateValidation("planStatus некорректен.");
+  for (const field of ["firstStartedAtMs", "finishedAtMs", "activeMs"]) {
+    if (candidate[field] !== null && !isNonnegativeSafeInteger(candidate[field])) estimateValidation(`${field} должен быть null или неотрицательным safe integer.`);
+  }
+  if (!isNonnegativeSafeInteger(candidate.sourceAvailableAtMs) || !isNonnegativeSafeInteger(candidate.intervalCount)) {
+    estimateValidation("sourceAvailableAtMs и intervalCount должны быть неотрицательными safe integer.");
+  }
+  if (typeof candidate.checksConfirmed !== "boolean") estimateValidation("checksConfirmed должен быть boolean.");
+  if (!["COMPLETE", "MISSING", "INCOMPLETE"].includes(candidate.measurement)) estimateValidation("measurement некорректен.");
+  validateEstimateDigest(candidate.intervalsDigest, true, "intervalsDigest некорректен.");
+
+  if (sourceAuthority === "SERVER_PLAN_INTERVALS") {
+    if (candidate.requirementsDigest === null) estimateValidation("Серверный источник требует requirementsDigest.");
+    if (candidate.firstStartedAtMs !== null && candidate.sourceAvailableAtMs < candidate.firstStartedAtMs) {
+      invalidEstimateSource("sourceAvailableAtMs предшествует первому запуску.");
+    }
+    if (candidate.finishedAtMs !== null && candidate.sourceAvailableAtMs < candidate.finishedAtMs) {
+      invalidEstimateSource("sourceAvailableAtMs предшествует завершению.");
+    }
+    if (candidate.firstStartedAtMs !== null && candidate.finishedAtMs !== null && candidate.finishedAtMs < candidate.firstStartedAtMs) {
+      invalidEstimateSource("Граница завершения предшествует первому запуску.");
+    }
+    if (candidate.intervalCount === 0 ? candidate.intervalsDigest !== null : candidate.intervalsDigest === null) {
+      invalidEstimateSource("intervalCount не согласован с intervalsDigest.");
+    }
+    if (candidate.measurement === "MISSING" && candidate.intervalCount > 0) {
+      invalidEstimateSource("MISSING измерение не может содержать интервалы.");
+    }
+    if (candidate.measurement === "INCOMPLETE" && (candidate.firstStartedAtMs === null || candidate.intervalCount === 0)) {
+      invalidEstimateSource("INCOMPLETE измерение требует первого запуска и хотя бы одного интервала.");
+    }
+    if (candidate.measurement === "COMPLETE") {
+      if (candidate.planStatus !== "COMPLETED" || candidate.firstStartedAtMs === null || candidate.finishedAtMs === null
+        || candidate.intervalCount === 0 || candidate.activeMs === null) {
+        invalidEstimateSource("Полное серверное измерение требует завершённый план, границы и закрытые интервалы.");
+      }
+      if (candidate.activeMs > candidate.finishedAtMs - candidate.firstStartedAtMs) {
+        invalidEstimateSource("PLAN_ACTIVE превышает интервал между запуском и завершением.");
+      }
+    } else if (candidate.activeMs !== null) {
+      invalidEstimateSource("Неполное измерение не может содержать activeMs.");
+    }
+    if (candidate.planStatus !== "COMPLETED" && candidate.finishedAtMs !== null) {
+      invalidEstimateSource("Незавершённый план не может содержать finishedAtMs.");
+    }
+  } else {
+    if (candidate.firstStartedAtMs !== null || candidate.finishedAtMs !== null || candidate.intervalCount !== 0 || candidate.intervalsDigest !== null) {
+      estimateValidation("EXTERNAL_FIXTURE не должен заявлять серверные границы или интервалы.");
+    }
+    if (candidate.measurement === "COMPLETE" ? candidate.activeMs === null : candidate.activeMs !== null) {
+      estimateValidation("activeMs не согласован с внешним measurement.");
+    }
+  }
+}
+
+function validateEstimateSnapshot(snapshot) {
+  hasExactKeys(snapshot, ["methodVersion", "metric", "referenceCutoffMs", "sourceAuthority", "target", "candidates"], "snapshot содержит отсутствующие или неизвестные поля.");
+  if (snapshot.methodVersion !== 1 || snapshot.metric !== "PLAN_ACTIVE") estimateValidation("Неподдерживаемые methodVersion или metric.");
+  if (!isNonnegativeSafeInteger(snapshot.referenceCutoffMs)) estimateValidation("referenceCutoffMs должен быть неотрицательным safe integer.");
+  if (!ESTIMATE_AUTHORITIES.has(snapshot.sourceAuthority)) estimateValidation("sourceAuthority некорректен.");
+  hasExactKeys(snapshot.target, ["planId", "expectedRequirementsDigest", "profile"], "target содержит отсутствующие или неизвестные поля.");
+  validateEstimateId(snapshot.target.planId, "planId цели должен быть непустым ASCII ID до 128 символов.");
+  validateEstimateDigest(snapshot.target.expectedRequirementsDigest, snapshot.sourceAuthority === "EXTERNAL_FIXTURE", "expectedRequirementsDigest некорректен.");
+  validateEstimateProfile(snapshot.target.profile);
+  if (!Array.isArray(snapshot.candidates) || snapshot.candidates.length > ESTIMATE_MAX_CANDIDATES) {
+    estimateValidation(`candidates должен быть массивом не более ${ESTIMATE_MAX_CANDIDATES} записей.`);
+  }
+  const ids = new Set();
+  for (const candidate of snapshot.candidates) {
+    validateEstimateCandidate(candidate, snapshot.sourceAuthority);
+    if (candidate.planId === snapshot.target.planId) estimateValidation("target нельзя включать в candidates.");
+    if (ids.has(candidate.planId)) estimateValidation("planId кандидата повторяется.");
+    ids.add(candidate.planId);
+  }
+}
+
+function profileMatchReasons(target, source) {
+  const hasUnknown = ESTIMATE_PROFILE_FIELDS.some((field) => target[field] === "UNKNOWN" || source[field] === "UNKNOWN");
+  const hasMismatch = ESTIMATE_PROFILE_FIELDS.some((field) => target[field] !== "UNKNOWN" && source[field] !== "UNKNOWN" && target[field] !== source[field]);
+  return { hasUnknown, hasMismatch };
+}
+
+// Adapted from HoboStank/agent-eta forecast.py blob b6022b3ffb4f4e16ba1ba467cd607cea5c99f91e; see docs/assessments.md for scope and semantic changes.
+export function calculateComparableEstimate(snapshot) {
+  validateEstimateSnapshot(snapshot);
+  const candidates = snapshot.candidates.slice().sort((left, right) => left.planId < right.planId ? -1 : left.planId > right.planId ? 1 : 0);
+  const included = [];
+  const excluded = [];
+  for (const candidate of candidates) {
+    const reasons = [];
+    if (candidate.deleted === true) {
+      reasons.push("DELETED_SOURCE");
+    } else {
+      if (candidate.decision === "EXCLUDE") reasons.push("AGENT_EXCLUDED");
+      else if (candidate.decision === "DESCRIPTIVE") reasons.push("DESCRIPTIVE_ONLY");
+      const profile = profileMatchReasons(snapshot.target.profile, candidate.profile);
+      if (profile.hasUnknown) reasons.push("UNKNOWN_PROFILE");
+      if (profile.hasMismatch) reasons.push("PROFILE_MISMATCH");
+      if (candidate.scopeStability === "CHANGED") reasons.push("SCOPE_CHANGED");
+      else if (candidate.scopeStability === "UNKNOWN") reasons.push("SCOPE_UNCONFIRMED");
+      if (candidate.timeCoverage !== "COMPLETE") reasons.push("TIME_COVERAGE_UNCONFIRMED");
+      if (candidate.planStatus !== "COMPLETED" || (snapshot.sourceAuthority === "SERVER_PLAN_INTERVALS" && candidate.finishedAtMs === null)) {
+        reasons.push("NOT_COMPLETED");
+      }
+      if (!candidate.checksConfirmed) reasons.push("CHECKS_UNCONFIRMED");
+      if (candidate.measurement === "MISSING") reasons.push("NO_MEASUREMENT");
+      else if (candidate.measurement === "INCOMPLETE") reasons.push("INCOMPLETE_INTERVALS");
+      if (candidate.sourceAvailableAtMs >= snapshot.referenceCutoffMs) reasons.push("AFTER_CUTOFF");
+    }
+    if (reasons.length > 0) excluded.push({ planId: candidate.planId, reasons });
+    else included.push({ planId: candidate.planId, activeMs: candidate.activeMs });
+  }
+
+  const pointMs = median(included.map((candidate) => candidate.activeMs));
+  return {
+    formatVersion: 1,
+    method: ESTIMATE_METHOD,
+    metric: "PLAN_ACTIVE",
+    estimand: "ACCEPTED_UNCHANGED_SCOPE",
+    status: included.length === 0 ? "INSUFFICIENT_DATA" : "AVAILABLE",
+    referenceKind: included.length === 0 ? "NONE" : included.length === 1 ? "SINGLE_REFERENCE" : "HISTORICAL_REFERENCE",
+    pointMs,
+    observedRange: included.length === 0 ? null : {
+      minMs: Math.min(...included.map((candidate) => candidate.activeMs)),
+      maxMs: Math.max(...included.map((candidate) => candidate.activeMs)),
+      kind: "OBSERVED_SAMPLE",
+    },
+    sampleCount: included.length,
+    accuracy: "NOT_VALIDATED",
+    intervalCoverage: null,
+    includedPlanIds: included.map((candidate) => candidate.planId),
+    excluded,
+    selectionAuthority: "agent",
+  };
+}
+
+function addSafeInteger(total, value) {
+  const result = total + value;
+  if (!Number.isSafeInteger(result)) estimateValidation("Сумма ошибок или фактов превышает safe integer.");
+  return result;
+}
+
+// Adapted from the selected Agent ETA test invariants; no Store, clock, or source lifecycle is included.
+export function scoreEstimateCases(cases) {
+  if (!Array.isArray(cases) || cases.length > ESTIMATE_MAX_CASES) estimateValidation(`cases должен быть массивом не более ${ESTIMATE_MAX_CASES} записей.`);
+  const ids = new Set();
+  let actualKnownCount = 0;
+  let predictionCount = 0;
+  let scoredCount = 0;
+  let missingActualCount = 0;
+  let missingPredictionCount = 0;
+  let actualSumMs = 0;
+  let absoluteErrorSumMs = 0;
+  let signedErrorSumMs = 0;
+
+  for (const item of cases) {
+    hasExactKeys(item, ["caseId", "actualMs", "predictedMs"], "Оценочный случай содержит отсутствующие или неизвестные поля.");
+    validateEstimateId(item.caseId, "caseId должен быть непустым ASCII ID до 128 символов.");
+    if (ids.has(item.caseId)) estimateValidation("caseId повторяется.");
+    ids.add(item.caseId);
+    for (const field of ["actualMs", "predictedMs"]) {
+      if (item[field] !== null && !isNonnegativeSafeInteger(item[field])) estimateValidation(`${field} должен быть null или неотрицательным safe integer.`);
+    }
+    if (item.actualMs === null) missingActualCount += 1;
+    else {
+      actualKnownCount += 1;
+      if (item.predictedMs !== null) actualSumMs = addSafeInteger(actualSumMs, item.actualMs);
+    }
+    if (item.predictedMs === null) missingPredictionCount += 1;
+    else predictionCount += 1;
+    if (item.actualMs !== null && item.predictedMs !== null) {
+      scoredCount += 1;
+      const difference = item.predictedMs - item.actualMs;
+      absoluteErrorSumMs = addSafeInteger(absoluteErrorSumMs, Math.abs(difference));
+      signedErrorSumMs = addSafeInteger(signedErrorSumMs, difference);
+    }
+  }
+
+  return {
+    caseCount: cases.length,
+    actualKnownCount,
+    predictionCount,
+    scoredCount,
+    missingActualCount,
+    missingPredictionCount,
+    forecastRate: cases.length === 0 ? null : predictionCount / cases.length,
+    maeMs: scoredCount === 0 ? null : absoluteErrorSumMs / scoredCount,
+    wapePercent: scoredCount === 0 || actualSumMs === 0 ? null : 100 * absoluteErrorSumMs / actualSumMs,
+    signedBiasPercent: scoredCount === 0 || actualSumMs === 0 ? null : 100 * signedErrorSumMs / actualSumMs,
+  };
 }
 
 function dbFirst(db, sql, ...args) { return db.prepare(sql).bind(...args).first(); }
