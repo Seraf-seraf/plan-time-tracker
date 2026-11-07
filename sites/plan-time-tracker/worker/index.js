@@ -2739,6 +2739,15 @@ function mcpTools() {
   });
 }
 
+function unexpectedMcpErrorReason(error) {
+  for (let current = error, depth = 0; current && depth < 3; current = current.cause, depth++) {
+    const message = typeof current.message === "string" ? current.message : "";
+    if (message.includes("too many terms in compound SELECT")) return "D1_COMPOUND_SELECT_LIMIT";
+    if (message.includes("D1 DB is overloaded.")) return "D1_RESOURCE_LIMIT";
+  }
+  return "UNEXPECTED_ERROR";
+}
+
 async function mcpRoute(request, env, now) {
   if (request.method !== "POST") return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "POST required" } }, 405);
   validateOrigin(request);
@@ -2777,9 +2786,14 @@ async function mcpRoute(request, env, now) {
     return json({ jsonrpc: "2.0", id: id, result: { content: [{ type: "text", text: JSON.stringify(publicView(result)) }], structuredContent: publicView(result) } });
   } catch (error) {
     const e = error instanceof AppError ? error : appError("INTERNAL_ERROR", "Внутренняя ошибка.", 500);
+    const requestId = crypto.randomUUID();
+    if (!(error instanceof AppError)) {
+      console.error(JSON.stringify({ event: "mcp_unexpected_error", tool: TOOL_NAMES.includes(name) ? name : "UNKNOWN",
+        requestId, reason: unexpectedMcpErrorReason(error) }));
+    }
     const body = {
       code: e.code, message: e.message, details: e.details || null,
-      requestId: crypto.randomUUID(),
+      requestId,
       retryable: e.details && typeof e.details.retryable === "boolean" ? e.details.retryable : ["RATE_LIMITED", "SOURCE_UNAVAILABLE", "INTERNAL_ERROR"].includes(e.code),
       retryAfter: e.details && e.details.retryAfter != null ? e.details.retryAfter : null,
     };
