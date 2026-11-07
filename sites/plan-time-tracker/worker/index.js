@@ -963,7 +963,12 @@ async function readEstimationHistory(db, ownerId, args, nowMs) {
           (execution_ended_at>? OR (execution_ended_at=execution_started_at AND execution_started_at>=?)))
       ORDER BY claimed_at,attempt_id LIMIT 101`, asOf, ownerId, target.planId, target.stepId ?? null, target.stepId ?? null, asOf,
       asOf, asOf, range.startMs, range.endMs, asOf, range.endMs, range.startMs, range.startMs);
-    const observations = await dbAll(db, `SELECT j.event_id,j.step_id,j.source_id,j.session_id,j.occurred_at,j.classification,j.payload_json,
+    const observations = await dbAll(db, `WITH selected_tools AS MATERIALIZED (
+      SELECT owner_id,plan_id,event_id,step_id,source_id,session_id,occurred_at,classification,payload_json,server_sequence
+      FROM tracker_journal WHERE owner_id=? AND plan_id=? AND (? IS NULL OR step_id=?)
+        AND event_type='tool_finished' AND received_at<=? AND occurred_at>=? AND occurred_at<? AND occurred_at<=?
+      ORDER BY server_sequence LIMIT 101
+    ) SELECT j.event_id,j.step_id,j.source_id,j.session_id,j.occurred_at,j.classification,j.payload_json,
       (SELECT COUNT(*) FROM tracker_journal start WHERE start.owner_id=j.owner_id AND start.plan_id=j.plan_id
         AND start.source_id=j.source_id AND start.session_id=j.session_id AND start.event_type='tool_started'
         AND json_extract(start.payload_json,'$.data.operationId')=json_extract(j.payload_json,'$.data.operationId')
@@ -975,9 +980,8 @@ async function readEstimationHistory(db, ownerId, args, nowMs) {
         AND finish.source_id=j.source_id AND finish.session_id=j.session_id AND finish.event_type='tool_finished'
         AND json_extract(finish.payload_json,'$.data.operationId')=json_extract(j.payload_json,'$.data.operationId') AND finish.received_at<=?) AS matching_finishes,
       EXISTS(SELECT 1 FROM tracker_journal correction WHERE correction.owner_id=j.owner_id AND correction.correction_of_event_id=j.event_id AND correction.received_at<=?) AS corrected
-      FROM tracker_journal j WHERE j.owner_id=? AND j.plan_id=? AND (? IS NULL OR j.step_id=?)
-        AND j.event_type='tool_finished' AND j.received_at<=? AND j.occurred_at>=? AND j.occurred_at<? AND j.occurred_at<=?
-      ORDER BY j.server_sequence LIMIT 101`, asOf, asOf, asOf, asOf, ownerId, target.planId, target.stepId ?? null, target.stepId ?? null, asOf, range.startMs, range.endMs, asOf);
+      FROM selected_tools j ORDER BY j.server_sequence`, ownerId, target.planId, target.stepId ?? null, target.stepId ?? null,
+      asOf, range.startMs, range.endMs, asOf, asOf, asOf, asOf, asOf);
     const tools = observations.slice(0, 100).map(o => {
       const data = JSON.parse(o.payload_json).data;
       return { eventId: o.event_id, stepId: o.step_id, sourceId: o.source_id, sessionId: o.session_id,

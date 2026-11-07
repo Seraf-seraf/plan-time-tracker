@@ -301,6 +301,50 @@ test("tool facts distinguish client reports, missing starts, duplicates and corr
   } finally { c.close(); }
 });
 
+test("history matches across period and step boundaries while respecting receipt-time asOf and null steps", async () => {
+  const c = context();
+  try {
+    const lease = await running(c);
+    const extra = await ok(c, "CreateStep", { planId: PLAN, ordinal: 2, title: "Other step", expectedResult: "Independent", requiredChecks: [] });
+    const { session_id: sessionId } = c.db.sqlite.prepare("SELECT session_id FROM step_attempts WHERE attempt_id=?").get(lease.attemptId);
+    let sequence = 0;
+    const observe = async (eventType, operationId, stepId, correctionOfEventId) => {
+      const eventId = crypto.randomUUID();
+      await ok(c, "AppendObservation", { eventId, planId: PLAN, ...(stepId ? { stepId } : {}), sourceId: "fixture", sessionId,
+        sourceSequence: ++sequence, occurredAt: c.now(), eventType,
+        data: eventType === "correction" ? { reason: "Later correction" } : { operationId, toolName: "boundary", ...(eventType === "tool_finished" ? { status: "OK", durationMs: 10 } : {}) },
+        ...(correctionOfEventId ? { correctionOfEventId } : {}) });
+      return eventId;
+    };
+    const duplicateOperation = crypto.randomUUID(), correctedOperation = crypto.randomUUID(), planOperation = crypto.randomUUID();
+    await observe("tool_started", duplicateOperation, lease.stepId);
+    const correctedStart = await observe("tool_started", correctedOperation, lease.stepId);
+    await observe("tool_started", planOperation);
+    c.advance(10);
+    await observe("tool_finished", duplicateOperation, lease.stepId);
+    await observe("tool_finished", correctedOperation, lease.stepId);
+    await observe("tool_finished", planOperation);
+    const asOf = c.now(), day = new Date(asOf).toISOString().slice(0, 10);
+    const args = { targets: [{ planId: PLAN, stepId: lease.stepId }], from: day, to: day, timeZone: "UTC" };
+    const before = await history(c, { ...args, asOf });
+    assert.deepEqual(before.facts[0].tools.map(tool => tool.durationMs), [10, 10]);
+    c.advance(86_400_000);
+    await observe("tool_finished", duplicateOperation, extra.stepId);
+    await observe("correction", null, lease.stepId, correctedStart);
+    const frozen = await history(c, { ...args, asOf });
+    assert.deepEqual(frozen.facts[0].tools, before.facts[0].tools);
+    const later = await history(c, args);
+    assert.equal(later.facts[0].tools.length, 2);
+    assert.deepEqual(later.facts[0].tools.map(tool => tool.durationMs), [null, null]);
+    assert.equal(later.facts[0].tools[0].matchedStart, true);
+    assert.equal(later.facts[0].tools[1].matchedStart, false);
+    const parent = await history(c, { ...args, targets: [{ planId: PLAN }] });
+    const planTool = parent.facts[0].tools.find(tool => tool.stepId === null);
+    assert.equal(planTool.operationId, planOperation);
+    assert.equal(planTool.durationMs, 10);
+  } finally { c.close(); }
+});
+
 test("history preserves ambiguous attribution and expired attempts without gating neutral assessments", async () => {
   const c = context();
   try {

@@ -14,6 +14,26 @@ test("Sites artifact retains every canonical migration and metadata file byte-fo
   }
 });
 
+test("0018 adds history indexes to a populated schema without changing rows and tolerates a repeat", async () => {
+  const c = context(migrations.indexOf("0018_estimation_history_indexes.sql"));
+  try {
+    const lease = await running(c);
+    await result(c, lease);
+    await ok(c, "RecordCheck", check(lease.stepId));
+    const before = rows(c);
+    const sql = readFileSync(new URL("0018_estimation_history_indexes.sql", artifactDirectory), "utf8");
+    c.db.sqlite.exec(sql);
+    c.db.sqlite.exec(sql);
+    assert.deepEqual(rows(c), before);
+    assert.deepEqual(c.db.sqlite.prepare("PRAGMA foreign_key_check").all(), []);
+    const indexes = c.db.sqlite.prepare("PRAGMA index_list(tracker_journal)").all().map(row => row.name);
+    for (const name of ["tracker_journal_tool_match", "tracker_journal_corrections", "tracker_journal_history_tools", "tracker_journal_attempt_start"]) {
+      assert.ok(indexes.includes(name), name);
+    }
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM work_intervals WHERE end_ms IS NULL").get().n, 1);
+  } finally { c.close(); }
+});
+
 test("packaged 0016 upgrades populated 0015 while retaining evidence, receipts and an unrelated live timer", async () => {
   const c = context(migrations.indexOf("0016_plan_deletion.sql"));
   const other = "22222222-2222-4222-8222-222222222222";
