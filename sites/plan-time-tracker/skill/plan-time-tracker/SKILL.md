@@ -36,6 +36,15 @@ Use this skill for `/plan`, ordinary planning, assessment, execution and continu
 
 For handoff include planId/stepId, assessmentId/revision, result criteria/checks, method/scale, chosen approach, assumptions, measured time with metric and limitations, and remaining forecast. Continue existing context without duplicates. The executor may revise an assessment with a reason while retaining baseline. Use assess-task for neutral RecordAssessment/GetAssessment/GetEstimationHistory; complexity, duration and implementation choice belong to the agent. No other plugin or local executor is needed for assessment.
 
+When an assessment contains `context.estimation`, pass its assessmentId/revision and
+`calculationDigest` while retaining the original `baseline` and `inputSnapshot` in
+that immutable revision. Keep the full forecast (`forecastScope: "FULL"`) separate
+from remaining work. Record a remaining forecast as a new revision with
+`phase: "remaining"` and a reason; do not subtract elapsed time from the historical
+full-plan point or replace its baseline. If requirements materially change, read the
+current `GetAssessment`, compare its digest and create a reasoned revision rather
+than substituting a fresh digest into the old assessment.
+
 Maintain a separate execution context per `planId`: assigned checkpoint/step ID, plan version and step version, attempt ID/fence, current result revision/digest, session/source sequencing, pending exact command envelopes and observation queue. Every executor, including a subagent, receives an explicit plan/checkpoint binding; never choose a “current” plan globally. A command, recovery, completion or check for A must not alter or borrow B's state, attempt, result, checks or readiness.
 
 Use isolated source directories for concurrent writers, or coordinate writes and stop all writers while capturing snapshots and running checks. Verify the same digest before and after every check. A changed shared-source snapshot cannot attest a passed check for either context; record truthful outcomes, capture a new authorized result revision and rerun affected checks. Do not reuse another plan's evidence merely because its check key or digest matches.
