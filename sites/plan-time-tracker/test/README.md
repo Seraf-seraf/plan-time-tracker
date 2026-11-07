@@ -2,6 +2,11 @@
 
 Run `npm test` for built-artifact, owner/lifecycle/timer, receipt replay, concurrency, historical-schema, v2 evidence and VM client-contract checks. The SQLite databases are in memory and use all canonical migrations.
 
+`d1-query-limits.test.js` also requires Python 3.11+ with `sqlite3.Connection.setlimit`.
+It executes captured Worker SQL and bindings against temporary SQLite files with
+the compound SELECT limit set to 5 and the bound-parameter limit to 100.
+These adapter checks supplement the Node tests; hosted D1 acceptance remains separate.
+
 `export.test.js` verifies the versioned analytic JSON report: complete result/attempt/check/assessment history beyond UI limits, links and requirement snapshots, timeline deduplication and noise filtering, protected historical evidence, parallel/paused/expired/deleted timing, owner isolation, a single read snapshot and failure without a partial document. `ui-acceptance.mjs` downloads and parses the actual JSON file through the browser.
 
 `analytics-steps.test.js` also verifies real-interval attribution across repeated attempts, pauses, local dates and period boundaries, snapshot time, lease expiry/renewal, parallel sections, missing data and measured zero, owner isolation and read-only behavior. `ui-analytics.mjs` is included in `npm run test:ui`: it uses synthetic plans to check section disclosure, hover/focus/touch, exact tooltips, long titles, zero/one/40 sections, local scrolling at 360/390/768/1440px, loading failure/retry and stale detail responses. It produces `analytics-desktop.png`, `analytics-mobile.png`, `analytics-mobile-many.png` and `analytics-report.json` in the chosen artifact directory. No real plans are read or changed by these tests.

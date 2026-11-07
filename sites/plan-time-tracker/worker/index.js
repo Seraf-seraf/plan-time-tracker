@@ -750,19 +750,18 @@ function estimateSourceSnapshotSql(requestCount) {
         WHERE step.owner_id=p.owner_id AND step.plan_id=p.plan_id) ELSE 0 END AS step_count,
       CASE WHEN p.deleted_at IS NULL THEN (SELECT COUNT(*) FROM tracker_incomplete_steps incomplete
         WHERE incomplete.owner_id=p.owner_id AND incomplete.plan_id=p.plan_id) ELSE 0 END AS incomplete_step_count,
-      CASE WHEN p.deleted_at IS NULL THEN (SELECT MAX(source_time) FROM (
-        SELECT p.registered_at AS source_time
-        UNION ALL SELECT event.server_occurred_at FROM plan_events event WHERE event.owner_id=p.owner_id AND event.plan_id=p.plan_id
-        UNION ALL SELECT step.created_at FROM plan_steps step WHERE step.owner_id=p.owner_id AND step.plan_id=p.plan_id
-        UNION ALL SELECT step.updated_at FROM plan_steps step WHERE step.owner_id=p.owner_id AND step.plan_id=p.plan_id
-        UNION ALL SELECT result.created_at FROM step_results result JOIN plan_steps step
+      CASE WHEN p.deleted_at IS NULL THEN MAX(
+        p.registered_at,COALESCE(p.finished_at,p.registered_at),
+        COALESCE((SELECT MAX(event.server_occurred_at) FROM plan_events event WHERE event.owner_id=p.owner_id AND event.plan_id=p.plan_id),p.registered_at),
+        COALESCE((SELECT MAX(step.created_at) FROM plan_steps step WHERE step.owner_id=p.owner_id AND step.plan_id=p.plan_id),p.registered_at),
+        COALESCE((SELECT MAX(step.updated_at) FROM plan_steps step WHERE step.owner_id=p.owner_id AND step.plan_id=p.plan_id),p.registered_at),
+        COALESCE((SELECT MAX(result.created_at) FROM step_results result JOIN plan_steps step
           ON step.owner_id=result.owner_id AND step.step_id=result.step_id
-          WHERE step.owner_id=p.owner_id AND step.plan_id=p.plan_id
-        UNION ALL SELECT evidence.created_at FROM tracker_check_evidence evidence JOIN plan_steps step
+          WHERE step.owner_id=p.owner_id AND step.plan_id=p.plan_id),p.registered_at),
+        COALESCE((SELECT MAX(evidence.created_at) FROM tracker_check_evidence evidence JOIN plan_steps step
           ON step.owner_id=evidence.owner_id AND step.step_id=evidence.step_id
-          WHERE step.owner_id=p.owner_id AND step.plan_id=p.plan_id
-        UNION ALL SELECT p.finished_at
-      )) ELSE NULL END AS source_available_at,
+          WHERE step.owner_id=p.owner_id AND step.plan_id=p.plan_id),p.registered_at)
+      ) ELSE NULL END AS source_available_at,
       intervals.interval_id,intervals.start_ms,intervals.end_ms
     FROM requested r
     LEFT JOIN plans p ON p.owner_id=(SELECT owner_id FROM owner_scope) AND lower(p.plan_id)=r.plan_id

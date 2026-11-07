@@ -15,8 +15,8 @@ class Statement {
   async first() { return this.db.sqlite.prepare(this.sql).get(...this.args) || null; }
   async all() { return { results: this.db.sqlite.prepare(this.sql).all(...this.args) }; }
 }
-export function context(until = migrations.length) {
-  const sqlite = new DatabaseSync(":memory:");
+export function context(until = migrations.length, { databasePath = ":memory:" } = {}) {
+  const sqlite = new DatabaseSync(databasePath);
   for (const name of migrations.slice(0, until)) sqlite.exec(migration(name));
   const db = { sqlite, prepare(sql) { return new Statement(this, sql); } };
   let now = 1800000000000;
