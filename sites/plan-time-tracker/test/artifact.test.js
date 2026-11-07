@@ -4,7 +4,7 @@ import { access, readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { context, ok, mcp, PLAN } from "./fixtures/tracker-db.mjs";
+import { context, call, ok, mcp, result, check, rows, PLAN, DIGEST_A } from "./fixtures/tracker-db.mjs";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const artifactRoot = resolve(projectRoot, "dist");
@@ -42,5 +42,110 @@ test("packaged Worker executes the neutral assessment path with the declared run
     assert.equal(response.value.result.structuredContent.assessment.method.id, "qualitative");
     assert.equal(response.value.result.structuredContent.revision, 1);
     assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM work_intervals").get().n, 0);
+  } finally { c.close(); }
+});
+
+test("built Worker exposes read-only CalculateEstimate and stores its snapshot only through RecordAssessment", async () => {
+  const c = context();
+  try {
+    const built = await import(pathToFileURL(workerPath).href + "?calculator-entrypoint");
+    c.worker = built.createWorker(c.now);
+
+    const discovery = await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    const tool = discovery.value.result.tools.find((item) => item.name === "CalculateEstimate");
+    assert.ok(tool, "the built artifact lists CalculateEstimate");
+    assert.equal(tool.annotations?.readOnlyHint, true);
+
+    await ok(c, "CreatePlan", { planId: PLAN, title: "Проверка собранного калькулятора", planCreatedAt: { precision: "dateOnly", on: "2027-01-01", timeZone: "UTC" } });
+    const sourcePlanId = "22222222-2222-4222-8222-222222222222";
+    await ok(c, "CreatePlan", { planId: sourcePlanId, title: "Готовый сопоставимый процесс", planCreatedAt: { precision: "dateOnly", on: "2027-01-01", timeZone: "UTC" } });
+    const sourceStep = await ok(c, "CreateStep", { planId: sourcePlanId, ordinal: 0, title: "Выполнить процесс", expectedResult: "Проверенный результат", requiredChecks: ["unit"] });
+    await ok(c, "StartPlan", { planId: sourcePlanId }, 0);
+    const claim = await ok(c, "ClaimStepAttempt", { stepId: sourceStep.stepId, sessionId: crypto.randomUUID(), sourceId: "artifact-estimate-test" }, 1);
+    const lease = { stepId: sourceStep.stepId, attemptId: claim.attemptId, fence: claim.fence };
+    await ok(c, "StartStep", lease, 1);
+    c.advance(60_000);
+    await result(c, lease, DIGEST_A, 2);
+    await ok(c, "RecordCheck", check(sourceStep.stepId));
+    await ok(c, "FinishPlan", { planId: sourcePlanId }, 1);
+    c.advance(1);
+
+    const profile = { workKind: "RUN_EXISTING_PROCESS", reuseState: "READY", doneBoundary: "LOCAL_VERIFIED" };
+    const targetContext = (await mcp(c, "GetAssessment", { planId: PLAN })).value.result.structuredContent;
+    const sourceContext = (await mcp(c, "GetAssessment", { planId: sourcePlanId })).value.result.structuredContent;
+    const calculateArgs = {
+      methodVersion: 1,
+      metric: "PLAN_ACTIVE",
+      referenceCutoffMs: c.now(),
+      target: { planId: PLAN, expectedRequirementsDigest: targetContext.currentRequirementsDigest, profile },
+      candidates: [{
+        planId: sourcePlanId,
+        expectedRequirementsDigest: sourceContext.currentRequirementsDigest,
+        profile,
+        decision: "INCLUDE",
+        scopeStability: "STABLE",
+        timeCoverage: "COMPLETE",
+        rationale: "Полный результат, условия и проверки совпадают",
+      }],
+    };
+    const beforeCalculation = rows(c);
+    const calculatedResponse = await mcp(c, "CalculateEstimate", calculateArgs);
+    assert.equal(calculatedResponse.value.result.isError, undefined, JSON.stringify(calculatedResponse.value));
+    const calculated = calculatedResponse.value.result.structuredContent;
+    assert.equal(calculated.status, "AVAILABLE");
+    assert.equal(calculated.pointMs, 60_000);
+    assert.equal(calculated.sampleCount, 1);
+    assert.deepEqual(rows(c), beforeCalculation, "CalculateEstimate does not mutate subject or tracker tables");
+
+    const estimation = {
+      formatVersion: 1,
+      baseline: {
+        method: calculated.method,
+        metric: calculated.metric,
+        estimand: calculated.estimand,
+        status: calculated.status,
+        referenceKind: calculated.referenceKind,
+        pointMs: calculated.pointMs,
+        observedRange: calculated.observedRange,
+        sampleCount: calculated.sampleCount,
+        accuracy: calculated.accuracy,
+        intervalCoverage: calculated.intervalCoverage,
+      },
+      inputSnapshot: calculated.inputSnapshot,
+      calculationDigest: calculated.calculationDigest,
+      expertAdjustment: null,
+      forecastScope: "FULL",
+    };
+    const assessmentId = crypto.randomUUID();
+    const assessment = {
+      assessmentId,
+      planId: PLAN,
+      expectedRequirementsDigest: targetContext.currentRequirementsDigest,
+      phase: "planning",
+      context: { expectedResult: "Проверенный план", scope: "Весь план", checks: ["unit"], estimation },
+      method: { id: "reference-class-median", version: "1", scale: { unit: "PLAN_ACTIVE milliseconds", estimand: "ACCEPTED_UNCHANGED_SCOPE" } },
+      complexity: { status: "UNKNOWN", value: null, rationale: "Сложность отдельно не классифицирована" },
+      unknowns: [], assumptions: [], dependencies: [], sources: [{ planId: sourcePlanId }],
+      forecast: {
+        status: "UNKNOWN", metric: "PLAN_ACTIVE", lowerMs: null, upperMs: null, confidence: "UNKNOWN",
+        basis: "Точечный исторический ориентир находится в context.estimation.baseline.pointMs; интервал не установлен.",
+        sampleCount: calculated.sampleCount,
+      },
+      approach: { description: "Использовать исторический ориентир", rationale: "Сохранить его снимок и источник" },
+    };
+    const beforeRecord = rows(c);
+    await ok(c, "RecordAssessment", assessment, 0);
+    const afterRecord = rows(c);
+    assert.deepEqual(afterRecord.plans, beforeRecord.plans);
+    assert.deepEqual(afterRecord.plan_steps, beforeRecord.plan_steps);
+    assert.deepEqual(afterRecord.work_intervals, beforeRecord.work_intervals);
+    assert.deepEqual(afterRecord.step_attempts, beforeRecord.step_attempts);
+    assert.notDeepEqual(afterRecord.assessment_revisions, beforeRecord.assessment_revisions);
+
+    const read = await mcp(c, "GetAssessment", { planId: PLAN, assessmentId });
+    assert.equal(read.value.result.isError, undefined, JSON.stringify(read.value));
+    assert.deepEqual(read.value.result.structuredContent.assessment.context.estimation, estimation);
+    assert.equal(read.value.result.structuredContent.assessment.forecast.status, "UNKNOWN");
+    assert.equal(read.value.result.structuredContent.assessment.forecast.sampleCount, 1);
   } finally { c.close(); }
 });

@@ -21,6 +21,25 @@ schemaVersion команд остаётся 1, версия методики з�
 что MCP. GetTrackerCapabilities сообщает assessments; ни балл, ни методика не
 служат условием исполнения. Перед оценкой GetAssessment({planId, stepId?}) без assessmentId возвращает текущий контекст и digest; запись требует expectedRequirementsDigest этого контекста. Изменение требований после анализа отклоняет запись с ASSESSMENT_CONTEXT_CHANGED, без создания ревизии.
 
+В локально подготовленном источнике также есть read-only MCP `CalculateEstimate`,
+объявляемый capability `assessments.calculator`. Он читает только явные планы
+владельца и считает историческую точку полного `PLAN_ACTIVE`; свежие записи,
+таймеры и оценки не меняет. Результат имеет `accuracy: "NOT_VALIDATED"`: при наличии
+только point baseline в `context.estimation` штатный `forecast` остаётся `UNKNOWN`
+с null-границами. Сохранённый snapshot и digest отделены от экспертной поправки;
+новая оценка не перезаписывает старую ревизию.
+
+Для локальной проверки расчёта на внешнем frozen JSON (не реальных данных владельца):
+
+```sh
+mkdir -p /tmp/tracker-estimation
+node scripts/evaluate-estimates.mjs /tmp/tracker-estimation/cases.json
+```
+
+Runner выводит `EXTERNAL_FIXTURE`, не подключается к D1, сети или MCP и не является
+зависимостью навыков или поставляемого Worker. Эти локальные исходники и тесты сами
+по себе не развёртывают MCP и не подтверждают точность прогноза.
+
 На заполненной базе после 0016 применяется только новая 0017_assessments.sql.
 Тесты проверяют сохранность всех старых строк и отсутствие выдуманных baseline.
 Новой базе нужна полная цепочка 0001–0017. Ревизии оценок нельзя менять/удалять;
