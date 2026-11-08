@@ -83,7 +83,7 @@ function validateObservationEnvelope(envelope) {
   if (payload.attemptId !== undefined && (!UUID.test(payload.attemptId) || !payload.stepId)) throw new Error("attemptId requires a UUID stepId.");
   if (payload.correctionOfEventId !== undefined && !UUID.test(payload.correctionOfEventId)) throw new Error("correctionOfEventId must be a UUID.");
   if ((payload.eventType === "correction") !== (payload.correctionOfEventId !== undefined)) throw new Error("Only correction events may name correctionOfEventId.");
-  if (typeof payload.sourceId !== "string" || !payload.sourceId.trim() || payload.sourceId.length > 128 ||
+  if (typeof payload.sourceId !== "string" || !payload.sourceId.trim() || payload.sourceId !== payload.sourceId.trim() || payload.sourceId.length > 128 ||
       !Number.isSafeInteger(payload.sourceSequence) || payload.sourceSequence < 1 ||
       !Number.isSafeInteger(payload.occurredAt) || payload.occurredAt < 0) {
     throw new Error("Observation source and sequence fields are invalid.");
@@ -147,6 +147,9 @@ export class ObservationQueue {
         if (JSON.stringify(byEvent.envelope.payload) !== JSON.stringify(envelope.payload)) throw new Error("eventId already belongs to a different observation.");
         return { status: byEvent.status, commandId: byEvent.envelope.commandId, duplicate: true };
       }
+      const expired = state.expiredEvents.find((entry) =>
+        entry.commandId === envelope.commandId || entry.eventId === envelope.payload.eventId);
+      if (expired) return { status: "EXPIRED", commandId: expired.commandId, eventId: expired.eventId, duplicate: true };
       const sequenceKey = sessionSequenceKey(envelope.payload);
       const prior = state.sequences[sequenceKey];
       if (prior && envelope.payload.sourceSequence <= prior.lastSequence) throw new Error("sourceSequence must increase within a source session.");
@@ -243,15 +246,26 @@ export class ObservationQueue {
     });
   }
 
+  async clearExpired(commandId) {
+    return this.withState((state) => {
+      const index = state.expiredEvents.findIndex((entry) => entry.commandId === commandId);
+      if (index < 0) return { status: "NOT_FOUND", commandId };
+      const [entry] = state.expiredEvents.splice(index, 1);
+      return { status: "CLEARED", commandId, eventId: entry.eventId };
+    });
+  }
+
   async list() {
     return this.withState((state) => ({
       count: state.events.length,
       bytes: Buffer.byteLength(serializeState(state), "utf8"),
+      expiredCount: state.expiredEvents.length,
       entries: state.events.map((entry) => ({
         commandId: entry.envelope.commandId, eventId: entry.envelope.payload.eventId, eventType: entry.envelope.payload.eventType,
         sourceSequence: entry.envelope.payload.sourceSequence, status: entry.status, attempts: entry.attempts,
         retryAt: entry.nextAttemptAt, lastErrorCode: entry.lastErrorCode,
       })),
+      expiredEntries: state.expiredEvents.map((entry) => ({ ...entry })),
     }));
   }
 
@@ -262,11 +276,11 @@ export class ObservationQueue {
     const releaseLock = await this.acquireLock(lockPath);
     try {
       const state = await this.readState();
-      this.pruneExpired(state);
+      const newlyExpired = this.pruneExpired(state);
       const result = action(state);
       this.enforceBounds(state);
       await this.writeState(state);
-      return result;
+      return newlyExpired.length > 0 ? { ...result, newlyExpired } : result;
     } finally {
       await releaseLock();
     }
@@ -298,25 +312,47 @@ export class ObservationQueue {
     try {
       const state = JSON.parse(await readFile(this.filePath, "utf8"));
       if (state.schemaVersion !== 1 || state.scopeHash !== this.scopeHash || state.planHash !== this.planHash ||
-          !Array.isArray(state.events) || !state.sequences || typeof state.sequences !== "object") {
+          !Array.isArray(state.events) || !state.sequences || typeof state.sequences !== "object" ||
+          (state.expiredEvents !== undefined && !Array.isArray(state.expiredEvents))) {
         throw new Error("Local observation queue state has an unsupported schema or scope.");
       }
+      state.expiredEvents ||= [];
       return state;
     } catch (error) {
-      if (error.code === "ENOENT") return { schemaVersion: 1, scopeHash: this.scopeHash, planHash: this.planHash, events: [], sequences: {} };
+      if (error.code === "ENOENT") return { schemaVersion: 1, scopeHash: this.scopeHash, planHash: this.planHash, events: [], expiredEvents: [], sequences: {} };
       throw error;
     }
   }
 
   pruneExpired(state) {
-    const cutoff = this.now() - OBSERVATION_QUEUE_LIMITS.retentionMs;
-    state.events = state.events.filter((entry) => entry.createdAt > cutoff);
+    const now = this.now();
+    const cutoff = now - OBSERVATION_QUEUE_LIMITS.retentionMs;
+    const newlyExpired = [];
+    state.events = state.events.filter((entry) => {
+      if (entry.createdAt > cutoff) return true;
+      const expired = {
+        commandId: entry.envelope.commandId,
+        eventId: entry.envelope.payload.eventId,
+        eventType: entry.envelope.payload.eventType,
+        sourceSequence: entry.envelope.payload.sourceSequence,
+        status: "EXPIRED",
+        previousStatus: entry.status,
+        attempts: entry.attempts,
+        lastErrorCode: entry.lastErrorCode,
+        createdAt: entry.createdAt,
+        expiredAt: now,
+      };
+      state.expiredEvents.push(expired);
+      newlyExpired.push(expired);
+      return false;
+    });
     for (const [key, sequence] of Object.entries(state.sequences)) if (sequence.updatedAt <= cutoff) delete state.sequences[key];
+    return newlyExpired;
   }
 
   enforceBounds(state) {
-    const eventCount = state.events.length;
-    if (eventCount > OBSERVATION_QUEUE_LIMITS.maxEvents) throw new Error("Observation queue is full: maximum 1000 pending events.");
+    const eventCount = state.events.length + (state.expiredEvents?.length || 0);
+    if (eventCount > OBSERVATION_QUEUE_LIMITS.maxEvents) throw new Error("Observation queue is full: maximum 1000 pending events (expired entries must also be cleared).");
     const bytes = Buffer.byteLength(serializeState(state), "utf8");
     if (bytes > OBSERVATION_QUEUE_LIMITS.maxBytes) throw new Error("Observation queue is full: maximum 5 MiB persisted state.");
   }
@@ -354,8 +390,9 @@ async function main() {
   else if (operation === "acknowledge") result = await queue.acknowledge(input.commandId);
   else if (operation === "fail") result = await queue.fail(input.commandId, input.failure);
   else if (operation === "requeue-pending") result = await queue.requeuePending(input.commandId);
+  else if (operation === "clear-expired") result = await queue.clearExpired(input.commandId);
   else if (operation === "list") result = await queue.list();
-  else throw new Error("Use enqueue, next, begin, acknowledge, fail, requeue-pending, or list.");
+  else throw new Error("Use enqueue, next, begin, acknowledge, fail, requeue-pending, clear-expired, or list.");
   process.stdout.write(JSON.stringify(result) + "\n");
 }
 

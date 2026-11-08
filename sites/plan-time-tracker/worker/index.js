@@ -1071,7 +1071,7 @@ function validateTrackerCommand(envelope) {
     const payload = envelope.payload;
     assertExactKeys(payload, new Set(["stepId", "sessionId", "sourceId", "clientType", "executorLabel", "recoveryReason", "reworkReason"]), "ClaimStepAttempt payload");
     if (!UUID.test(payload.stepId || "") || !UUID.test(payload.sessionId || "")) throw appError("VALIDATION_ERROR", "stepId и sessionId должны быть UUID.");
-    if (typeof payload.sourceId !== "string" || !payload.sourceId.trim() || payload.sourceId.length > 128) throw appError("VALIDATION_ERROR", "sourceId обязателен и ограничен 128 символами.");
+    if (typeof payload.sourceId !== "string" || !payload.sourceId.trim() || payload.sourceId !== payload.sourceId.trim() || payload.sourceId.length > 128) throw appError("VALIDATION_ERROR", "sourceId обязателен, не должен иметь пробелов по краям и ограничен 128 символами.");
     if (payload.clientType !== undefined && !["LOCAL", "WEB", "CLOUD", "UNKNOWN"].includes(payload.clientType)) throw appError("VALIDATION_ERROR", "clientType должен быть LOCAL, WEB, CLOUD или UNKNOWN.");
     if (payload.executorLabel !== undefined && (typeof payload.executorLabel !== "string" || payload.executorLabel.length > 128)) throw appError("VALIDATION_ERROR", "executorLabel ограничен 128 символами.");
     assertSafeMetadataText(payload.sourceId, "sourceId");
@@ -1153,7 +1153,7 @@ function validateTrackerCommand(envelope) {
     if (!UUID.test(payload.eventId || "") || !UUID.test(payload.planId || "") || !UUID.test(payload.sessionId || "")) throw appError("VALIDATION_ERROR", "eventId, planId и sessionId должны быть UUID.");
     if (payload.stepId !== undefined && !UUID.test(payload.stepId || "")) throw appError("VALIDATION_ERROR", "stepId должен быть UUID.");
     if (payload.attemptId !== undefined && (!UUID.test(payload.attemptId || "") || !payload.stepId)) throw appError("VALIDATION_ERROR", "attemptId требует UUID stepId.");
-    if (typeof payload.sourceId !== "string" || !payload.sourceId.trim() || payload.sourceId.length > 128) throw appError("VALIDATION_ERROR", "sourceId обязателен и ограничен 128 символами.");
+    if (typeof payload.sourceId !== "string" || !payload.sourceId.trim() || payload.sourceId !== payload.sourceId.trim() || payload.sourceId.length > 128) throw appError("VALIDATION_ERROR", "sourceId обязателен, не должен иметь пробелов по краям и ограничен 128 символами.");
     if (!Number.isSafeInteger(payload.sourceSequence) || payload.sourceSequence < 1) throw appError("VALIDATION_ERROR", "sourceSequence должен быть положительным целым числом.");
     if (!Number.isSafeInteger(payload.occurredAt) || payload.occurredAt < 0) throw appError("VALIDATION_ERROR", "occurredAt должен быть UTC timestamp в миллисекундах.");
     if (!OBSERVATION_TYPES.has(payload.eventType)) throw appError("VALIDATION_ERROR", "eventType не поддерживается.");
@@ -2648,7 +2648,7 @@ function mcpTools() {
       } else if (name === "ClaimStepAttempt") {
         payloadProperties = {
           stepId: { type: "string", format: "uuid" }, sessionId: { type: "string", format: "uuid" },
-          sourceId: { type: "string", minLength: 1, maxLength: 128 },
+          sourceId: { type: "string", minLength: 1, maxLength: 128, pattern: "^\\S(?:[\\s\\S]*\\S)?$" },
           clientType: { enum: ["LOCAL", "WEB", "CLOUD", "UNKNOWN"] },
           executorLabel: { type: "string", maxLength: 128 },
           recoveryReason: { type: "string", minLength: 1, maxLength: 1000 },
@@ -2677,7 +2677,7 @@ function mcpTools() {
         payloadProperties = {
           eventId: { type: "string", format: "uuid" }, planId: { type: "string", format: "uuid" },
           stepId: { type: "string", format: "uuid" }, attemptId: { type: "string", format: "uuid" },
-          sourceId: { type: "string", minLength: 1, maxLength: 128 }, sessionId: { type: "string", format: "uuid" },
+          sourceId: { type: "string", minLength: 1, maxLength: 128, pattern: "^\\S(?:[\\s\\S]*\\S)?$" }, sessionId: { type: "string", format: "uuid" },
           sourceSequence: { type: "integer", minimum: 1 }, occurredAt: { type: "integer", minimum: 0 },
           eventType: { enum: PUBLIC_OBSERVATIONS }, correctionOfEventId: { type: "string", format: "uuid" },
           data: { type: "object", properties: {
