@@ -35,9 +35,9 @@ test('checkpoint UI labels bottleneck counts and server-recorded check delay',as
 
 test('unified timeline pages server ordered legacy and tracker events with delivery markers',async()=>{
   const source=await html();
-  for(const marker of ['/api/tracker/plans/','/timeline?afterSequence=','Получено сервером:','Время клиента:','serverSequence','LATE','GAP','STALE_EXECUTOR','CORRECTION','correctionOfEventId'])assert(source.includes(marker),marker);
-  assert(source.includes('plan.events||[]'));
-  assert(source.includes('tracker-timeline-actions'));
+  for(const marker of ['/api/tracker/plans/','/status-history?','Получено сервером:','Время клиента:','serverSequence','LATE','GAP','STALE_EXECUTOR','CORRECTION','correctionOfEventId'])assert(source.includes(marker),marker);
+  assert(source.includes('История статусов'));
+  assert(!source.includes('История команд'));
 });
 
 test('timezone selector keeps supported choices, falls back to Omsk, and drives persistence and display',async()=>{const source=await html();const select=source.match(/<select id="tz" required>([\s\S]*?)<\/select>/);assert(select);assert.deepEqual([...select[1].matchAll(/<option value="([^"]+)"([^>]*)>([^<]+)<\/option>/g)].map(([,value,attrs,label])=>({value,selected:attrs.includes('selected'),label})),[{value:'Europe/Moscow',selected:false,label:'Москва (UTC+3)'},{value:'Asia/Omsk',selected:true,label:'Омск (UTC+6)'}]);const scripts=[...source.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(([,script])=>script);assert(scripts[0].includes('normalizeZone(settings.timezone)'));assert(scripts[0].includes('timezone:q("#tz").value'));assert(scripts[0].includes('timeZone:zone'));assert(scripts[0].includes('plan-time-zone-changed'));assert(scripts[1].includes('normalizeZone(settings.timezone)'));assert(scripts[1].includes('timeZone:state.zone'));assert(source.includes('<label for="tz">Часовой пояс</label>'));for(const old of ['IANA timezone','Явный учёт интервалов','Медиана сопровождается размером выборки N'])assert(!source.includes(old),old);});

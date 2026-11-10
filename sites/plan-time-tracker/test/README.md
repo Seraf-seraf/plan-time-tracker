@@ -1,5 +1,7 @@
 # Isolated verification
 
+`status-history.test.js` verifies bounded owner-scoped pages of legacy and tracker events, stable pagination while new events arrive, parameter validation, and omission of event queries from lightweight plan reads. `ui-status-history.mjs` is included in `test:ui`: it checks that history is not fetched until opened, error/retry, cached previous pages, explicit refresh, empty history, late responses after switching plans, and 320–1440px layouts. Set `SITE_WORKER_MODULE` to test a separately built Sites Worker with the same isolated fixtures.
+
 Run `npm test` for built-artifact, owner/lifecycle/timer, receipt replay, concurrency, historical-schema, v2 evidence and VM client-contract checks. The SQLite databases are in memory and use all canonical migrations.
 
 `d1-query-limits.test.js` also requires Python 3.11+ with `sqlite3.Connection.setlimit`.
