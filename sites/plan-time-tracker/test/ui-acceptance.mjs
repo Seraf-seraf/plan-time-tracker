@@ -76,7 +76,11 @@ try {
   await page.locator('[data-view="plans"]').click();
   await page.locator('#plans [data-plan-id="' + plan + '"] .plan-open').click();
   await page.locator('[data-tracker-form="create-step"]').waitFor();
+  assert.equal(await page.locator('[data-view="plans"]').getAttribute("aria-current"), "page", "plan details remain in the plans section");
   const edit = page.locator('[data-tracker-form="plan-metadata"]');
+  for (const name of ["Название плана", "Описание", "Критерии приёмки", "Дата составления", "Причина правки даты"]) {
+    assert.equal(await edit.getByText(name, { exact: true }).isVisible(), true, "visible label: " + name);
+  }
   await edit.getByRole("textbox", { name: "Описание", exact: true }).fill("Saved before lost acknowledgment");
   await edit.getByRole("textbox", {name:"Причина правки даты",exact:true}).fill("Synthetic metadata edit");
   await edit.getByRole("button", { name: "Сохранить изменения", exact: true }).click();
