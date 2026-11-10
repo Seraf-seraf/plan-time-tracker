@@ -24,6 +24,14 @@ await page.route("**/*", async route => {
 });
 try {
   await page.goto("http://localhost");await page.locator('#plans[data-loaded="true"]').waitFor({ state: "attached" });
+  const loadedFonts = await page.evaluate(async () => {
+    const body = await document.fonts.load('400 16px "Host Grotesk"', "Plan 123");
+    const measured = await document.fonts.load('400 16px "Atkinson Hyperlegible Mono"', "123 min");
+    const medium = await document.fonts.load('500 16px "Host Grotesk"', "Plan 123");
+    const cyrillic = await document.fonts.load('400 16px "Host Grotesk"', "План");
+    return [body.length, measured.length, medium.length, cyrillic.length, ...body.map(face => face.status), ...measured.map(face => face.status), ...medium.map(face => face.status)];
+  });
+  assert.deepEqual(loadedFonts, [1, 1, 1, 0, "loaded", "loaded", "loaded"], "local fonts load without external requests");
   const widths = [];
   for (const width of [320, 360, 390, 768, 1440]) {
     await page.setViewportSize({ width, height: 1000 });

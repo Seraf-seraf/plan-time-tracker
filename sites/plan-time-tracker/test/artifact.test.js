@@ -25,6 +25,21 @@ test("built Site artifact imports with its hosting manifest and tracker UI/read 
   assert.equal(typeof workerModule.default?.fetch, "function");
 });
 
+test("packaged UI includes licensed local font bytes and allows them in its CSP", async () => {
+  const built = await import(pathToFileURL(workerPath).href + "?font-entrypoint");
+  const response = await built.default.fetch(new Request("http://localhost/", { headers: { "oai-authenticated-user-id": "font-test" } }), {});
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-security-policy"), /font-src data:/);
+  const html = await response.text();
+  for (const name of ["host-grotesk", "atkinson-hyperlegible-mono"]) {
+    for (const subset of ["latin", "latin-ext"]) {
+      const bytes = await readFile(resolve(projectRoot, `assets/fonts/${name}-${subset}.woff2`));
+      assert.ok(html.includes(bytes.toString("base64")), `${name} ${subset} is included in the actual Worker response`);
+    }
+    assert.match(await readFile(resolve(projectRoot, `assets/fonts/${name}-OFL.txt`), "utf8"), /SIL OPEN FONT LICENSE/i);
+  }
+});
+
 test("packaged Worker executes the neutral assessment path with the declared runtime entrypoint", async () => {
   const c = context();
   try {
