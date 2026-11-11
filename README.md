@@ -178,17 +178,20 @@ Sites применяет hosted-миграции перед загрузкой W
 2. Проверьте привязку `DB`, схему и соответствующую этому Site историю миграций. Для текущего Site применяется его цепочка 0000–0004, описанная выше.
 3. Подготовьте отдельный checkout репозитория исходников, подключённого к выбранному Site. Он отличается от GitHub `origin`; сохраните его `.openai/hosting.json` и собственный ledger. Перенесите исходный `worker/index.js` и требуемые файлы шрифтов/сборки, затем выполняйте штатный build в этом checkout. Не подставляйте уже собранный GitHub Worker в исходник, который повторно встраивает шрифты. При необходимости `create_source_repository_write_credential` вернёт `remote_url`, `branch` и краткоживущий token. Не сохраняйте token в remote URL, документах, логах или архиве; для явной публикации не запрашивайте `publish_on_push`.
 4. В рамках выпуска зафиксируйте и отправьте точное состояние в ветку исходников Site. Соберите и проверьте этот checkout командами выше. `commit_sha` должен быть полным SHA текущей HEAD этой удалённой ветки.
-5. Из каталога приложения в выбранном Sites checkout упакуйте содержимое `dist/`, включая скрытый `.openai`:
+5. Из каталога приложения в выбранном Sites checkout упакуйте весь `dist/` с сохранением префикса. Добавьте корневую копию только hosting-манифеста для загрузчика:
 
    ```sh
    tracker_archive_dir=$(mktemp -d)
-   tar -czf "$tracker_archive_dir/plan-time-tracker.tar.gz" -C dist .
+   mkdir -p "$tracker_archive_dir/package/.openai"
+   cp -R dist "$tracker_archive_dir/package/dist"
+   cp dist/.openai/hosting.json "$tracker_archive_dir/package/.openai/hosting.json"
+   tar -czf "$tracker_archive_dir/plan-time-tracker.tar.gz" -C "$tracker_archive_dir/package" .
    tar -tzf "$tracker_archive_dir/plan-time-tracker.tar.gz"
    ```
 
-   В архиве должны быть `./server/index.js`, `./.openai/hosting.json` и `./.openai/drizzle/` с неизменёнными SQL и имеющейся metadata. Остальные исходники, `.git` и учётные данные в него не входят. Сохраните абсолютный путь к архиву до окончания загрузки.
+   В архиве должны быть `dist/server/index.js`, `.openai/hosting.json`, `dist/.openai/hosting.json` и `dist/.openai/drizzle/` с неизменёнными SQL и metadata. Миграции не переносите в корневую `.openai/drizzle`: Worker может опубликоваться без применения этих sidecars. Остальные исходники, `.git` и учётные данные в архив не входят. После публикации проверьте ожидаемые новые таблицы через Sites: один статус deployment succeeded не подтверждает миграцию. Сохраните абсолютный путь к архиву до окончания загрузки.
 6. Для Site, чья приватность владельцу выбранного аккаунта уже установлена через `get_site`, предпочтителен единый `save_version_and_deploy_private` с `project_id`, полным `commit_sha` и абсолютным путём `archive`. Отдельное разговорное подтверждение развёртывания не требуется; действуют runtime approval и проверка доступа самого сервиса. Не меняйте аудиторию. Сохраните возвращённые `version_id` и deployment `id` отдельно. Если версия уже сохранена, используйте `deploy_private_site_version` с её `version_id`, не сохраняйте и не загружайте тот же выпуск повторно.
-7. Если ответ не терминальный, проверяйте `get_deployment_status` по deployment ID до `succeeded` или `failed`: URL публикации ведёт на рабочий сайт. При ошибке с `saved_version_id` сохраните этот ID для повтора развёртывания; при несовпадении доступа перечитайте `get_site`, не переключайте аудиторию молча.
+7. Если ответ не терминальный, проверяйте `get_deployment_status` по deployment ID до `succeeded` или `failed`: URL публикации ведёт на рабочий сайт. При ошибке с `saved_version_id` сохраните этот ID для повтора развёртывания; при несовпадении доступа перечитайте `get_site`, не переключайте аудиторию молча. Если исправляется сама упаковка, зафиксируйте её изменение новым source commit: тот же SHA переиспользует уже сохранённую версию и её архив.
 8. После успеха проверьте вход владельца в UI, `GetTrackerCapabilities` с `assessments.atlm`, GetEstimationModelStatus и все страницы `ListPlans`. Для UI используйте реальный опубликованный Worker без добавления фиктивных планов владельца. Обновите плагин и обнаружение инструментов в клиентах отдельно.
 
 Обновление GitHub не развёртывает Worker и не обновляет установленный плагин. Готовой команды `npm run deploy` в репозитории нет. Подробнее: [публикация и доступ в Sites](https://learn.chatgpt.com/docs/sites/publishing-and-sharing).
