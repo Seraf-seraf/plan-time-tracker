@@ -426,6 +426,306 @@ export function scoreEstimateCases(cases) {
   };
 }
 
+// ATLM agent-v1: automatic identity/log/sqrt transformations and ordinary least
+// squares. Runtime has no ML service or random state. All preprocessing belongs
+// to the training prefix; callers supply server-validated frozen observations.
+const ATLM_METHOD = Object.freeze({ id: "atlm", version: "agent-v1" });
+const ATLM_FEATURE_VERSION = "agent-task-v1";
+const ATLM_NUMERIC_FIELDS = Object.freeze(["outcomeCount", "contractCount", "verificationKindCount"]);
+const ATLM_CATEGORY_LEVELS = Object.freeze({
+  workKind: Object.freeze([...ESTIMATE_WORK_KINDS].filter(value => value !== "UNKNOWN")),
+  reuseState: Object.freeze([...ESTIMATE_REUSE_STATES].filter(value => value !== "UNKNOWN")),
+  doneBoundary: Object.freeze([...ESTIMATE_DONE_BOUNDARIES].filter(value => value !== "UNKNOWN")),
+});
+const ATLM_MAX_ROWS = 5000;
+const ATLM_MAX_EVALUATION_CASES = 20;
+const ATLM_TRANSFORMS = Object.freeze(["identity", "log", "sqrt"]);
+
+function atlmUnavailable(reason, details = {}) { return { status: "UNAVAILABLE", pointMs: null, reason, ...details }; }
+function atlmCompareId(a, b) { return a < b ? -1 : a > b ? 1 : 0; }
+function atlmValidId(value) { return typeof value === "string" && ESTIMATE_ID.test(value) && value.trim().length > 0; }
+function atlmExactKeys(value, keys) {
+  return isPlainRecord(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+}
+function atlmFeatureProblem(features) {
+  const fields = [...ESTIMATE_PROFILE_FIELDS, ...ATLM_NUMERIC_FIELDS];
+  if (!atlmExactKeys(features, fields)) return atlmUnavailable("INVALID_FEATURES");
+  const missingFields = [];
+  for (const field of ESTIMATE_PROFILE_FIELDS) {
+    if (features[field] === "UNKNOWN" || features[field] === null) missingFields.push(field);
+    else if (!ATLM_CATEGORY_LEVELS[field].includes(features[field])) return atlmUnavailable("INVALID_FEATURES");
+  }
+  for (const field of ATLM_NUMERIC_FIELDS) {
+    if (features[field] === null) missingFields.push(field);
+    else if (!isNonnegativeSafeInteger(features[field]) || features[field] > (field === "verificationKindCount" ? 5 : 20)) return atlmUnavailable("INVALID_FEATURES");
+  }
+  return missingFields.length ? atlmUnavailable("INCOMPLETE_FEATURES", { missingFields }) : null;
+}
+function atlmDatasetProblem(rows) {
+  if (!Array.isArray(rows)) return atlmUnavailable("INVALID_DATASET");
+  if (rows.length > ATLM_MAX_ROWS) return atlmUnavailable("DATASET_LIMIT_REACHED", { sampleCount: rows.length, limit: ATLM_MAX_ROWS });
+  const samples = new Set(), plans = new Set();
+  for (const row of rows) {
+    if (!atlmExactKeys(row, ["sampleId", "planId", "capturedAt", "sourceAvailableAt", "features", "actualMs"])
+      || !atlmValidId(row.sampleId) || !atlmValidId(row.planId) || samples.has(row.sampleId) || plans.has(row.planId)
+      || ![row.capturedAt, row.sourceAvailableAt, row.actualMs].every(isNonnegativeSafeInteger)
+      || row.sourceAvailableAt < row.capturedAt) return atlmUnavailable("INVALID_DATASET");
+    if (atlmFeatureProblem(row.features)?.reason === "INVALID_FEATURES") return atlmUnavailable("INVALID_DATASET");
+    samples.add(row.sampleId); plans.add(row.planId);
+  }
+  return null;
+}
+function atlmSortedRows(rows) { return rows.slice().sort((a, b) => atlmCompareId(a.planId, b.planId) || atlmCompareId(a.sampleId, b.sampleId)); }
+function atlmSum(values) {
+  let sum = 0, correction = 0;
+  for (const value of values) { const adjusted = value - correction, next = sum + adjusted; correction = (next - sum) - adjusted; sum = next; }
+  return sum;
+}
+function atlmTransform(name, value) {
+  if (name === "identity") return value;
+  if (name === "log") return value > 0 ? Math.log(value) : NaN;
+  if (name === "sqrt") return value >= 0 ? Math.sqrt(value) : NaN;
+  return NaN;
+}
+function atlmChooseTransform(values) {
+  if (values.every(value => value === values[0])) return "identity";
+  let best = "identity", bestScore = Infinity;
+  for (const name of ATLM_TRANSFORMS) {
+    const transformed = values.map(value => atlmTransform(name, value));
+    if (!transformed.every(Number.isFinite)) continue;
+    const mean = atlmSum(transformed) / transformed.length;
+    const deviations = transformed.map(value => value - mean);
+    const scale = Math.max(...deviations.map(Math.abs));
+    if (!(scale > 0)) continue;
+    // Scaling cancels from b1 and prevents overflow in the second/third moments.
+    const scaled = deviations.map(value => value / scale);
+    const m3 = atlmSum(scaled.map(value => value ** 3)) / values.length;
+    const variance = atlmSum(scaled.map(value => value ** 2)) / (values.length - 1);
+    const score = Math.abs(m3 / variance ** 1.5);
+    if (Number.isFinite(score) && score < bestScore - 1e-12) { best = name; bestScore = score; }
+  }
+  return best;
+}
+function atlmDesignRow(features, columns, transforms) {
+  return columns.map(column => column.kind === "intercept" ? 1
+    : column.kind === "category" ? Number(features[column.field] === column.level)
+      : atlmTransform(transforms[column.field], features[column.field]));
+}
+
+// Column-equilibrated Householder QR with deterministic column pivoting. Rank
+// uses eps * max(n,p) * max(abs(diag(R))) on the equilibrated matrix. Column
+// scaling changes only numerical conditioning, not the OLS objective.
+function atlmQr(matrix, target) {
+  const n = matrix.length, p = matrix[0].length;
+  const a = matrix.map(row => Float64Array.from(row)), y = Float64Array.from(target);
+  const permutation = Array.from({ length: p }, (_, i) => i), scales = [];
+  for (let j = 0; j < p; j++) {
+    let norm = 0;
+    for (let i = 0; i < n; i++) norm = Math.hypot(norm, a[i][j]);
+    scales.push(norm);
+    if (norm > 0) for (let i = 0; i < n; i++) a[i][j] /= norm;
+  }
+  for (let k = 0; k < p; k++) {
+    let pivot = k, largest = -1;
+    for (let j = k; j < p; j++) {
+      let norm = 0;
+      for (let i = k; i < n; i++) norm = Math.hypot(norm, a[i][j]);
+      if (norm > largest || (norm === largest && permutation[j] < permutation[pivot])) { largest = norm; pivot = j; }
+    }
+    if (pivot !== k) {
+      for (let i = 0; i < n; i++) [a[i][k], a[i][pivot]] = [a[i][pivot], a[i][k]];
+      [permutation[k], permutation[pivot]] = [permutation[pivot], permutation[k]];
+    }
+    if (largest === 0) continue;
+    const alpha = a[k][k] >= 0 ? -largest : largest;
+    const vector = new Float64Array(n - k);
+    vector[0] = a[k][k] - alpha;
+    for (let i = k + 1; i < n; i++) vector[i - k] = a[i][k];
+    let norm = 0;
+    for (const value of vector) norm = Math.hypot(norm, value);
+    for (let i = 0; i < vector.length; i++) vector[i] /= norm;
+    for (let j = k; j < p; j++) {
+      let dot = 0;
+      for (let i = k; i < n; i++) dot += vector[i - k] * a[i][j];
+      for (let i = k; i < n; i++) a[i][j] -= 2 * vector[i - k] * dot;
+    }
+    let dot = 0;
+    for (let i = k; i < n; i++) dot += vector[i - k] * y[i];
+    for (let i = k; i < n; i++) y[i] -= 2 * vector[i - k] * dot;
+    a[k][k] = alpha;
+    for (let i = k + 1; i < n; i++) a[i][k] = 0;
+  }
+  const rankTolerance = Number.EPSILON * Math.max(n, p) * Math.max(...a.slice(0, p).map((row, i) => Math.abs(row[i])));
+  const rank = a.slice(0, p).filter((row, i) => Math.abs(row[i]) > rankTolerance).length;
+  if (rank !== p) return { rank, rankTolerance, coefficients: null };
+  const pivoted = new Float64Array(p), coefficients = Array(p);
+  for (let i = p - 1; i >= 0; i--) {
+    let residual = y[i];
+    for (let j = i + 1; j < p; j++) residual -= a[i][j] * pivoted[j];
+    pivoted[i] = residual / a[i][i];
+  }
+  for (let i = 0; i < p; i++) coefficients[permutation[i]] = pivoted[i] / scales[permutation[i]];
+  return { rank, rankTolerance, coefficients };
+}
+function atlmFreeze(value) {
+  if (value && typeof value === "object") { for (const nested of Object.values(value)) atlmFreeze(nested); Object.freeze(value); }
+  return value;
+}
+
+export async function fitAtlm(rows) {
+  const problem = atlmDatasetProblem(rows);
+  if (problem) return problem;
+  const sorted = atlmSortedRows(rows), n = sorted.length;
+  if (!n) return atlmUnavailable("INSUFFICIENT_DATA", { sampleCount: 0 });
+  for (const row of sorted) { const missing = atlmFeatureProblem(row.features); if (missing) return missing; }
+  const levels = {}, transforms = {}, columns = [{ kind: "intercept" }], constantPredictors = [];
+  for (const field of ESTIMATE_PROFILE_FIELDS) {
+    const observed = new Set(sorted.map(row => row.features[field]));
+    levels[field] = ATLM_CATEGORY_LEVELS[field].filter(value => observed.has(value));
+    for (const level of levels[field].slice(1)) columns.push({ kind: "category", field, level });
+  }
+  for (const field of ATLM_NUMERIC_FIELDS) {
+    const values = sorted.map(row => row.features[field]);
+    transforms[field] = atlmChooseTransform(values);
+    if (values.every(value => value === values[0])) constantPredictors.push(field);
+    else columns.push({ kind: "numeric", field });
+  }
+  const p = columns.length, residualDegreesOfFreedom = n - p;
+  if (residualDegreesOfFreedom < 5) return atlmUnavailable("INSUFFICIENT_DATA", { sampleCount: n, p, residualDegreesOfFreedom });
+  const target = sorted.map(row => row.actualMs / 60000);
+  transforms.target = atlmChooseTransform(target);
+  const matrix = sorted.map(row => atlmDesignRow(row.features, columns, transforms));
+  const solved = atlmQr(matrix, target.map(value => atlmTransform(transforms.target, value)));
+  if (solved.rank !== p) return atlmUnavailable("RANK_DEFICIENT", { sampleCount: n, p, rank: solved.rank });
+  if (!solved.coefficients.every(Number.isFinite)) return atlmUnavailable("NUMERICAL_FAILURE", { sampleCount: n });
+  const artifact = atlmFreeze({
+    formatVersion: 1, method: { ...ATLM_METHOD }, featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
+    n, p, rank: solved.rank, residualDegreesOfFreedom, levels, transforms, columns, coefficients: solved.coefficients,
+    constantPredictors, manifest: sorted.map(({ sampleId, planId }) => ({ sampleId, planId })),
+    datasetDigest: "sha256:" + await hashCommandInput(sorted),
+    engine: { id: "ECMAScript-binary64", version: "householder-qr-pivot-v1", rankTolerance: solved.rankTolerance },
+  });
+  return { status: "AVAILABLE", artifact };
+}
+
+function atlmArtifactValid(artifact) {
+  if (!isPlainRecord(artifact) || artifact.formatVersion !== 1 || artifact.method?.id !== ATLM_METHOD.id
+    || artifact.method?.version !== ATLM_METHOD.version || artifact.featureSchemaVersion !== ATLM_FEATURE_VERSION
+    || artifact.metric !== "PLAN_ACTIVE" || !isNonnegativeSafeInteger(artifact.n) || artifact.n > ATLM_MAX_ROWS
+    || !Number.isInteger(artifact.p) || artifact.p < 1 || artifact.n - artifact.p < 5 || artifact.rank !== artifact.p
+    || artifact.residualDegreesOfFreedom !== artifact.n - artifact.p || !isSnapshotDigest(artifact.datasetDigest)
+    || !atlmExactKeys(artifact.levels, ESTIMATE_PROFILE_FIELDS)
+    || !atlmExactKeys(artifact.transforms, [...ATLM_NUMERIC_FIELDS, "target"])
+    || !Object.values(artifact.transforms).every(value => ATLM_TRANSFORMS.includes(value))
+    || !Array.isArray(artifact.constantPredictors) || !artifact.constantPredictors.every(field => ATLM_NUMERIC_FIELDS.includes(field))
+    || new Set(artifact.constantPredictors).size !== artifact.constantPredictors.length) return false;
+  const columns = [{ kind: "intercept" }];
+  for (const field of ESTIMATE_PROFILE_FIELDS) {
+    const levels = artifact.levels[field];
+    if (!Array.isArray(levels) || !levels.length || new Set(levels).size !== levels.length
+      || levels.some(level => !ATLM_CATEGORY_LEVELS[field].includes(level))
+      || canonical(levels) !== canonical(ATLM_CATEGORY_LEVELS[field].filter(level => levels.includes(level)))) return false;
+    for (const level of levels.slice(1)) columns.push({ kind: "category", field, level });
+  }
+  for (const field of ATLM_NUMERIC_FIELDS) {
+    if (artifact.constantPredictors.includes(field)) { if (artifact.transforms[field] !== "identity") return false; }
+    else columns.push({ kind: "numeric", field });
+  }
+  if (!Array.isArray(artifact.columns) || canonical(columns) !== canonical(artifact.columns)
+    || artifact.p !== columns.length || !Array.isArray(artifact.coefficients) || artifact.coefficients.length !== columns.length
+    || !artifact.coefficients.every(Number.isFinite) || !Array.isArray(artifact.manifest) || artifact.manifest.length !== artifact.n) return false;
+  const samples = new Set(), plans = new Set();
+  for (const item of artifact.manifest) {
+    if (!atlmExactKeys(item, ["sampleId", "planId"]) || !atlmValidId(item.sampleId) || !atlmValidId(item.planId)
+      || samples.has(item.sampleId) || plans.has(item.planId)) return false;
+    samples.add(item.sampleId); plans.add(item.planId);
+  }
+  return true;
+}
+
+export function predictAtlm(artifact, features) {
+  if (!atlmArtifactValid(artifact)) return atlmUnavailable("INVALID_ARTIFACT");
+  const problem = atlmFeatureProblem(features);
+  if (problem) return problem;
+  if (ESTIMATE_PROFILE_FIELDS.some(field => !artifact.levels[field].includes(features[field]))) return atlmUnavailable("UNSUPPORTED_CATEGORY");
+  const design = atlmDesignRow(features, artifact.columns, artifact.transforms);
+  if (!design.every(Number.isFinite)) return atlmUnavailable("INVALID_PREDICTION");
+  const transformed = atlmSum(design.map((value, i) => value * artifact.coefficients[i]));
+  const minutes = artifact.transforms.target === "identity" ? transformed
+    : artifact.transforms.target === "log" ? Math.exp(transformed) : transformed < 0 ? NaN : transformed ** 2;
+  if (!Number.isFinite(minutes) || minutes < 0) return atlmUnavailable("INVALID_PREDICTION");
+  const pointMs = Math.round(minutes * 60000);
+  return isNonnegativeSafeInteger(pointMs) ? { status: "AVAILABLE", pointMs, reason: null } : atlmUnavailable("INVALID_PREDICTION");
+}
+
+function atlmEvaluationOptions(options) {
+  if (!isPlainRecord(options) || Object.keys(options).some(key => !["protocolVersion", "cutoff"].includes(key))
+    || (options.protocolVersion !== undefined && options.protocolVersion !== 1)
+    || (options.cutoff !== undefined && !isNonnegativeSafeInteger(options.cutoff))) return atlmUnavailable("INVALID_PROTOCOL");
+  return null;
+}
+export function selectAtlmEvaluationCases(rows, options = {}) {
+  const problem = atlmEvaluationOptions(options) || atlmDatasetProblem(rows);
+  if (problem) return problem;
+  const cutoff = options.cutoff ?? Number.MAX_SAFE_INTEGER, excluded = [], eligible = [];
+  for (const row of atlmSortedRows(rows)) {
+    const missing = atlmFeatureProblem(row.features);
+    const reason = row.sourceAvailableAt > cutoff ? "AFTER_CUTOFF" : missing?.reason;
+    if (reason) excluded.push({ sampleId: row.sampleId, planId: row.planId, reason });
+    else eligible.push(row);
+  }
+  eligible.sort((a, b) => a.capturedAt - b.capturedAt || atlmCompareId(a.planId, b.planId));
+  return { status: "AVAILABLE", protocolVersion: 1, cutoff, inputCount: rows.length, eligibleCount: eligible.length,
+    caseSampleIds: eligible.slice(-ATLM_MAX_EVALUATION_CASES).map(row => row.sampleId), excluded };
+}
+export async function evaluateAtlmCase(rows, sampleId, options = {}) {
+  const selection = selectAtlmEvaluationCases(rows, options);
+  if (selection.status !== "AVAILABLE") return selection;
+  if (!selection.caseSampleIds.includes(sampleId)) return atlmUnavailable("INVALID_EVALUATION_CASE");
+  const target = rows.find(row => row.sampleId === sampleId);
+  const train = atlmSortedRows(rows.filter(row => row.planId !== target.planId
+    && row.sourceAvailableAt < target.capturedAt && !atlmFeatureProblem(row.features)));
+  const fit = await fitAtlm(train);
+  const atlm = fit.status === "AVAILABLE" ? predictAtlm(fit.artifact, target.features) : atlmUnavailable(fit.reason);
+  const pointMs = median(train.map(row => row.actualMs));
+  return { sampleId: target.sampleId, planId: target.planId, capturedAt: target.capturedAt,
+    sourceAvailableAt: target.sourceAvailableAt, features: { ...target.features }, actualMs: target.actualMs,
+    trainSampleCount: train.length, trainDatasetDigest: fit.status === "AVAILABLE" ? fit.artifact.datasetDigest : "sha256:" + await hashCommandInput(train),
+    atlm, median: pointMs === null ? atlmUnavailable("INSUFFICIENT_DATA") : { status: "AVAILABLE", pointMs, reason: null } };
+}
+function atlmScore(cases, method) {
+  const scored = cases.filter(item => item[method].pointMs !== null);
+  const errors = scored.map(item => item[method].pointMs - item.actualMs);
+  const actualSum = atlmSum(scored.map(item => item.actualMs)), absoluteSum = atlmSum(errors.map(Math.abs));
+  return { caseCount: cases.length, predictionCount: scored.length, scoredCount: scored.length,
+    forecastRate: cases.length ? scored.length / cases.length : null,
+    maeMs: scored.length ? absoluteSum / scored.length : null,
+    wapePercent: actualSum > 0 ? 100 * absoluteSum / actualSum : null,
+    signedBiasPercent: actualSum > 0 ? 100 * atlmSum(errors) / actualSum : null };
+}
+export function summarizeAtlmEvaluation(cases, selection) {
+  if (selection?.status !== "AVAILABLE") return selection || atlmUnavailable("INVALID_EVALUATION");
+  if (!Array.isArray(cases) || cases.length !== selection.caseSampleIds.length || new Set(cases.map(item => item.sampleId)).size !== cases.length
+    || cases.some(item => !selection.caseSampleIds.includes(item.sampleId) || !isNonnegativeSafeInteger(item.actualMs)
+      || ["atlm", "median"].some(method => !item[method] || (item[method].pointMs !== null && !isNonnegativeSafeInteger(item[method].pointMs))))) return atlmUnavailable("INCOMPLETE_EVALUATION");
+  const ordered = selection.caseSampleIds.map(id => cases.find(item => item.sampleId === id));
+  const pairedCases = ordered.filter(item => item.atlm.pointMs !== null && item.median.pointMs !== null);
+  const metrics = { atlm: atlmScore(ordered, "atlm"), median: atlmScore(ordered, "median") };
+  const paired = { caseCount: pairedCases.length, caseSampleIds: pairedCases.map(item => item.sampleId),
+    atlm: atlmScore(pairedCases, "atlm"), median: atlmScore(pairedCases, "median") };
+  return { status: "AVAILABLE", formatVersion: 1, protocolVersion: 1, method: { ...ATLM_METHOD }, metric: "PLAN_ACTIVE",
+    cutoff: selection.cutoff, inputCount: selection.inputCount, eligibleCount: selection.eligibleCount, excluded: selection.excluded,
+    caseCount: ordered.length, cases: ordered, metrics, paired,
+    candidateReady: paired.caseCount >= 5 && paired.atlm.maeMs <= paired.median.maeMs };
+}
+export async function evaluateAtlmChronologically(rows, options = {}) {
+  const selection = selectAtlmEvaluationCases(rows, options);
+  if (selection.status !== "AVAILABLE") return selection;
+  const cases = [];
+  for (const sampleId of selection.caseSampleIds) cases.push(await evaluateAtlmCase(rows, sampleId, options));
+  return summarizeAtlmEvaluation(cases, selection);
+}
+
 function dbFirst(db, sql, ...args) { return db.prepare(sql).bind(...args).first(); }
 async function dbAll(db, sql, ...args) { const result = await db.prepare(sql).bind(...args).all(); return result.results || []; }
 function json(data, status, headers) {

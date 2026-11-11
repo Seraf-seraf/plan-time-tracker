@@ -1,0 +1,1866 @@
+{
+  "formatVersion": 1,
+  "sourceAuthority": "SYNTHETIC",
+  "reference": {
+    "solver": "numpy.linalg.lstsq (SVD)",
+    "numpyVersion": "2.3.5",
+    "generation": "Independent Python/NumPy b1 transform selection, explicit dummy design, and SVD OLS; no production JavaScript imported. All rows synthetic.",
+    "coefficientAbsoluteTolerance": 2e-09,
+    "predictionToleranceMs": 1
+  },
+  "cases": [
+    {
+      "name": "balanced identity and nominal categories",
+      "rows": [
+        {
+          "sampleId": "s-000",
+          "planId": "p-000",
+          "capturedAt": 0,
+          "sourceAvailableAt": 5000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 0,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2520000
+        },
+        {
+          "sampleId": "s-001",
+          "planId": "p-001",
+          "capturedAt": 10000,
+          "sourceAvailableAt": 15000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 0,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2820000
+        },
+        {
+          "sampleId": "s-002",
+          "planId": "p-002",
+          "capturedAt": 20000,
+          "sourceAvailableAt": 25000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2760000
+        },
+        {
+          "sampleId": "s-003",
+          "planId": "p-003",
+          "capturedAt": 30000,
+          "sourceAvailableAt": 35000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 3060000
+        },
+        {
+          "sampleId": "s-004",
+          "planId": "p-004",
+          "capturedAt": 40000,
+          "sourceAvailableAt": 45000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 1,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2340000
+        },
+        {
+          "sampleId": "s-005",
+          "planId": "p-005",
+          "capturedAt": 50000,
+          "sourceAvailableAt": 55000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 1,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2640000
+        },
+        {
+          "sampleId": "s-006",
+          "planId": "p-006",
+          "capturedAt": 60000,
+          "sourceAvailableAt": 65000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 1,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2580000
+        },
+        {
+          "sampleId": "s-007",
+          "planId": "p-007",
+          "capturedAt": 70000,
+          "sourceAvailableAt": 75000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 1,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2880000
+        },
+        {
+          "sampleId": "s-008",
+          "planId": "p-008",
+          "capturedAt": 80000,
+          "sourceAvailableAt": 85000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 2,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2160000
+        },
+        {
+          "sampleId": "s-009",
+          "planId": "p-009",
+          "capturedAt": 90000,
+          "sourceAvailableAt": 95000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 2,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2460000
+        },
+        {
+          "sampleId": "s-010",
+          "planId": "p-010",
+          "capturedAt": 100000,
+          "sourceAvailableAt": 105000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 2,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2400000
+        },
+        {
+          "sampleId": "s-011",
+          "planId": "p-011",
+          "capturedAt": 110000,
+          "sourceAvailableAt": 115000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 2,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2700000
+        },
+        {
+          "sampleId": "s-012",
+          "planId": "p-012",
+          "capturedAt": 120000,
+          "sourceAvailableAt": 125000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 0,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2640000
+        },
+        {
+          "sampleId": "s-013",
+          "planId": "p-013",
+          "capturedAt": 130000,
+          "sourceAvailableAt": 135000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 0,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2940000
+        },
+        {
+          "sampleId": "s-014",
+          "planId": "p-014",
+          "capturedAt": 140000,
+          "sourceAvailableAt": 145000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2880000
+        },
+        {
+          "sampleId": "s-015",
+          "planId": "p-015",
+          "capturedAt": 150000,
+          "sourceAvailableAt": 155000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 3180000
+        },
+        {
+          "sampleId": "s-016",
+          "planId": "p-016",
+          "capturedAt": 160000,
+          "sourceAvailableAt": 165000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 1,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2460000
+        },
+        {
+          "sampleId": "s-017",
+          "planId": "p-017",
+          "capturedAt": 170000,
+          "sourceAvailableAt": 175000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 1,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2760000
+        },
+        {
+          "sampleId": "s-018",
+          "planId": "p-018",
+          "capturedAt": 180000,
+          "sourceAvailableAt": 185000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 1,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2700000
+        },
+        {
+          "sampleId": "s-019",
+          "planId": "p-019",
+          "capturedAt": 190000,
+          "sourceAvailableAt": 195000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 1,
+            "verificationKindCount": 1
+          },
+          "actualMs": 3000000
+        },
+        {
+          "sampleId": "s-020",
+          "planId": "p-020",
+          "capturedAt": 200000,
+          "sourceAvailableAt": 205000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 2,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2280000
+        },
+        {
+          "sampleId": "s-021",
+          "planId": "p-021",
+          "capturedAt": 210000,
+          "sourceAvailableAt": 215000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 2,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2580000
+        },
+        {
+          "sampleId": "s-022",
+          "planId": "p-022",
+          "capturedAt": 220000,
+          "sourceAvailableAt": 225000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 2,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2520000
+        },
+        {
+          "sampleId": "s-023",
+          "planId": "p-023",
+          "capturedAt": 230000,
+          "sourceAvailableAt": 235000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 2,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2820000
+        },
+        {
+          "sampleId": "s-024",
+          "planId": "p-024",
+          "capturedAt": 240000,
+          "sourceAvailableAt": 245000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 0,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2760000
+        },
+        {
+          "sampleId": "s-025",
+          "planId": "p-025",
+          "capturedAt": 250000,
+          "sourceAvailableAt": 255000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 0,
+            "verificationKindCount": 0
+          },
+          "actualMs": 3060000
+        },
+        {
+          "sampleId": "s-026",
+          "planId": "p-026",
+          "capturedAt": 260000,
+          "sourceAvailableAt": 265000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 3000000
+        },
+        {
+          "sampleId": "s-027",
+          "planId": "p-027",
+          "capturedAt": 270000,
+          "sourceAvailableAt": 275000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 3300000
+        },
+        {
+          "sampleId": "s-028",
+          "planId": "p-028",
+          "capturedAt": 280000,
+          "sourceAvailableAt": 285000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 1,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2580000
+        },
+        {
+          "sampleId": "s-029",
+          "planId": "p-029",
+          "capturedAt": 290000,
+          "sourceAvailableAt": 295000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 1,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2880000
+        },
+        {
+          "sampleId": "s-030",
+          "planId": "p-030",
+          "capturedAt": 300000,
+          "sourceAvailableAt": 305000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 1,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2820000
+        },
+        {
+          "sampleId": "s-031",
+          "planId": "p-031",
+          "capturedAt": 310000,
+          "sourceAvailableAt": 315000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 1,
+            "verificationKindCount": 1
+          },
+          "actualMs": 3120000
+        },
+        {
+          "sampleId": "s-032",
+          "planId": "p-032",
+          "capturedAt": 320000,
+          "sourceAvailableAt": 325000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 2,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2400000
+        },
+        {
+          "sampleId": "s-033",
+          "planId": "p-033",
+          "capturedAt": 330000,
+          "sourceAvailableAt": 335000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 2,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2700000
+        },
+        {
+          "sampleId": "s-034",
+          "planId": "p-034",
+          "capturedAt": 340000,
+          "sourceAvailableAt": 345000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 2,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2640000
+        },
+        {
+          "sampleId": "s-035",
+          "planId": "p-035",
+          "capturedAt": 350000,
+          "sourceAvailableAt": 355000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 2,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2940000
+        },
+        {
+          "sampleId": "s-036",
+          "planId": "p-036",
+          "capturedAt": 360000,
+          "sourceAvailableAt": 365000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 0,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2880000
+        },
+        {
+          "sampleId": "s-037",
+          "planId": "p-037",
+          "capturedAt": 370000,
+          "sourceAvailableAt": 375000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 0,
+            "verificationKindCount": 0
+          },
+          "actualMs": 3180000
+        },
+        {
+          "sampleId": "s-038",
+          "planId": "p-038",
+          "capturedAt": 380000,
+          "sourceAvailableAt": 385000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 3120000
+        },
+        {
+          "sampleId": "s-039",
+          "planId": "p-039",
+          "capturedAt": 390000,
+          "sourceAvailableAt": 395000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 3420000
+        },
+        {
+          "sampleId": "s-040",
+          "planId": "p-040",
+          "capturedAt": 400000,
+          "sourceAvailableAt": 405000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 1,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2700000
+        },
+        {
+          "sampleId": "s-041",
+          "planId": "p-041",
+          "capturedAt": 410000,
+          "sourceAvailableAt": 415000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 1,
+            "verificationKindCount": 0
+          },
+          "actualMs": 3000000
+        },
+        {
+          "sampleId": "s-042",
+          "planId": "p-042",
+          "capturedAt": 420000,
+          "sourceAvailableAt": 425000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 1,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2940000
+        },
+        {
+          "sampleId": "s-043",
+          "planId": "p-043",
+          "capturedAt": 430000,
+          "sourceAvailableAt": 435000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 1,
+            "verificationKindCount": 1
+          },
+          "actualMs": 3240000
+        },
+        {
+          "sampleId": "s-044",
+          "planId": "p-044",
+          "capturedAt": 440000,
+          "sourceAvailableAt": 445000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 2,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2520000
+        },
+        {
+          "sampleId": "s-045",
+          "planId": "p-045",
+          "capturedAt": 450000,
+          "sourceAvailableAt": 455000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 2,
+            "verificationKindCount": 0
+          },
+          "actualMs": 2820000
+        },
+        {
+          "sampleId": "s-046",
+          "planId": "p-046",
+          "capturedAt": 460000,
+          "sourceAvailableAt": 465000,
+          "features": {
+            "workKind": "CREATE_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 2,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2760000
+        },
+        {
+          "sampleId": "s-047",
+          "planId": "p-047",
+          "capturedAt": 470000,
+          "sourceAvailableAt": 475000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 2,
+            "verificationKindCount": 1
+          },
+          "actualMs": 3060000
+        }
+      ],
+      "expected": {
+        "transforms": {
+          "outcomeCount": "identity",
+          "contractCount": "identity",
+          "verificationKindCount": "identity",
+          "target": "identity"
+        },
+        "columns": [
+          {
+            "kind": "intercept"
+          },
+          {
+            "kind": "category",
+            "field": "workKind",
+            "level": "MODIFY_MECHANISM"
+          },
+          {
+            "kind": "numeric",
+            "field": "outcomeCount"
+          },
+          {
+            "kind": "numeric",
+            "field": "contractCount"
+          },
+          {
+            "kind": "numeric",
+            "field": "verificationKindCount"
+          }
+        ],
+        "coefficients": [
+          40.00000000000002,
+          4.999999999999999,
+          2.0000000000000067,
+          -2.999999999999997,
+          4.000000000000004
+        ],
+        "rank": 5,
+        "predictions": [
+          {
+            "features": {
+              "workKind": "CREATE_MECHANISM",
+              "reuseState": "PARTIAL",
+              "doneBoundary": "LOCAL_VERIFIED",
+              "outcomeCount": 6,
+              "contractCount": 2,
+              "verificationKindCount": 2
+            },
+            "pointMs": 3240000,
+            "pointMinutes": 54.00000000000008
+          },
+          {
+            "features": {
+              "workKind": "MODIFY_MECHANISM",
+              "reuseState": "PARTIAL",
+              "doneBoundary": "LOCAL_VERIFIED",
+              "outcomeCount": 2,
+              "contractCount": 1,
+              "verificationKindCount": 0
+            },
+            "pointMs": 2760000,
+            "pointMinutes": 46.000000000000036
+          }
+        ]
+      }
+    },
+    {
+      "name": "log target",
+      "rows": [
+        {
+          "sampleId": "s-000",
+          "planId": "p-000",
+          "capturedAt": 0,
+          "sourceAvailableAt": 5000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 189492
+        },
+        {
+          "sampleId": "s-001",
+          "planId": "p-001",
+          "capturedAt": 10000,
+          "sourceAvailableAt": 15000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 220158
+        },
+        {
+          "sampleId": "s-002",
+          "planId": "p-002",
+          "capturedAt": 20000,
+          "sourceAvailableAt": 25000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 255787
+        },
+        {
+          "sampleId": "s-003",
+          "planId": "p-003",
+          "capturedAt": 30000,
+          "sourceAvailableAt": 35000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 297182
+        },
+        {
+          "sampleId": "s-004",
+          "planId": "p-004",
+          "capturedAt": 40000,
+          "sourceAvailableAt": 45000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 5,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 345276
+        },
+        {
+          "sampleId": "s-005",
+          "planId": "p-005",
+          "capturedAt": 50000,
+          "sourceAvailableAt": 55000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 6,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 401154
+        },
+        {
+          "sampleId": "s-006",
+          "planId": "p-006",
+          "capturedAt": 60000,
+          "sourceAvailableAt": 65000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 7,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 466074
+        },
+        {
+          "sampleId": "s-007",
+          "planId": "p-007",
+          "capturedAt": 70000,
+          "sourceAvailableAt": 75000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 8,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 541501
+        },
+        {
+          "sampleId": "s-008",
+          "planId": "p-008",
+          "capturedAt": 80000,
+          "sourceAvailableAt": 85000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 9,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 629134
+        },
+        {
+          "sampleId": "s-009",
+          "planId": "p-009",
+          "capturedAt": 90000,
+          "sourceAvailableAt": 95000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 10,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 730950
+        },
+        {
+          "sampleId": "s-010",
+          "planId": "p-010",
+          "capturedAt": 100000,
+          "sourceAvailableAt": 105000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 11,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 849242
+        },
+        {
+          "sampleId": "s-011",
+          "planId": "p-011",
+          "capturedAt": 110000,
+          "sourceAvailableAt": 115000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 12,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 986679
+        },
+        {
+          "sampleId": "s-012",
+          "planId": "p-012",
+          "capturedAt": 120000,
+          "sourceAvailableAt": 125000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 13,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 1146357
+        },
+        {
+          "sampleId": "s-013",
+          "planId": "p-013",
+          "capturedAt": 130000,
+          "sourceAvailableAt": 135000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 14,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 1331877
+        },
+        {
+          "sampleId": "s-014",
+          "planId": "p-014",
+          "capturedAt": 140000,
+          "sourceAvailableAt": 145000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 15,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 1547420
+        }
+      ],
+      "expected": {
+        "transforms": {
+          "outcomeCount": "identity",
+          "contractCount": "identity",
+          "verificationKindCount": "identity",
+          "target": "log"
+        },
+        "columns": [
+          {
+            "kind": "intercept"
+          },
+          {
+            "kind": "numeric",
+            "field": "outcomeCount"
+          }
+        ],
+        "coefficients": [
+          1.0000010421144483,
+          0.1499999025121051
+        ],
+        "rank": 2,
+        "predictions": [
+          {
+            "features": {
+              "workKind": "MODIFY_MECHANISM",
+              "reuseState": "PARTIAL",
+              "doneBoundary": "LOCAL_VERIFIED",
+              "outcomeCount": 18,
+              "contractCount": 0,
+              "verificationKindCount": 1
+            },
+            "pointMs": 2426837,
+            "pointMinutes": 40.44727553459192
+          }
+        ]
+      }
+    },
+    {
+      "name": "sqrt target",
+      "rows": [
+        {
+          "sampleId": "s-000",
+          "planId": "p-000",
+          "capturedAt": 0,
+          "sourceAvailableAt": 5000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 60000
+        },
+        {
+          "sampleId": "s-001",
+          "planId": "p-001",
+          "capturedAt": 10000,
+          "sourceAvailableAt": 15000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 3,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 240000
+        },
+        {
+          "sampleId": "s-002",
+          "planId": "p-002",
+          "capturedAt": 20000,
+          "sourceAvailableAt": 25000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 540000
+        },
+        {
+          "sampleId": "s-003",
+          "planId": "p-003",
+          "capturedAt": 30000,
+          "sourceAvailableAt": 35000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 5,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 960000
+        },
+        {
+          "sampleId": "s-004",
+          "planId": "p-004",
+          "capturedAt": 40000,
+          "sourceAvailableAt": 45000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 6,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 1500000
+        },
+        {
+          "sampleId": "s-005",
+          "planId": "p-005",
+          "capturedAt": 50000,
+          "sourceAvailableAt": 55000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 7,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2160000
+        },
+        {
+          "sampleId": "s-006",
+          "planId": "p-006",
+          "capturedAt": 60000,
+          "sourceAvailableAt": 65000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 8,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 2940000
+        },
+        {
+          "sampleId": "s-007",
+          "planId": "p-007",
+          "capturedAt": 70000,
+          "sourceAvailableAt": 75000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 9,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 3840000
+        },
+        {
+          "sampleId": "s-008",
+          "planId": "p-008",
+          "capturedAt": 80000,
+          "sourceAvailableAt": 85000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 10,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 4860000
+        },
+        {
+          "sampleId": "s-009",
+          "planId": "p-009",
+          "capturedAt": 90000,
+          "sourceAvailableAt": 95000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 11,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 6000000
+        },
+        {
+          "sampleId": "s-010",
+          "planId": "p-010",
+          "capturedAt": 100000,
+          "sourceAvailableAt": 105000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 12,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 7260000
+        },
+        {
+          "sampleId": "s-011",
+          "planId": "p-011",
+          "capturedAt": 110000,
+          "sourceAvailableAt": 115000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 13,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 8640000
+        },
+        {
+          "sampleId": "s-012",
+          "planId": "p-012",
+          "capturedAt": 120000,
+          "sourceAvailableAt": 125000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 14,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 10140000
+        },
+        {
+          "sampleId": "s-013",
+          "planId": "p-013",
+          "capturedAt": 130000,
+          "sourceAvailableAt": 135000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 15,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 11760000
+        },
+        {
+          "sampleId": "s-014",
+          "planId": "p-014",
+          "capturedAt": 140000,
+          "sourceAvailableAt": 145000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 16,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 13500000
+        }
+      ],
+      "expected": {
+        "transforms": {
+          "outcomeCount": "identity",
+          "contractCount": "identity",
+          "verificationKindCount": "identity",
+          "target": "sqrt"
+        },
+        "columns": [
+          {
+            "kind": "intercept"
+          },
+          {
+            "kind": "numeric",
+            "field": "outcomeCount"
+          }
+        ],
+        "coefficients": [
+          -1.0000000000000027,
+          1.0
+        ],
+        "rank": 2,
+        "predictions": [
+          {
+            "features": {
+              "workKind": "MODIFY_MECHANISM",
+              "reuseState": "PARTIAL",
+              "doneBoundary": "LOCAL_VERIFIED",
+              "outcomeCount": 18,
+              "contractCount": 0,
+              "verificationKindCount": 1
+            },
+            "pointMs": 17340000,
+            "pointMinutes": 288.9999999999999
+          }
+        ]
+      }
+    },
+    {
+      "name": "log predictor",
+      "rows": [
+        {
+          "sampleId": "s-000",
+          "planId": "p-000",
+          "capturedAt": 0,
+          "sourceAvailableAt": 5000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 480000
+        },
+        {
+          "sampleId": "s-001",
+          "planId": "p-001",
+          "capturedAt": 10000,
+          "sourceAvailableAt": 15000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 563178
+        },
+        {
+          "sampleId": "s-002",
+          "planId": "p-002",
+          "capturedAt": 20000,
+          "sourceAvailableAt": 25000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 646355
+        },
+        {
+          "sampleId": "s-003",
+          "planId": "p-003",
+          "capturedAt": 30000,
+          "sourceAvailableAt": 35000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 8,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 729533
+        },
+        {
+          "sampleId": "s-004",
+          "planId": "p-004",
+          "capturedAt": 40000,
+          "sourceAvailableAt": 45000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 16,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 812711
+        },
+        {
+          "sampleId": "s-005",
+          "planId": "p-005",
+          "capturedAt": 50000,
+          "sourceAvailableAt": 55000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 480000
+        },
+        {
+          "sampleId": "s-006",
+          "planId": "p-006",
+          "capturedAt": 60000,
+          "sourceAvailableAt": 65000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 563178
+        },
+        {
+          "sampleId": "s-007",
+          "planId": "p-007",
+          "capturedAt": 70000,
+          "sourceAvailableAt": 75000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 646355
+        },
+        {
+          "sampleId": "s-008",
+          "planId": "p-008",
+          "capturedAt": 80000,
+          "sourceAvailableAt": 85000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 8,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 729533
+        },
+        {
+          "sampleId": "s-009",
+          "planId": "p-009",
+          "capturedAt": 90000,
+          "sourceAvailableAt": 95000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 16,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 812711
+        },
+        {
+          "sampleId": "s-010",
+          "planId": "p-010",
+          "capturedAt": 100000,
+          "sourceAvailableAt": 105000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 480000
+        },
+        {
+          "sampleId": "s-011",
+          "planId": "p-011",
+          "capturedAt": 110000,
+          "sourceAvailableAt": 115000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 2,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 563178
+        },
+        {
+          "sampleId": "s-012",
+          "planId": "p-012",
+          "capturedAt": 120000,
+          "sourceAvailableAt": 125000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 646355
+        },
+        {
+          "sampleId": "s-013",
+          "planId": "p-013",
+          "capturedAt": 130000,
+          "sourceAvailableAt": 135000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 8,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 729533
+        },
+        {
+          "sampleId": "s-014",
+          "planId": "p-014",
+          "capturedAt": 140000,
+          "sourceAvailableAt": 145000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 16,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 812711
+        }
+      ],
+      "expected": {
+        "transforms": {
+          "outcomeCount": "log",
+          "contractCount": "identity",
+          "verificationKindCount": "identity",
+          "target": "identity"
+        },
+        "columns": [
+          {
+            "kind": "intercept"
+          },
+          {
+            "kind": "numeric",
+            "field": "outcomeCount"
+          }
+        ],
+        "coefficients": [
+          7.999999999999998,
+          2.0000009217091645
+        ],
+        "rank": 2,
+        "predictions": [
+          {
+            "features": {
+              "workKind": "MODIFY_MECHANISM",
+              "reuseState": "PARTIAL",
+              "doneBoundary": "LOCAL_VERIFIED",
+              "outcomeCount": 6,
+              "contractCount": 0,
+              "verificationKindCount": 1
+            },
+            "pointMs": 695011,
+            "pointMinutes": 11.583520589937232
+          }
+        ]
+      }
+    },
+    {
+      "name": "sqrt predictor",
+      "rows": [
+        {
+          "sampleId": "s-000",
+          "planId": "p-000",
+          "capturedAt": 0,
+          "sourceAvailableAt": 5000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 0,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 480000
+        },
+        {
+          "sampleId": "s-001",
+          "planId": "p-001",
+          "capturedAt": 10000,
+          "sourceAvailableAt": 15000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 600000
+        },
+        {
+          "sampleId": "s-002",
+          "planId": "p-002",
+          "capturedAt": 20000,
+          "sourceAvailableAt": 25000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 720000
+        },
+        {
+          "sampleId": "s-003",
+          "planId": "p-003",
+          "capturedAt": 30000,
+          "sourceAvailableAt": 35000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 9,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 840000
+        },
+        {
+          "sampleId": "s-004",
+          "planId": "p-004",
+          "capturedAt": 40000,
+          "sourceAvailableAt": 45000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 16,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 960000
+        },
+        {
+          "sampleId": "s-005",
+          "planId": "p-005",
+          "capturedAt": 50000,
+          "sourceAvailableAt": 55000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 0,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 480000
+        },
+        {
+          "sampleId": "s-006",
+          "planId": "p-006",
+          "capturedAt": 60000,
+          "sourceAvailableAt": 65000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 600000
+        },
+        {
+          "sampleId": "s-007",
+          "planId": "p-007",
+          "capturedAt": 70000,
+          "sourceAvailableAt": 75000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 720000
+        },
+        {
+          "sampleId": "s-008",
+          "planId": "p-008",
+          "capturedAt": 80000,
+          "sourceAvailableAt": 85000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 9,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 840000
+        },
+        {
+          "sampleId": "s-009",
+          "planId": "p-009",
+          "capturedAt": 90000,
+          "sourceAvailableAt": 95000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 16,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 960000
+        },
+        {
+          "sampleId": "s-010",
+          "planId": "p-010",
+          "capturedAt": 100000,
+          "sourceAvailableAt": 105000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 0,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 480000
+        },
+        {
+          "sampleId": "s-011",
+          "planId": "p-011",
+          "capturedAt": 110000,
+          "sourceAvailableAt": 115000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 1,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 600000
+        },
+        {
+          "sampleId": "s-012",
+          "planId": "p-012",
+          "capturedAt": 120000,
+          "sourceAvailableAt": 125000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 4,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 720000
+        },
+        {
+          "sampleId": "s-013",
+          "planId": "p-013",
+          "capturedAt": 130000,
+          "sourceAvailableAt": 135000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 9,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 840000
+        },
+        {
+          "sampleId": "s-014",
+          "planId": "p-014",
+          "capturedAt": 140000,
+          "sourceAvailableAt": 145000,
+          "features": {
+            "workKind": "MODIFY_MECHANISM",
+            "reuseState": "PARTIAL",
+            "doneBoundary": "LOCAL_VERIFIED",
+            "outcomeCount": 16,
+            "contractCount": 0,
+            "verificationKindCount": 1
+          },
+          "actualMs": 960000
+        }
+      ],
+      "expected": {
+        "transforms": {
+          "outcomeCount": "sqrt",
+          "contractCount": "identity",
+          "verificationKindCount": "identity",
+          "target": "identity"
+        },
+        "columns": [
+          {
+            "kind": "intercept"
+          },
+          {
+            "kind": "numeric",
+            "field": "outcomeCount"
+          }
+        ],
+        "coefficients": [
+          7.999999999999998,
+          1.9999999999999993
+        ],
+        "rank": 2,
+        "predictions": [
+          {
+            "features": {
+              "workKind": "MODIFY_MECHANISM",
+              "reuseState": "PARTIAL",
+              "doneBoundary": "LOCAL_VERIFIED",
+              "outcomeCount": 6,
+              "contractCount": 0,
+              "verificationKindCount": 1
+            },
+            "pointMs": 773939,
+            "pointMinutes": 12.898979485566352
+          }
+        ]
+      }
+    }
+  ]
+}
