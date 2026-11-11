@@ -87,6 +87,18 @@ try {
   for (const name of ["Название плана", "Описание", "Критерии приёмки", "Дата составления", "Причина правки даты"]) {
     assert.equal(await edit.getByText(name, { exact: true }).isVisible(), true, "visible label: " + name);
   }
+  const dateConfirmation = edit.getByRole("checkbox", { name: "Подтверждаю дату составления после первого старта" });
+  const confirmationGeometry = await dateConfirmation.evaluate(input => {
+    const box=input.getBoundingClientRect(),label=input.closest("label"),text=label.querySelector("span").getBoundingClientRect();
+    return {height:box.height,offset:box.top-text.top,labelHeight:label.getBoundingClientRect().height};
+  });
+  assert(confirmationGeometry.height<=20, "checkbox keeps its native control size");
+  assert(confirmationGeometry.offset>=0&&confirmationGeometry.offset<=6, "checkbox aligns with the first label line");
+  assert(confirmationGeometry.labelHeight>=44, "the label keeps a touch-sized click target");
+  await edit.getByText("Подтверждаю дату составления после первого старта", { exact: true }).click();
+  assert.equal(await dateConfirmation.isChecked(), true);
+  await dateConfirmation.focus();await page.keyboard.press("Space");
+  assert.equal(await dateConfirmation.isChecked(), false);
   await edit.getByRole("textbox", { name: "Описание", exact: true }).fill("Saved before lost acknowledgment");
   await edit.getByRole("textbox", {name:"Причина правки даты",exact:true}).fill("Synthetic metadata edit");
   await edit.getByRole("button", { name: "Сохранить изменения", exact: true }).click();
