@@ -260,3 +260,22 @@ test("only successful commands schedule background processing; read tools and fa
     await Promise.all(background);
   } finally { await Promise.allSettled(background); c.close(); }
 });
+
+test("manual training starts below the automatic threshold and reports insufficient data", async () => {
+  const c = context();
+  try {
+    const tools = (await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" })).value.result.tools;
+    const manual = tools.find(t => t.name === "StartEstimationTraining");
+    assert.ok(manual); assert.equal(manual.annotations.readOnlyHint, false); assert.equal(manual.annotations.idempotentHint, false);
+    assert.equal(value(await mcp(c, "GetTrackerCapabilities")).assessments.atlm.startTrainingTool, "StartEstimationTraining");
+    for (let i = 0; i < 2; i++) { const p = await plannedAtlm(c, crypto.randomUUID()); await completeAtlm(c, p); }
+    await process(c);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM estimation_models WHERE owner_id=?").get(OWNER).n, 0);
+    const result = value(await mcp(c, "StartEstimationTraining"));
+    assert.equal(result.eligibleSampleCount, 2);
+    assert.equal(result.activeModel, null);
+    assert.equal(result.training.generation, 1);
+    assert.ok(result.lastReason);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM estimation_models WHERE owner_id=?").get(OWNER).n, 1);
+  } finally { c.close(); }
+});

@@ -1107,6 +1107,7 @@ const ATLM_TOOL_SCHEMAS = Object.freeze({
   GetPlanEstimate: { type: "object", additionalProperties: false, required: ["planId"], properties: { planId: { type: "string", format: "uuid" } } },
   GetEstimationModelStatus: { type: "object", additionalProperties: false, properties: {} },
   ProcessEstimationTraining: { type: "object", additionalProperties: false, properties: {} },
+  StartEstimationTraining: { type: "object", additionalProperties: false, properties: {} },
   GetAtlmDataset: { type: "object", additionalProperties: false, properties: {
     limit: { type: "integer", minimum: 1, maximum: 100, default: 50 }, cursor: { type: "string", minLength: 1, maxLength: 1024 },
   } },
@@ -1221,6 +1222,12 @@ async function executeAtlmTool(db, ownerId, name, args, nowMs, clock) {
   if (name === "GetPlanEstimate") return getPlanEstimate(db, ownerId, args, nowMs);
   if (name === "GetAtlmDataset") return getAtlmDataset(db, ownerId, args, nowMs);
   if (name === "GetEstimationModelStatus") return getEstimationModelStatus(db, ownerId, nowMs);
+  if (name === "StartEstimationTraining") {
+    await db.batch([
+      db.prepare("INSERT OR IGNORE INTO estimation_owner_state(owner_id) SELECT owner_id FROM owners WHERE owner_id=?").bind(ownerId),
+      db.prepare("UPDATE estimation_owner_state SET forced_retrain=1, updated_at=? WHERE owner_id=?").bind(nowMs, ownerId),
+    ]);
+  }
   return processEstimationTraining(db, ownerId, nowMs, { clock });
 }
 
@@ -2388,7 +2395,7 @@ async function readTrackerCapabilities(db, ownerId) {
       atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, featureSchemaVersion: "agent-task-v1", metric: "PLAN_ACTIVE",
         predictionScope: "FULL_FROM_FIRST_START", retrainEveryNewPlans: 5,
         calculateTool: "CalculateAtlmEstimate", planEstimateTool: "GetPlanEstimate", modelStatusTool: "GetEstimationModelStatus",
-        processTool: "ProcessEstimationTraining", datasetTool: "GetAtlmDataset", predictionRequest: { method: "ATLM", methodVersion: 1 },
+        processTool: "ProcessEstimationTraining", startTrainingTool: "StartEstimationTraining", datasetTool: "GetAtlmDataset", predictionRequest: { method: "ATLM", methodVersion: 1 },
         limits: { maxTrainingSamples: 5000, datasetDefaultLimit: 50, datasetMaxLimit: 100, maxOutcomes: 20, maxChangedContracts: 20, maxVerificationKinds: 5 } },
       calculator: { tool: "CalculateEstimate", formatVersion: 1,
         method: { id: "reference-class-median", version: "1" }, metrics: ["PLAN_ACTIVE"],
@@ -3881,7 +3888,7 @@ async function apiRoute(request, env, url, channel, now, clock = () => now, ctx)
   throw appError("NOT_FOUND", "Маршрут не найден.", 404);
 }
 
-const TOOL_NAMES = ["CreatePlan", "GetPlan", "ListPlans", "StartPlan", "PausePlan", "ResumePlan", "FinishPlan", "DeletePlan", "RestorePlan", "UpdatePlanMetadata", "GetAnalytics", ...TRACKER_READ_TOOLS, ...TRACKER_COMMANDS, "ProcessEstimationTraining"];
+const TOOL_NAMES = ["CreatePlan", "GetPlan", "ListPlans", "StartPlan", "PausePlan", "ResumePlan", "FinishPlan", "DeletePlan", "RestorePlan", "UpdatePlanMetadata", "GetAnalytics", ...TRACKER_READ_TOOLS, ...TRACKER_COMMANDS, "ProcessEstimationTraining", "StartEstimationTraining"];
 function mcpTools() {
   const writeNames = new Set([...WRITE_COMMANDS, ...TRACKER_COMMANDS]);
   const assessmentDescriptions = {
@@ -3897,8 +3904,9 @@ function mcpTools() {
       GetPlanEstimate: "Сохранённый прогноз плана; после первого запуска только исходная frozen-оценка. isStale отмечает изменение требований или исходных данных модели.",
       GetEstimationModelStatus: "Состояние модели, накопление пригодных планов и очередь обучения владельца. Только чтение.",
       ProcessEstimationTraining: "Один ограниченный проход долговечной очереди владельца. Идемпотентная мутация без planId, с lease и fence; может потребоваться повторный проход.",
+      StartEstimationTraining: "По явной просьбе пользователя запросить обучение на доступных данных независимо от порога пяти планов. Возвращает состояние очереди; качество и достаточность данных проверяются сервером.",
       GetAtlmDataset: "Приватная постраничная выгрузка неизменяемых sample-версий. Сохраняйте nextCursor; DATASET_CHANGED требует начать заново. Используется последняя версия каждого плана, только если она пригодна.",
-    })[name], inputSchema: ATLM_TOOL_SCHEMAS[name], annotations: { readOnlyHint: name !== "ProcessEstimationTraining", destructiveHint: false, idempotentHint: true, openWorldHint: false } };
+    })[name], inputSchema: ATLM_TOOL_SCHEMAS[name], annotations: { readOnlyHint: !["ProcessEstimationTraining", "StartEstimationTraining"].includes(name), destructiveHint: false, idempotentHint: name !== "StartEstimationTraining", openWorldHint: false } };
     if (name === "GetPlan") inputSchema = { type: "object", required: ["planId"], properties: { planId: { type: "string", format: "uuid" } }, additionalProperties: false };
     else if (name === "ListPlans") inputSchema = { type: "object", properties: {
       statuses: { type: "array", minItems: 1, maxItems: 4, uniqueItems: true, items: { enum: PLAN_STATUSES } },
