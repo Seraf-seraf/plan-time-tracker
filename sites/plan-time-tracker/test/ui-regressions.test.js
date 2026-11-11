@@ -41,29 +41,15 @@ test("analytics applies one guarded loader for metrics, chart, and list", async 
 });
 
 
-test("checkpoint disclosures and consecutive forms retain 10px gaps", async () => {
-  const { html } = await clientScripts();
-  assert(html.includes(".tracker-card-body>details[open]{display:grid;gap:10px}"));
-  assert(html.includes(".tracker-card-body>.tracker-form+.tracker-form{margin-top:10px}"));
-  assert(html.includes(".tracker-card-body>.tracker-actions{margin-top:10px}"));
-});
-
 test("long unbroken checkpoint titles wrap without widening the document", async () => {
   const { html } = await clientScripts();
   assert(html.includes(".tracker-card h4{min-width:0;overflow-wrap:anywhere}"));
 });
 
-test("NOT_RUN disables the exit code immediately and after status changes", async () => {
-  const { scripts } = await clientScripts();
-  const tracker = scripts[2];
-  assert(tracker.includes('exit.control.disabled=statusSelect.control.value==="NOT_RUN";form.addEventListener'));
-  assert(tracker.includes('statusSelect.control.addEventListener("change",()=>{exit.control.disabled=statusSelect.control.value==="NOT_RUN"'));
-});
-
-test("new checkpoint ordinal is one greater than the largest occupied ordinal", async () => {
-  const { scripts } = await clientScripts();
-  assert(scripts[2].includes('value:String(Math.max(0,...steps.map(step=>Number(step.ordinal)||0))+1)'));
-  assert(!scripts[2].includes("value:String(steps.length)"));
+test("technical check and step creation forms are absent for every plan", async () => {
+  const {scripts}=await clientScripts();const tracker=scripts[2];
+  for(const removed of ['RecordCheck','RecordStepResult','ClaimStepAttempt','RenewStepLease','CreateStep','create-step','testedSnapshotDigest','exit.control'])assert(!tracker.includes(removed),removed);
+  assert(tracker.includes('SetStepStatus'));
 });
 
 test("period filters keep their metrics and drive the single paginated plan list", async () => {
@@ -147,7 +133,7 @@ for (const client of ["main", "tracker"]) {
       const sandbox = {
         pending: new Map(), rejectedValidation: new Set(), rejectedVersion: new Map(),
         uid: () => `main-${++nextId}`, uuid: () => `tracker-${++nextId}`,
-        showToast() {}, refresh: async () => {}, root: { dataset: { planId: "fixture-plan" } },
+        showToast() {}, q: () => ({ classList: { add() {}, remove() {} } }), refresh: async () => {}, root: { dataset: { planId: "fixture-plan" } },
         window: { addEventListener() {} },
         fetch: async (_path, options) => {
           const sent = JSON.parse(options.body);
@@ -189,7 +175,7 @@ for (const [client, type, code] of [
       const sandbox = {
         pending: new Map(), rejectedValidation: new Set(), rejectedVersion: new Map(),
         uid: () => `main-${++nextId}`, uuid: () => `tracker-${++nextId}`,
-        showToast() {}, refresh: async () => {}, root: { dataset: { planId: "fixture-plan" } }, window: { addEventListener() {} },
+        showToast() {}, q: () => ({ classList: { add() {}, remove() {} } }), refresh: async () => {}, root: { dataset: { planId: "fixture-plan" } }, window: { addEventListener() {} },
         fetch: async (_path, options) => {
           if (options.method === "POST") {
             const sent = JSON.parse(options.body);
@@ -264,8 +250,7 @@ test("checkpoint UI exposes only authoritative readiness, no owner-decision comm
   for (const obsolete of ["AcceptStep", "RejectStep", "acceptanceCurrent", "currentAcceptance", "Waivers JSON", "waivers"])
     assert(!tracker.includes(obsolete), obsolete);
   assert(tracker.includes('steps.filter((step)=>!step.readyToFinish)'));
-  assert(tracker.includes('check.status==="PASSED"&&check.matchesCurrentResult'));
-  assert(tracker.includes('const currentChecks=step.currentChecks||[]'));
+
   assert(tracker.includes('toggle.type="button"'));
   assert(scripts[0].includes('new CustomEvent("plan-time-tracker:plan-will-render")'));
   assert(scripts[0].includes('edit.dataset.trackerForm="plan-metadata"'));

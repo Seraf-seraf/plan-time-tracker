@@ -68,7 +68,7 @@ try{
     assert(geometry<1,'centered controls at '+width);
     if(width===390||width===1440)await history().screenshot({path:resolve(out,'history-'+width+'.png')});
   }
-  await page.getByRole('button',{name:'Обновить состояние этапов',exact:true}).click();
+  await page.getByRole('button',{name:'Обновить этапы',exact:true}).click();
   await page.getByRole('button',{name:'Показать историю статусов',exact:true}).waitFor();
   assert.equal(historyRequests().length,loaded,'checkpoint refresh does not reload history');
   holdNext=true;const started=new Promise(resolve=>heldStarted=resolve);

@@ -7,6 +7,20 @@ description: Register plans, steps and assessments during planning; track author
 
 Use this skill for `/plan`, ordinary planning, assessment, execution and continuation of an authorized task even without a tracking request. Register or update the plan, substantial checkpoints and assessments during planning using the independent `assess-task` skill supplied in this plugin. A single task needs at least one verifiable checkpoint. Future implementation stays PLANNED: planning never calls StartPlan/StartStep, implements the task or starts time. Reference answers and tracker maintenance do not create recursive plans. A request to execute a specific plan authorizes registration when needed and StartPlan; a request to continue a known paused plan authorizes ResumePlan. No separate tracker opt-in or start confirmation is required. MCP is the command transport; the server's work intervals are the source of truth for time. File snapshots identify check inputs. Neither a tool call, observation, checkpoint attempt nor snapshot starts or stops the timer.
 
+## Сохранить план как есть и менять статусы этапов
+
+Основной флоу: агент составляет план по действующим инструкциям Software Engineering, сохраняет его целиком в трекер и отмечает состояние этапов. Трекер не задаёт вторую структуру плана.
+
+1. В `GetTrackerInfo` проверьте `planDocuments.available` и `planDocuments.preservesOriginal`. Передайте полный исходный Markdown в `CreatePlan.payload.planText`, вместе с настоящими названием и датой составления. Не пересказывайте план в `description`, `acceptanceCriteria`, `expectedResult` или списках технических проверок. Сохраняйте все исходные разделы, таблицы, команды и условия остановки. `CreatePlan` не запускает таймер.
+2. Сервер выделяет этапы из Markdown-заголовков одного уровня: например `## Этап 1. Название`, `## Этап DATA-001. Название`, `## G1. Название`. Номера и ID не должны повторяться. Заголовки внутри блоков кода пропускаются. Текст этапа остаётся точной частью исходного плана. Если этапы не распознаны, сообщите об ошибке; не переписывайте план ради передачи и не создавайте этапы с выдуманными полями.
+3. Прочитайте `GetPlanProgress({planId})`: `plan.planText` содержит исходный план, `steps[].content` — исходный текст этапа. Используйте возвращённые `step_id` и `version`. Не вызывайте `CreateStep` для уже сохранённого текста.
+4. Перед выполнением назначенного этапа запустите или продолжите именно этот план в соответствии с разрешением пользователя и существующими правилами времени. Через `SetStepStatus` передайте конверт `schemaVersion:1`, UUID `commandId`, текущий `expectedVersion` этапа и `payload:{stepId,status}`. Статусы: `PENDING`, `RUNNING`, `BLOCKED`, `FAILED`, `DONE`. Статус не запускает и не останавливает таймер плана.
+5. Выполните действия и проверки из самого плана. `DONE` ставьте только после достижения его результата и фактических проверок. Не придумывайте успешные проверки. Для этого флоу не нужны назначение попытки, fence, снимки файлов, digest, код завершения или отдельные записи проверок. По завершённым статусам сервер определяет готовность плана; само завершение плана следует действующим правилам `FinishPlan`.
+6. При потере ответа повторите точный конверт команды или проверьте `GetCommandResult`; не меняйте ID, версию и payload до выяснения результата. При конфликте версии перечитайте состояние. При продолжении используйте существующий план, без дубликатов.
+
+Если `plan.planText` отсутствует, это исторический план. Его прежние данные и команды сохраняются для совместимости; описанные ниже попытки и технические доказательства относятся только к таким планам. В интерфейсе показываются текст этапа, статус и итог работы, технических форм нет. Не переводите старые записи в новый флоу с потерей содержания или истории.
+
+
 ## Authenticate and inspect
 
 1. Use only authenticated Plan Time Tracker MCP tools. Call `GetTrackerInfo`; require `parallelPlans`, the `ListPlans` contract and `assessments` for assessment. Discover support from capabilities and tools, not product version comparisons. Missing tools, incompatible capabilities or authentication failure block required accounting: report the blocker, do not claim recorded time or invent records, and pause dependent work until access is restored while honoring the user's existing exceptions. Never accept `ownerId`, forge identity headers or use an alternate endpoint.
@@ -63,7 +77,7 @@ Use isolated source directories for concurrent writers, or coordinate writes and
 
 Analytics count each plan's own intervals normally. Owner-wide `totalActiveMs` and `activeByDay` are unique elapsed work time (the union of intervals across plans); `sumPlanActiveMs` is the separate sum of plan durations and may be larger. All durations are milliseconds.
 
-## Source evidence without a repository
+## Historical plans: source evidence without a repository
 
 Stop source writers. Run `scripts/source-snapshot.mjs <source-directory>` before checks, then `--expect <digest>` immediately before and after every check. The helper uses no version-control command. Version 2 hashes relative UTF-8 paths, executable modes, symlink target bytes and file contents in deterministic order. It never follows symlinks. It excludes metadata/dependency/build directories and `.env`/`.env.*`; see the helper's default exclusions. Use `.tracker-snapshot.json` with `{ "exclude": ["relative/output-directory"] }` for additional generated outputs. The configuration itself and its policy affect the digest. Keep logs and captures outside the source tree, or explicitly exclude them before capture. Describe excluded environment/dependency inputs separately. The helper detects changes but does not freeze files or run tests.
 
@@ -77,7 +91,7 @@ Omit the helper's local `fileCount`. A source-less result is a truthful report, 
 
 `SaveStepResult` returns `resultRevision`. Record each actual `SaveCheckResult` with that revision, `checkKey`, `status`, `testedSnapshotDigest` equal to the result digest, actual `exitCode` and optional bounded evidence summary/HTTPS URL. `PASSED` requires 0; `FAILED` requires 1–255; `NOT_RUN` omits the exit code. Do not invent passes or claim the server executed tests. Historical checks are audit records; only current-revision checks affect readiness.
 
-## Completion and recovery
+## Historical plans: completion and recovery
 
 Normal finish requires every checkpoint to be `DONE`, have a current successful result, no open attempt, and a latest `PASSED` check for every required key matching that result's source. Use `readyToFinish`, `readinessBlockers` and `currentChecks` (`server_sequence`, `matchesCurrentResult`). A later FAILED/NOT_RUN, rework, a new result revision or an added required key invalidates earlier readiness. An empty required-check list requires no source snapshot. Historical source identities remain immutable and retain their prior check semantics internally; do not reinterpret a historical identity as a new snapshot.
 

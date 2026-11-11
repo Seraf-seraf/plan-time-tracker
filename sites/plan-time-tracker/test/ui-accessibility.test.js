@@ -21,23 +21,21 @@ test('period metrics keep scoped gaps and concise accessible copy for date filte
   assert.deepEqual([1,2,4,5,11,21].map(formatPlanSample),['по 1 плану','по 2 планам','по 4 планам','по 5 планам','по 11 планам','по 21 плану']);
 });
 
-test('checkpoint actions keep a scoped gap after result forms and details',async()=>{const source=await html();for(const marker of ['.tracker-card-body>.tracker-actions{margin-top:10px}','body.append(resultForm);','edit.append(form);body.append(edit);','body.append(actions);'])assert(source.includes(marker),marker);});
-
-test('checkpoint UI separates timer, attempt, current result/check readiness, and finish exception',async()=>{
+test('document stages use a status form and contain no technical evidence editors',async()=>{
   const source=await html();
-  for(const marker of ['Контрольные этапы','expected_result','requiredChecks','ClaimStepAttempt','StartStep','RecordStepResult','RecordCheck','RenewStepLease','FinishPlan','allowIncomplete:true','Условия завершения не выполнены','Попытки','step.readyToFinish','step.currentChecks','check.matchesCurrentResult','aria-controls','aria-expanded','toggle.type="button"'])assert(source.includes(marker),marker);
-  assert.equal((source.match(/setInterval\(/g)||[]).length,1,'the existing plan timer remains the only interval');
-  for(const removed of ['AcceptStep','RejectStep','currentAcceptance','acceptanceCurrent','Waivers JSON'])assert(!source.includes(removed),removed);
-  assert(!source.includes('AppendObservation'), 'UI observations do not drive lifecycle commands');
+  for(const marker of ['SetStepStatus','planText','Текст плана','Статус этапа','Сохранить статус','Исходный текст','aria-controls','aria-expanded'])assert(source.includes(marker),marker);
+  for(const removed of ['Digest проверенного снимка','Код завершения','evidence summary','Подробности проверок','ClaimStepAttempt','RecordCheck','RenewStepLease','create-step'])assert(!source.includes(removed),removed);
+  assert.equal((source.match(/setInterval\(/g)||[]).length,1);
 });
 
-test('checkpoint UI labels bottleneck counts and server-recorded check delay',async()=>{const source=await html();for(const marker of ['Сводка: блокировок ','попыток после первой ','включая восстановление и доработку','неуспешных результатов ','задержка до первой проверки ','а не длительность выполнения теста'])assert(source.includes(marker),marker);});
-
-test('unified timeline pages server ordered legacy and tracker events with delivery markers',async()=>{
+test('legacy stage reading keeps prose and actual results without a diagnostic summary',async()=>{
   const source=await html();
-  for(const marker of ['/api/tracker/plans/','/status-history?','Получено сервером:','Время клиента:','serverSequence','LATE','GAP','STALE_EXECUTOR','CORRECTION','correctionOfEventId'])assert(source.includes(marker),marker);
-  assert(source.includes('История статусов'));
-  assert(!source.includes('История команд'));
+  for(const marker of ['Что нужно сделать','Результат','step.expected_result','step.currentResult.summary','step.readyToFinish'])assert(source.includes(marker),marker);
+  for(const removed of ['Сводка: блокировок','задержка до первой проверки','Серверная последовательность:','Время клиента:'])assert(!source.includes(removed),removed);
+});
+
+test('status history keeps server paging and describes stage status changes',async()=>{
+  const source=await html();for(const marker of ['/status-history?','История статусов','STEP_STATUS_CHANGED','event.stepTitle'])assert(source.includes(marker),marker);
 });
 
 test('timezone selector keeps supported choices, falls back to Omsk, and drives persistence and display',async()=>{const source=await html();const select=source.match(/<select id="tz" required>([\s\S]*?)<\/select>/);assert(select);assert.deepEqual([...select[1].matchAll(/<option value="([^"]+)"([^>]*)>([^<]+)<\/option>/g)].map(([,value,attrs,label])=>({value,selected:attrs.includes('selected'),label})),[{value:'Europe/Moscow',selected:false,label:'Москва (UTC+3)'},{value:'Asia/Omsk',selected:true,label:'Омск (UTC+6)'}]);const scripts=[...source.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(([,script])=>script);assert(scripts[0].includes('normalizeZone(settings.timezone)'));assert(scripts[0].includes('timezone:q("#tz").value'));assert(scripts[0].includes('timeZone:zone'));assert(scripts[0].includes('plan-time-zone-changed'));assert(scripts[1].includes('normalizeZone(settings.timezone)'));assert(scripts[1].includes('timeZone:state.zone'));assert(source.includes('<label for="tz">Часовой пояс</label>'));for(const old of ['IANA timezone','Явный учёт интервалов','Медиана сопровождается размером выборки N'])assert(!source.includes(old),old);});

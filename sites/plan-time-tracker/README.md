@@ -1,5 +1,7 @@
 # Plan Time Tracker
 
+[План целиком и статусы этапов](../../docs/plan-documents.md) — основной флоу: исходный Markdown, этапы из плана и SetStepStatus. Технические формы удалены из интерфейса, исторические данные сохранены. Новая каноническая миграция: 0020 после 0019.
+
 The tracker records work time through explicit authenticated MCP commands and the owner UI. `CreatePlan` registers a plan; only Start/Pause/Resume/Finish change server-timed intervals. Observations, tools, attempts and source changes never accrue or stop time on their own. One owner may run several plans at once. Start/Resume/Pause/Finish only affect the supplied planId. Calendar/active/paused durations remain per-plan. The connected skills register plans, substantial steps and assessments during planning, including /plan, without implementation or a timer; they also track authorized execution and continuation.
 
 The current contract removes repository management/filters, synchronization, commit attribution, commit/push policies and Git observations. It requires no external integration token. GitHub source publication does not deploy the Worker or update installed tools.
@@ -68,7 +70,7 @@ Runner выводит `EXTERNAL_FIXTURE`, не подключается к D1, �
 
 Историческое обновление оценок 0.4.0 добавляло 0017_assessments.sql после 0016;
 тогда новой базе требовалась цепочка 0001–0017. Это описание прежней миграции,
-не инструкция публикации 0.5.0: текущая каноническая цепочка заканчивается 0019,
+не инструкция публикации 0.5.0: текущая каноническая цепочка заканчивается 0020,
 а отдельная Sites-цепочка — 0004. См. [актуальный порядок развёртывания](../../README.md#миграции).
 Тесты проверяют сохранность старых строк и отсутствие выдуманных baseline. Ревизии оценок нельзя менять/удалять;
 откат приложения не должен удалять эту таблицу или повторять миграцию. Миграция
@@ -98,7 +100,7 @@ Runner выводит `EXTERNAL_FIXTURE`, не подключается к D1, �
 
 `GetTrackerCapabilities` сообщает `version: "0.5.0"`, `planDeletion: {softDelete:true, deleteTool:"DeletePlan", restoreTool:"RestorePlan", deletedFilter:"deleted", restoreStartsTimer:false}` и `planList.deletedDefault:false`. MCP initialize также возвращает 0.5.0 в подготовленном Worker. Команды удаления/восстановления требуют отдельного намерения пользователя; они не следуют из окончания этапа или ответа.
 
-Исторический выпуск 3.1.0 добавлял `drizzle/0016_plan_deletion.sql` после 0015; для новой базы того выпуска требовалась цепочка 0001–0016. Для текущего 0.5.0 следуйте [актуальному порядку](../../README.md#миграции): canonical 0019 и эквивалентная Sites 0004, каждый в собственной истории. Миграция добавляет nullable-поле и триггеры, сохраняя строки и активные интервалы до явного удаления. Это не путь обновления старой single-plan-базы. Не возвращайте старый Worker после появления удалённых планов: он не фильтрует их в чтении. Build сохраняет неизменённые migration sidecars в `dist/.openai/drizzle/` по [официальному контракту упаковки Sites](https://github.com/openai/sites/blob/7eb9d4b9cf93ad7e64aebc8a5ca70e29ec2cfb94/packages/sites-vite-plugin/README.md). Sites применяет hosted-миграции до загрузки Worker; отдельной shell-команды hosted SQL здесь нет. Условия 0001–0015 → 0016 относятся только к описанному историческому обновлению. Не создавайте фиктивный journal и не запускайте старую цепочку заново. Локальные тесты упакованной миграции не подтверждают состояние hosted migration ledger.
+Исторический выпуск 3.1.0 добавлял `drizzle/0016_plan_deletion.sql` после 0015; для новой базы того выпуска требовалась цепочка 0001–0016. Для текущего 0.5.0 следуйте [актуальному порядку](../../README.md#миграции): canonical 0020; ATLM в Sites ранее добавлялся отдельной 0004, документы требуют следующей эквивалентной миграции, каждый в собственной истории. Миграция добавляет nullable-поле и триггеры, сохраняя строки и активные интервалы до явного удаления. Это не путь обновления старой single-plan-базы. Не возвращайте старый Worker после появления удалённых планов: он не фильтрует их в чтении. Build сохраняет неизменённые migration sidecars в `dist/.openai/drizzle/` по [официальному контракту упаковки Sites](https://github.com/openai/sites/blob/7eb9d4b9cf93ad7e64aebc8a5ca70e29ec2cfb94/packages/sites-vite-plugin/README.md). Sites применяет hosted-миграции до загрузки Worker; отдельной shell-команды hosted SQL здесь нет. Условия 0001–0015 → 0016 относятся только к описанному историческому обновлению. Не создавайте фиктивный journal и не запускайте старую цепочку заново. Локальные тесты упакованной миграции не подтверждают состояние hosted migration ledger.
 
 ## Analytics by plan section
 
@@ -120,7 +122,7 @@ Normal finish is guarded by current successful results, closed attempts and the 
 
 ## Fresh installation and retained history
 
-For a fresh 0.5.0 installation apply canonical migrations in order through `0019_atlm.sql`. An existing canonical database through `0018_estimation_history_indexes.sql` receives only the additive `0019_atlm.sql`. The current Sites database has its own migration ledger; use the equivalent appended migration there rather than replaying GitHub history.
+For a fresh 0.5.0 installation apply canonical migrations in order through `0020_plan_documents.sql`. An existing canonical database through `0019_atlm.sql` receives only the additive `0020_plan_documents.sql`. The current Sites database has its own migration ledger; use the equivalent appended migration there rather than replaying GitHub history.
 
 The revised `0001_initial.sql` permits parallel RUNNING plans from creation. One open interval and nonoverlapping intervals per plan remain enforced. This release does not provide a migration from the historical single-plan schema with its different constraint. Do not apply only the Worker to that older schema. Source publication never resets existing data or deploys the Site.
 
