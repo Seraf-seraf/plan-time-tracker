@@ -2,7 +2,7 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "dev-9529b49da3708191b8f13f1e1e4b1e01",
   "version": "0.6.0",
-  "description": "Планы и учёт времени",
+  "description": "Сохраняет планы и статусы этапов, считает время работы и прогнозирует длительность задач по ATLM.",
   "author": {
     "name": "App developer"
   },
@@ -15,8 +15,8 @@
         "defaultPrompt": null,
         "developerName": "App developer",
         "displayName": "Трекер планов",
-        "longDescription": "Планы и учёт времени",
-        "shortDescription": "Планы и учёт времени",
+        "longDescription": "Сохраняет планы и статусы этапов, считает время работы и прогнозирует длительность задач по ATLM.",
+        "shortDescription": "Планы, статусы этапов и время работы",
         "websiteURL": "https://plan-time-tracker.s-e-r-a-f.chatgpt.site"
       }
     }

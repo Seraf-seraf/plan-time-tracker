@@ -2829,8 +2829,6 @@ function publicView(value) {
   const hidden=new Set(["repositories","commits","commitConflicts","repositoryId","repositoryIds","repositoryRefs","repository_id","revisionSha","revision_sha","testedSha","tested_sha","baseRevisionSha","base_revision_sha","commitPolicy","pushPolicy","commit_policy","push_policy","gitEvidence"]);
   const result={};
   for(const [key,item] of Object.entries(value)) if(!hidden.has(key)) result[key]=key === "assessment" && item?.formatVersion === 1 ? item : publicView(item);
-  if(["COMMIT","WORKTREE_SNAPSHOT"].includes(result.source_kind)) result.source_kind="HISTORICAL";
-  if(["commit_created","commit_pushed","push_failed"].includes(result.eventType)) {result.eventType="HISTORICAL_EVENT";result.payload={historical:true};}
   return result;
 }
 
@@ -2925,6 +2923,7 @@ function publicToolReferences(value) {
   return value;
 }
 const MCP_DESCRIPTIONS = Object.freeze({
+  GetPlan: "Прочитать исходный текст, метаданные и текущее состояние плана по planId.",
   UpdatePlanMetadata: "Изменить название, описание или критерии плана, проверив текущую версию.",
   GetTrackerCapabilities: "Показать доступные функции трекера и их ограничения.",
   GetPlanExecutionSnapshot: "Показать текст и текущее состояние плана и этапов.",
@@ -2940,7 +2939,7 @@ const MCP_DESCRIPTIONS = Object.freeze({
 function mcpTools() {
   const writeNames = new Set([...WRITE_COMMANDS, ...TRACKER_COMMANDS]);
   const assessmentDescriptions = {
-    RecordAssessment: "Записать оценку или неизменяемую ревизию. expectedVersion=0 создаёт серию; затем укажите revision и reason. Метод и шкалу выбирает агент, прогноз отдельно в ms. Обязателен expectedRequirementsDigest из GetAssessment без assessmentId, прочитанный до анализа. Таймер не запускается.",
+    RecordAssessment: "Записать оценку или неизменяемую ревизию. expectedVersion=0 создаёт серию; для новой ревизии передайте текущий номер ревизии в expectedVersion и причину в payload.reason. Метод и шкалу выбирает агент, прогноз отдельно в ms. Обязателен expectedRequirementsDigest из GetAssessment без assessmentId, прочитанный до анализа. Таймер не запускается.",
     GetAssessment: "Без assessmentId: прочитать текущие requirements/currentRequirementsDigest для анализа до первой оценки или пересмотра; stepId необязателен. С assessmentId: прочитать сохранённую ревизию (revision необязателен) и needsRevision; requirements в этом ответе относятся к сохранённому снимку.",
     GetEstimationHistory: "Факты и оценки по явным targets. Метрики ms раздельны, общий активный итог — объединение интервалов родителей. При пагинации сохраняйте asOf, throughSequence и nextAfterSequence как afterSequence. Окно дат относится к фактам времени, оценки читаются до asOf. Статистики относятся ко всей выборке фактов; readiness текущая. Время плана рассчитывается по рабочим интервалам.",
     CalculateEstimate: "Рассчитать медиану явных сопоставимых завершённых планов по серверным интервалам PLAN_ACTIVE. Профиль, отбор и покрытие являются утверждениями агента; текущие requirements и полное содержимое исходников проверяются на сервере. Read-only.",
