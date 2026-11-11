@@ -23,8 +23,10 @@ try{
   await page.clock.setSystemTime(new Date("2000-01-01T00:00:00Z")); // deliberate client/server wall-clock skew
   await page.route("**/*",async route=>{
    const req=route.request(),url=new URL(req.url());assert.equal(url.origin,"http://localhost","No external/production request");
-   const body=req.postDataJSON();if(body)posts.push(body);
+   const body=req.postDataJSON(),queuePass=req.method()==="POST"&&url.pathname==="/api/tracker/estimation-model/process"&&JSON.stringify(body)==="{}";
+   if(body&&!queuePass)posts.push(body);
    const response=await c.worker.fetch(new Request(req.url(),{method:req.method(),headers:{"content-type":"application/json","oai-authenticated-user-id":OWNER},...(req.postData()?{body:req.postData()}: {})}),{DB:c.db});
+   if(response.status>=500||(queuePass&&!response.ok))errors.push("HTTP "+response.status+" "+url.pathname);
    if(body?.commandType==="ClaimStepAttempt"&&loseClaim){loseClaim=false;return route.abort("failed");}
    if(body?.commandType==="StartStep"&&loseStart){loseStart=false;return route.abort("failed");}
    await route.fulfill({status:response.status,headers:Object.fromEntries(response.headers),body:await response.text()});
@@ -49,7 +51,7 @@ try{
     await card.getByLabel("Краткий результат",{exact:true}).fill("Draft before lease expiry");
     c.advance(600050);await page.clock.fastForward(600050);
     await page.waitForFunction(()=>document.querySelector(".tracker-card-status")?.textContent==="Срок попытки истёк");
-    assert.equal(posts.length,0,"expiry refresh is read-only");
+    assert.equal(posts.length,0,"expiry refresh sends no plan/attempt command; only separate POST {} queue maintenance is allowed");
    }
    const expired=["EXPIRED","ELAPSE"].includes(scenario);
    assert.equal(await card.locator(".tracker-card-status").textContent(),expired?"Срок попытки истёк":scenario==="UNSTARTED"?"Попытка ожидает запуска":"Нужна новая попытка");

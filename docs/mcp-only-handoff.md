@@ -1,5 +1,33 @@
 # MCP-only tracker: independent review handoff
 
+## ATLM для клиента без локального исполнителя
+
+Канонические правила — [atlm.md](atlm.md); автономная инструкция поставляется
+в assess-task. GetTrackerCapabilities объявляет `assessments.atlm` и действующие
+имена CalculateAtlmEstimate, GetPlanEstimate, GetEstimationModelStatus,
+ProcessEstimationTraining и GetAtlmDataset. Не выводите поддержку из версии сайта
+или плагина. Их публикация проверяется отдельно.
+
+Агент до StartPlan читает GetAssessment({planId}) без assessmentId, описывает
+проверяемые исходные признаки в context.agentTask и записывает RecordAssessment
+с predictionRequest и прочитанным expectedRequirementsDigest. Сервер сохраняет
+serverEstimation; агент не выбирает веса или длительности обучающих планов. При
+коллекции данных сохраняется UNKNOWN, при ошибке сервиса показывается ошибка.
+Первой модели может понадобиться больше пяти завершённых планов.
+
+В начале сеанса прочитайте GetEstimationModelStatus. При training.due=true
+выполните один ProcessEstimationTraining и продолжайте обычную разрешённую работу;
+обслуживание не регистрирует новый план. После новых пяти пригодных планов очередь
+проверяет модель на накопленной истории. После аварии обработка продолжается при
+следующем обращении. Без трафика гарантированный фоновый повтор не обещается.
+Точки прошлых прогнозов и их modelId сохраняются при передаче другому агенту.
+Остаток работы ATLM v1 не прогнозирует.
+
+
+## Историческая проверка удаления Git-зависимости
+
+Следующий отчёт описывает предыдущий этап; его HEAD и версии не являются состоянием выпуска ATLM.
+
 Prepared entirely in the cloud Codex workspace. Base: `04e05b5d1f23c18027831c1c038aa51a435de50e`. HEAD is unchanged; all implementation is an unstaged working diff. No commit, push, publication, production-data command or remote synchronization was performed. The existing Site was not changed by this task.
 
 ## Requirement and boundary

@@ -10,7 +10,7 @@ const isSnapshotDigest = value => typeof value === "string" && value.length === 
 const WRITE_COMMANDS = new Set(["CreatePlan", "StartPlan", "PausePlan", "ResumePlan", "FinishPlan", "UpdatePlanMetadata", "DeletePlan", "RestorePlan"]);
 const TRACKER_COMMANDS = new Set(["CreateStep", "UpdateStep", "ClaimStepAttempt", "RenewStepLease", "CloseStepAttempt", "StartStep", "BlockStep", "RecordStepResult", "RecordCheck", "AppendObservation", "RecordAssessment"]);
 const TRACKER_VERSIONED_COMMANDS = new Set(["UpdateStep", "ClaimStepAttempt", "StartStep", "BlockStep", "RecordStepResult"]);
-const TRACKER_READ_TOOLS = new Set(["GetTrackerCapabilities", "GetPlanExecutionSnapshot", "GetTimeline", "GetCommandReceipt", "GetAssessment", "GetEstimationHistory", "CalculateEstimate"]);
+const TRACKER_READ_TOOLS = new Set(["GetTrackerCapabilities", "GetPlanExecutionSnapshot", "GetTimeline", "GetCommandReceipt", "GetAssessment", "GetEstimationHistory", "CalculateEstimate", "CalculateAtlmEstimate", "GetPlanEstimate", "GetEstimationModelStatus", "GetAtlmDataset"]);
 const OBSERVATION_TYPES = new Set(["turn_started", "turn_finished", "tool_started", "tool_finished", "heartbeat", "gap", "correction"]);
 const UI_TIME_ZONES = [{ value: "Europe/Moscow", label: "Москва (UTC+3)" }, { value: "Asia/Omsk", label: "Омск (UTC+6)" }];
 export function resolveUiTimeZone(value) { return UI_TIME_ZONES.some((option) => option.value === value) ? value : "Asia/Omsk"; }
@@ -782,6 +782,9 @@ function messageFor(code) {
     RESULT_REVISION_STALE: "Основание проверки не совпадает с указанной ревизией результата.",
     ASSESSMENT_TARGET_CONFLICT: "Серия оценки уже привязана к другой цели.",
     ASSESSMENT_CONTEXT_CHANGED: "Требования изменились после анализа задачи. Перечитайте контекст и пересмотрите оценку.",
+    ATLM_FORECAST_SCOPE_CHANGED: "План уже запущен. Новый исходный прогноз сохранять нельзя.",
+    ATLM_MODEL_CHANGED: "Модель изменилась во время расчёта. Получите свежую оценку новой командой.",
+    DATASET_CHANGED: "Набор обучающих данных изменился. Начните выгрузку заново.",
     ASSESSMENT_SOURCE_NOT_FOUND: "Исторический источник оценки недоступен.",
     ACTIVE_ATTEMPT_EXISTS: "У этапа уже есть активная попытка.",
     LEASE_CONFLICT: "Попытка больше не владеет действующей арендой.",
@@ -818,7 +821,7 @@ function resultFromReceipt(row, replayed) {
       snapshot.error = code;
       if (code === "VERSION_CONFLICT" && Number.isSafeInteger(row.result_version) && snapshot.currentVersion === undefined) snapshot.currentVersion = row.result_version;
     }
-    const status = ["ASSESSMENT_TARGET_CONFLICT", "ASSESSMENT_CONTEXT_CHANGED", "VERSION_CONFLICT", "STEP_ALREADY_EXISTS", "ACTIVE_ATTEMPT_EXISTS", "LEASE_CONFLICT", "ATTEMPT_CLOSED", "RESULT_REVISION_STALE", "REPOSITORY_NOT_ATTACHED", "REPOSITORY_UNAVAILABLE", "STEP_NOT_STARTED", "LEASE_EXPIRED", "LEASE_FENCED", "REPOSITORY_ALREADY_ATTACHED", "CHECKPOINTS_INCOMPLETE", "REWORK_REQUIRED", "OBSERVATION_CONFLICT", "IDEMPOTENCY_KEY_REUSED", "COMMIT_EXCLUDED", "PLAN_DELETED", "PLAN_NOT_DELETED"].includes(code) ? 409 :
+    const status = ["ATLM_FORECAST_SCOPE_CHANGED", "ATLM_MODEL_CHANGED", "ASSESSMENT_TARGET_CONFLICT", "ASSESSMENT_CONTEXT_CHANGED", "VERSION_CONFLICT", "STEP_ALREADY_EXISTS", "ACTIVE_ATTEMPT_EXISTS", "LEASE_CONFLICT", "ATTEMPT_CLOSED", "RESULT_REVISION_STALE", "REPOSITORY_NOT_ATTACHED", "REPOSITORY_UNAVAILABLE", "STEP_NOT_STARTED", "LEASE_EXPIRED", "LEASE_FENCED", "REPOSITORY_ALREADY_ATTACHED", "CHECKPOINTS_INCOMPLETE", "REWORK_REQUIRED", "OBSERVATION_CONFLICT", "IDEMPOTENCY_KEY_REUSED", "COMMIT_EXCLUDED", "PLAN_DELETED", "PLAN_NOT_DELETED"].includes(code) ? 409 :
       ["PLAN_NOT_FOUND", "STEP_NOT_FOUND", "ATTEMPT_NOT_FOUND", "SESSION_NOT_FOUND", "EVENT_NOT_FOUND", "GITHUB_REPOSITORY_UNAVAILABLE"].includes(code) ? 404 :
           code === "PLAN_PAUSED" || code === "PLAN_COMPLETED" ? 409 :
         code === "GITHUB_AUTH_INVALID" ? 401 : code === "GITHUB_ACCESS_DENIED" ? 403 :
@@ -1056,12 +1059,12 @@ export async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
   return source;
 }
 
-export async function claimAtlmJob(db, ownerId, jobKey, nowMs, leaseMs = 60000) {
+export async function claimAtlmJob(db, ownerId, jobKey, nowMs, leaseMs = 60000, { allowExpiredLease = true } = {}) {
   if (!Number.isSafeInteger(nowMs) || !Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw appError("VALIDATION_ERROR", "Invalid ATLM lease.");
   return dbFirst(db, `UPDATE estimation_jobs SET status='RUNNING',lease_until=?,fence=fence+1,attempts=attempts+CASE WHEN status='QUEUED' AND checkpoint_json IS NOT NULL THEN 0 ELSE 1 END
     WHERE owner_id=? AND job_key=? AND generation>processed_generation AND next_attempt_at<=?
       AND status<>'FAILED' AND (attempts<4 OR (status='QUEUED' AND checkpoint_json IS NOT NULL AND attempts<=4))
-      AND (status<>'RUNNING' OR lease_until<=?) RETURNING *`, nowMs + leaseMs, ownerId, jobKey, nowMs, nowMs);
+      AND (? OR status<>'RUNNING') AND (status<>'RUNNING' OR lease_until<=?) RETURNING *`, nowMs + leaseMs, ownerId, jobKey, nowMs, allowExpiredLease ? 1 : 0, nowMs);
 }
 
 export async function persistAtlmSample(db, ownerId, source, nowMs, guard) {
@@ -1097,6 +1100,130 @@ export async function readAtlmSamples(db, ownerId, { latestOnly = true, afterSeq
   return rows.map(atlmSampleView);
 }
 
+const ATLM_TOOL_SCHEMAS = Object.freeze({
+  CalculateAtlmEstimate: { type: "object", additionalProperties: false, required: ["planId", "expectedRequirementsDigest", "agentTask"], properties: {
+    planId: { type: "string", format: "uuid" }, expectedRequirementsDigest: { type: "string", minLength: 71, maxLength: 71, pattern: "^sha256:[a-f0-9]{64}$" }, agentTask: AGENT_TASK_SCHEMA,
+  } },
+  GetPlanEstimate: { type: "object", additionalProperties: false, required: ["planId"], properties: { planId: { type: "string", format: "uuid" } } },
+  GetEstimationModelStatus: { type: "object", additionalProperties: false, properties: {} },
+  ProcessEstimationTraining: { type: "object", additionalProperties: false, properties: {} },
+  GetAtlmDataset: { type: "object", additionalProperties: false, properties: {
+    limit: { type: "integer", minimum: 1, maximum: 100, default: 50 }, cursor: { type: "string", minLength: 1, maxLength: 1024 },
+  } },
+});
+// This predicate is evaluated inside the receipt INSERT, after asynchronous inference.
+// It checks the current owner pointer and manifest, not just the immutable artifact ID.
+const ATLM_CURRENT_MODEL_SQL = `SELECT 1 FROM estimation_models m JOIN estimation_owner_state o
+  ON o.owner_id=m.owner_id AND o.active_model_id=m.model_id
+  WHERE m.owner_id=? AND m.model_id=? AND m.status='ACTIVE' AND m.method_version='agent-v1' AND m.feature_version='agent-task-v1'
+    AND NOT EXISTS(SELECT 1 FROM json_each(m.manifest_json) item
+      LEFT JOIN estimation_samples s ON s.owner_id=m.owner_id AND s.sequence=CAST(item.value AS INTEGER)
+      WHERE s.sequence IS NULL OR s.eligibility<>'ELIGIBLE'
+        OR s.sequence<>(SELECT MAX(latest.sequence) FROM estimation_samples latest WHERE latest.owner_id=s.owner_id AND latest.plan_id=s.plan_id)
+        OR EXISTS(SELECT 1 FROM estimation_jobs dirty WHERE dirty.owner_id=s.owner_id AND dirty.plan_id=s.plan_id
+          AND dirty.kind='REFRESH_SAMPLE' AND dirty.generation>dirty.processed_generation))`;
+
+async function atlmPlanContext(db, ownerId, planId) {
+  const row = await dbFirst(db, `SELECT p.first_started_at,p.deleted_at,t.requirements_json FROM plans p
+    JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id AND t.step_id IS NULL
+    WHERE p.owner_id=? AND p.plan_id=?`, ownerId, planId);
+  if (!row || row.deleted_at !== null) throw appError("PLAN_NOT_FOUND", messageFor("PLAN_NOT_FOUND"), 404);
+  return { ...row, requirementsDigest: "sha256:" + await hashCommandInput(JSON.parse(row.requirements_json)) };
+}
+async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
+  validateAssessmentValue(args, ATLM_TOOL_SCHEMAS.CalculateAtlmEstimate);
+  if (!isSnapshotDigest(args.expectedRequirementsDigest)) throw appError("VALIDATION_ERROR", "Invalid requirements digest.");
+  const target = await atlmPlanContext(db, ownerId, args.planId);
+  if (target.requirementsDigest !== args.expectedRequirementsDigest) throw appError("ASSESSMENT_CONTEXT_CHANGED", messageFor("ASSESSMENT_CONTEXT_CHANGED"), 409);
+  const normalized = normalizeAgentTaskV1(args.agentTask);
+  let prediction;
+  if (target.first_started_at !== null) prediction = { status: "UNAVAILABLE", unavailableReason: "UNSUPPORTED_FORECAST_SCOPE" };
+  else if (normalized.missingFields.length) prediction = { status: "UNAVAILABLE", unavailableReason: "INCOMPLETE_FEATURES", missingFields: normalized.missingFields };
+  else prediction = await predictWithActiveModel(db, ownerId, normalized.features, nowMs);
+  return { formatVersion: 1, metric: "PLAN_ACTIVE", forecastScope: "FULL_FROM_FIRST_START", method: { ...ATLM_METHOD },
+    status: prediction.status, pointMs: prediction.pointMs ?? null, modelId: prediction.modelId ?? null, modelVersion: prediction.modelVersion ?? null,
+    requirementsDigest: target.requirementsDigest, featureDigest: "sha256:" + await hashCommandInput(normalized.features), calculatedAt: nowMs,
+    sampleCount: prediction.sampleCount ?? 0, evaluation: prediction.evaluation ?? null,
+    accuracy: prediction.accuracy ?? "NOT_VALIDATED", interval: null, confidence: "UNKNOWN",
+    unavailableReason: prediction.unavailableReason ?? null, ...(prediction.missingFields ? { missingFields: prediction.missingFields } : {}) };
+}
+
+async function getPlanEstimate(db, ownerId, args, nowMs) {
+  validateAssessmentValue(args, ATLM_TOOL_SCHEMAS.GetPlanEstimate);
+  const row = await dbFirst(db, `SELECT p.first_started_at,p.deleted_at,t.requirements_json AS current_requirements_json,
+      a.assessment_id,a.revision,a.requirements_digest,a.assessment_json
+    FROM plans p JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id AND t.step_id IS NULL
+    LEFT JOIN plan_estimation_inputs i ON i.owner_id=p.owner_id AND i.plan_id=p.plan_id
+    LEFT JOIN assessment_revisions a ON a.owner_id=p.owner_id AND a.plan_id=p.plan_id AND a.sequence=CASE
+      WHEN p.first_started_at IS NOT NULL THEN i.assessment_sequence
+      ELSE (SELECT MAX(latest.sequence) FROM assessment_revisions latest WHERE latest.owner_id=p.owner_id AND latest.plan_id=p.plan_id
+        AND latest.step_id IS NULL AND json_type(latest.assessment_json,'$.serverEstimation')='object') END
+    WHERE p.owner_id=? AND p.plan_id=?`, ownerId, args.planId);
+  if (!row) throw appError("PLAN_NOT_FOUND", messageFor("PLAN_NOT_FOUND"), 404);
+  const serverEstimation = row.assessment_json ? JSON.parse(row.assessment_json).serverEstimation ?? null : null;
+  const staleReasons = [];
+  if (serverEstimation) {
+    if (row.deleted_at !== null) staleReasons.push("PLAN_DELETED");
+    const digest = "sha256:" + await hashCommandInput(JSON.parse(row.current_requirements_json));
+    if (digest !== row.requirements_digest) staleReasons.push("SCOPE_CHANGED");
+    else if (row.first_started_at !== null && (await readAtlmSampleSource(db, ownerId, args.planId, nowMs)).reasons.includes("SCOPE_CHANGED")) staleReasons.push("SCOPE_CHANGED");
+    if (serverEstimation.modelId) {
+      const model = await dbFirst(db, `SELECT m.status,
+        EXISTS(SELECT 1 FROM json_each(m.manifest_json) item LEFT JOIN estimation_samples s
+          ON s.owner_id=m.owner_id AND s.sequence=CAST(item.value AS INTEGER)
+          LEFT JOIN estimation_jobs j ON j.owner_id=s.owner_id AND j.job_key='refresh:'||s.plan_id
+          WHERE s.sequence IS NULL OR j.generation<>s.source_generation
+            OR s.sequence<>(SELECT MAX(latest.sequence) FROM estimation_samples latest WHERE latest.owner_id=s.owner_id AND latest.plan_id=s.plan_id)) AS source_changed
+        FROM estimation_models m WHERE m.owner_id=? AND m.model_id=?`, ownerId, serverEstimation.modelId);
+      if (!model || model.status === "INVALIDATED" || model.source_changed) staleReasons.push("MODEL_INVALIDATED");
+    }
+  }
+  return { formatVersion: 1, planId: args.planId, assessmentId: row.assessment_id ?? null, assessmentRevision: row.revision ?? null,
+    source: row.first_started_at !== null ? "FROZEN_INPUT" : row.assessment_id ? "LATEST_ASSESSMENT" : "NONE",
+    serverEstimation, isStale: staleReasons.length > 0, staleReasons, serverNow: nowMs };
+}
+
+async function getAtlmDataset(db, ownerId, args, nowMs) {
+  validateAssessmentValue(args, ATLM_TOOL_SCHEMAS.GetAtlmDataset);
+  const limit = args.limit ?? 50, ownerScope = await hashCommandInput({ purpose: "atlm-dataset-cursor-v1", ownerId });
+  let cursor = null;
+  if (args.cursor !== undefined) {
+    try { cursor = JSON.parse(args.cursor); } catch { throw appError("VALIDATION_ERROR", "Invalid dataset cursor."); }
+    if (!cursor || typeof cursor !== "object" || Array.isArray(cursor) || Object.keys(cursor).length !== 6
+      || cursor.version !== 1 || cursor.ownerScope !== ownerScope
+      || !["datasetRevision", "asOf", "afterSequence", "throughSequence"].every(key => Number.isSafeInteger(cursor[key]) && cursor[key] >= 0)
+      || cursor.asOf > nowMs || cursor.afterSequence > cursor.throughSequence) throw appError("VALIDATION_ERROR", "Invalid dataset cursor.");
+  }
+  const asOf = cursor?.asOf ?? nowMs;
+  // Revision, high-water mark and page share one SQLite read snapshot.
+  const snapshot = await dbFirst(db, `WITH snapshot AS (
+      SELECT COALESCE((SELECT dataset_revision FROM estimation_owner_state WHERE owner_id=?),0) AS revision,
+        COALESCE((SELECT MAX(sequence) FROM estimation_samples WHERE owner_id=? AND observed_at<=?),0) AS through_sequence
+    ), page AS (
+      SELECT s.* FROM estimation_samples s WHERE s.owner_id=? AND s.sequence>? AND s.observed_at<=?
+        AND s.sequence<=COALESCE(?,(SELECT through_sequence FROM snapshot)) ORDER BY s.sequence LIMIT ?
+    ) SELECT revision,through_sequence,
+      (SELECT json_group_array(json_object('sequence',sequence,'plan_id',plan_id,'input_assessment_sequence',input_assessment_sequence,
+        'source_digest',source_digest,'source_generation',source_generation,'eligibility',eligibility,'reasons_json',reasons_json,
+        'features_json',features_json,'issued_prediction_json',issued_prediction_json,'actual_ms',actual_ms,'captured_at',captured_at,
+        'source_available_at',source_available_at,'observed_at',observed_at,'is_first_eligible',is_first_eligible)) FROM page) AS rows_json
+    FROM snapshot`, ownerId, ownerId, asOf, ownerId, cursor?.afterSequence ?? 0, asOf, cursor?.throughSequence ?? null, limit + 1);
+  if (cursor && cursor.datasetRevision !== snapshot.revision) throw appError("DATASET_CHANGED", messageFor("DATASET_CHANGED"), 409);
+  const rows = JSON.parse(snapshot.rows_json).map(atlmSampleView), hasMore = rows.length > limit;
+  if (hasMore) rows.pop();
+  const nextCursor = hasMore ? JSON.stringify({ version: 1, ownerScope, datasetRevision: snapshot.revision, asOf,
+    afterSequence: Number(rows.at(-1).sampleId), throughSequence: cursor?.throughSequence ?? snapshot.through_sequence }) : null;
+  return { formatVersion: 1, datasetRevision: snapshot.revision, asOf, rows, hasMore, nextCursor, serverNow: nowMs };
+}
+async function executeAtlmTool(db, ownerId, name, args, nowMs, clock) {
+  validateAssessmentValue(args, ATLM_TOOL_SCHEMAS[name]);
+  if (name === "CalculateAtlmEstimate") return calculateAtlmEstimate(db, ownerId, args, nowMs);
+  if (name === "GetPlanEstimate") return getPlanEstimate(db, ownerId, args, nowMs);
+  if (name === "GetAtlmDataset") return getAtlmDataset(db, ownerId, args, nowMs);
+  if (name === "GetEstimationModelStatus") return getEstimationModelStatus(db, ownerId, nowMs);
+  return processEstimationTraining(db, ownerId, nowMs, { clock });
+}
+
 const FORECAST_METRICS = ["PLAN_ACTIVE", "CALENDAR", "PAUSED", "STEP_ATTRIBUTED", "ATTEMPT", "TOOL"];
 const assessmentPayloadSchema = {
   type: "object", additionalProperties: false,
@@ -1105,6 +1232,7 @@ const assessmentPayloadSchema = {
     assessmentId: { type: "string", format: "uuid" }, planId: { type: "string", format: "uuid" }, stepId: { type: "string", format: "uuid" },
     expectedRequirementsDigest: { type: "string", pattern: "^sha256:[a-f0-9]{64}$", description: "Digest of the requirements read by the agent before assessing; never refresh it just to retry a write" },
     context: { type: "object", properties: { agentTask: AGENT_TASK_SCHEMA }, description: "Bounded JSON: expected result, scope and checks" },
+    predictionRequest: { type: "object", additionalProperties: false, required: ["method", "methodVersion"], properties: { method: { enum: ["ATLM"] }, methodVersion: { enum: [1] } } },
     method: { type: "object", additionalProperties: false, required: ["id", "version", "scale"], properties: {
       id: { type: "string", minLength: 1, maxLength: 128 }, version: { type: "string", minLength: 1, maxLength: 128 }, scale: { description: "Agent-declared scale, bounded JSON" },
     } },
@@ -1158,6 +1286,7 @@ function validateAssessmentCommand(envelope) {
   if (new TextEncoder().encode(JSON.stringify(envelope.payload)).length > 24000) throw appError("VALIDATION_ERROR", "Assessment exceeds 24000 UTF-8 bytes.");
   const p = envelope.payload, f = p.forecast, c = p.complexity;
   if (Object.hasOwn(p.context, "agentTask")) normalizeAgentTaskV1(p.context.agentTask);
+  if (p.predictionRequest && (p.stepId !== undefined || !Object.hasOwn(p.context, "agentTask"))) throw appError("VALIDATION_ERROR", "predictionRequest requires plan-level agentTask v1.");
   if (!isSnapshotDigest(p.expectedRequirementsDigest)) throw appError("VALIDATION_ERROR", "expectedRequirementsDigest must identify the requirements assessed by the agent.");
   if (p.method.scale === null || p.method.scale === "") throw appError("VALIDATION_ERROR", "Declare the assessment scale.");
   if ((c.status === "UNKNOWN") !== (c.value === null)) throw appError("VALIDATION_ERROR", "Unknown complexity requires null; known complexity requires a value.");
@@ -1690,6 +1819,7 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
     planId = step ? step.plan_id : null;
   }
   let payload = { ...input };
+  let predictionPreparationError = null;
   const addEvent = async (event, eventId = crypto.randomUUID()) => ({
     eventId: eventId,
     eventPayloadJson: canonical(event),
@@ -1699,8 +1829,23 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
   if (envelope.commandType === "RecordAssessment") {
     const target = await assessmentTarget(db, identity.ownerId, input.planId, input.stepId);
     const requirementsJson = target?.requirements_json || "{}";
-    const storedInput = Object.hasOwn(input.context, "agentTask") ? { ...input, context: { ...input.context, agentTask: normalizeAgentTaskV1(input.context.agentTask).agentTask } } : input;
-    Object.assign(payload, { assessmentJson: JSON.stringify(storedInput), requirementsJson,
+    let storedInput = Object.hasOwn(input.context, "agentTask") ? { ...input, context: { ...input.context, agentTask: normalizeAgentTaskV1(input.context.agentTask).agentTask } } : input;
+    if (input.predictionRequest) {
+      try {
+        const serverEstimation = await calculateAtlmEstimate(db, identity.ownerId, { planId: input.planId,
+          expectedRequirementsDigest: input.expectedRequirementsDigest, agentTask: storedInput.context.agentTask }, nowMs);
+        if (serverEstimation.unavailableReason === "UNSUPPORTED_FORECAST_SCOPE") predictionPreparationError = "ATLM_FORECAST_SCOPE_CHANGED";
+        else storedInput = { ...storedInput, serverEstimation };
+      } catch (error) {
+        // Domain rejection must be receipted, so a later context change cannot turn
+        // the same command into a successful write. Genuine source failures still throw.
+        if (error instanceof AppError && ["ASSESSMENT_CONTEXT_CHANGED", "PLAN_NOT_FOUND"].includes(error.code)) predictionPreparationError = error.code;
+        else throw error;
+      }
+    }
+    const assessmentJson = JSON.stringify(storedInput);
+    if (new TextEncoder().encode(assessmentJson).length > 24000) throw appError("VALIDATION_ERROR", "Assessment with server estimation exceeds 24000 UTF-8 bytes.");
+    Object.assign(payload, { assessmentJson, requirementsJson,
       requirementsDigest: "sha256:" + await hashCommandInput(JSON.parse(requirementsJson)),
       ...await addEvent({ assessmentId: input.assessmentId, revision: envelope.expectedVersion + 1 }),
     });
@@ -1815,9 +1960,25 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
   const actorType = channel === "mcp" ? "agent" : "user";
   let receiptInserted = false;
   try {
-    const write = await db.prepare("INSERT OR IGNORE INTO command_receipts (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?)")
-      .bind(identity.ownerId, envelope.commandId, hash, envelope.commandType, planId, envelope.expectedVersion == null ? null : envelope.expectedVersion, nowMs,
-        identity.ownerId, actorType, JSON.stringify(payload), nowMs).run();
+    const values = [identity.ownerId, envelope.commandId, hash, envelope.commandType, planId,
+      envelope.expectedVersion == null ? null : envelope.expectedVersion, nowMs, identity.ownerId, actorType, JSON.stringify(payload)];
+    let write;
+    if (envelope.commandType === "RecordAssessment" && input.predictionRequest) {
+      const modelId = JSON.parse(payload.assessmentJson).serverEstimation?.modelId ?? null;
+      write = await db.prepare(`INSERT OR IGNORE INTO command_receipts
+        (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,result_json,recorded_at)
+        SELECT ?,?,?,?,?,?,?,?,?,?,CASE
+          WHEN NOT EXISTS(SELECT 1 FROM plans WHERE owner_id=? AND plan_id=?) THEN 'PLAN_NOT_FOUND'
+          WHEN EXISTS(SELECT 1 FROM plans WHERE owner_id=? AND plan_id=? AND deleted_at IS NOT NULL) THEN 'PLAN_DELETED'
+          WHEN EXISTS(SELECT 1 FROM plans WHERE owner_id=? AND plan_id=? AND first_started_at IS NOT NULL) THEN 'ATLM_FORECAST_SCOPE_CHANGED'
+          WHEN ? IS NOT NULL THEN ?
+          WHEN ? IS NOT NULL AND NOT EXISTS(${ATLM_CURRENT_MODEL_SQL}) THEN 'ATLM_MODEL_CHANGED'
+          ELSE 'PENDING' END,?,?`).bind(...values, identity.ownerId, planId, identity.ownerId, planId,
+            identity.ownerId, planId, predictionPreparationError, predictionPreparationError, modelId, identity.ownerId, modelId, JSON.stringify({ serverNow: nowMs }), nowMs).run();
+    } else {
+      write = await db.prepare("INSERT OR IGNORE INTO command_receipts (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?)")
+        .bind(...values, nowMs).run();
+    }
     receiptInserted = Number(write.meta?.changes) > 0;
   } catch (error) { throw mapDbError(error); }
   receipt = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=?", identity.ownerId, envelope.commandId);
@@ -2224,6 +2385,11 @@ async function readTrackerCapabilities(db, ownerId) {
       forecastUnits: "ms", forecastMetrics: FORECAST_METRICS, initialExpectedVersion: 0, requirementsDigest: true,
       contextRead: { tool: "GetAssessment", omitAssessmentId: true }, expectedRequirementsDigestRequired: true,
       historyMaxTargets: 20, historyMaxLimit: 100, methodologyControlsExecution: false,
+      atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, featureSchemaVersion: "agent-task-v1", metric: "PLAN_ACTIVE",
+        predictionScope: "FULL_FROM_FIRST_START", retrainEveryNewPlans: 5,
+        calculateTool: "CalculateAtlmEstimate", planEstimateTool: "GetPlanEstimate", modelStatusTool: "GetEstimationModelStatus",
+        processTool: "ProcessEstimationTraining", datasetTool: "GetAtlmDataset", predictionRequest: { method: "ATLM", methodVersion: 1 },
+        limits: { maxTrainingSamples: 5000, datasetDefaultLimit: 50, datasetMaxLimit: 100, maxOutcomes: 20, maxChangedContracts: 20, maxVerificationKinds: 5 } },
       calculator: { tool: "CalculateEstimate", formatVersion: 1,
         method: { id: "reference-class-median", version: "1" }, metrics: ["PLAN_ACTIVE"],
         maxCandidates: 20, readOnly: true, accuracy: "NOT_VALIDATED" } },
@@ -3025,6 +3191,114 @@ const UI_TRACKER = String.raw`(()=> {
   const observer=new MutationObserver(()=>{renderTracker(false).catch(()=>{});});observer.observe(root,{childList:true});
 })();`;
 
+const UI_ATLM = String.raw`(()=>{
+  const planRoot=document.querySelector("#planDetail"),settingsRoot=document.querySelector("#view-settings .settings-grid");
+  if(!planRoot||!settingsRoot)return;
+  const make=(tag,text,cls)=>{const el=document.createElement(tag);if(text!=null)el.textContent=text;if(cls)el.className=cls;return el;};
+  const button=(text,action)=>{const el=make("button",text);el.type="button";el.addEventListener("click",action);return el;};
+  const minutes=value=>new Intl.NumberFormat("ru-RU",{maximumFractionDigits:1}).format(value/60000)+" мин";
+  const count=value=>Number.isSafeInteger(value)&&value>=0?value:0;
+  const reasons={COLLECTING_DATA:"Пока недостаточно проверенных завершённых планов.",INCOMPLETE_FEATURES:"Для прогноза не хватает исходных сведений о задаче.",UNSUPPORTED_CATEGORY:"В накопленной истории ещё нет опыта для этого вида задачи.",MODEL_INVALIDATED:"Исходные данные модели изменились; требуется пересборка.",INVALID_PREDICTION:"Модель не смогла получить корректную оценку.",UNSUPPORTED_FORECAST_SCOPE:"Прогноз доступен для полного плана до первого запуска.",DATASET_LIMIT_REACHED:"Накопленные данные сохранены, но превышен текущий предел обучения.",RANK_DEFICIENT:"Данных пока недостаточно для независимой оценки влияния признаков.",INSUFFICIENT_DATA:"Пока недостаточно пригодных данных для обучения и проверки.",INSUFFICIENT_VALIDATION:"Пока недостаточно случаев для проверки новой модели.",INSUFFICIENT_EVALUATION_CASES:"Нужно не менее пяти случаев с прогнозами, проверенными на более поздних результатах.",INSUFFICIENT_INCUMBENT_CASES:"Нужно не менее пяти новых случаев для сравнения с действующей моделью.",MEDIAN_BASELINE_BETTER:"Новая модель ошибается сильнее обычной медианы прошлых длительностей.",CANDIDATE_COVERAGE_WORSE:"Новая модель даёт прогноз для меньшей доли задач, чем действующая.",CANDIDATE_MAE_WORSE:"Средняя ошибка новой модели выше, чем у действующей.",SNAPSHOT_INVALIDATED:"Исходные данные изменились; подготовлена новая попытка обучения.",LEASE_EXPIRED:"Предыдущая обработка не завершилась вовремя; её состояние сохранено.",TRAINING_EXECUTION_FAILED:"Во время обучения произошёл технический сбой.",SOURCE_UNAVAILABLE:"Источник данных временно недоступен.",INVALID_ESTIMATION_SOURCE:"Сохранённый источник оценки не удалось проверить.",MISSING_FEATURES:"До первого запуска не сохранены исходные признаки.",INVALID_FEATURES:"Исходные признаки не соответствуют схеме.",PLAN_DELETED:"План удалён.",PLAN_NOT_COMPLETED:"План ещё не завершён.",RESULT_NOT_VERIFIED:"Результат и обязательные проверки не подтверждены.",SCOPE_CHANGED:"После начала изменился объём задачи.",INCOMPLETE_MEASUREMENT:"Нет полного подтверждённого измерения активного времени."};
+  const statuses={IDLE:"Ожидание новых планов",QUEUED:"Обучение в очереди",RUNNING:"Модель обучается",RETRY_WAIT:"Ожидание повторной попытки",COLLECTING_DATA:"Накапливаем опыт",REJECTED:"Новая модель не прошла проверку",FAILED:"Не удалось завершить обучение"};
+  const style=make("style");style.textContent=".atlm-panel{min-width:0;overflow-wrap:anywhere}.atlm-panel p{margin:9px 0}.atlm-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.atlm-heading h2,.atlm-heading h3{margin:0}.atlm-panel button{min-height:42px;white-space:normal}.atlm-controls{display:flex;gap:8px;flex-wrap:wrap}.atlm-point{font-size:1.35rem;font-weight:700;color:var(--ink)}.atlm-plan-estimate{margin:18px 0;padding:16px;border:1px solid var(--line-strong,var(--line));border-radius:var(--radius,10px);background:var(--paper-3,var(--panel))}.atlm-note{color:var(--ink-2,var(--muted));font-size:.9rem}.atlm-stale{border-left:3px solid var(--amber,#a56a16);padding-left:10px}@media(max-width:390px){.atlm-heading{align-items:flex-start}.atlm-controls{width:100%}.atlm-controls button{flex:1 1 100%}}";document.head.append(style);
+  let supported=false,capabilityPending=false,planToken=0,planAbort=null,statusPending=null,pollTimer=null,pollsLeft=0,autoBudget=8,processPending=false,lastProcessFailure=null;
+  const processed=new Set();
+  const statusPanel=make("article",null,"panel atlm-panel");statusPanel.id="atlm-model-status";statusPanel.setAttribute("aria-labelledby","atlm-model-heading");
+  const statusHeading=make("h2","Накопление опыта");statusHeading.id="atlm-model-heading";
+  const statusBody=make("div");statusBody.setAttribute("role","status");statusBody.setAttribute("aria-live","polite");
+  const refreshStatus=button("Обновить состояние обучения",()=>loadStatus(false));
+  const resume=button("Продолжить обработку",()=>{autoBudget=8;processed.clear();lastProcessFailure=null;pollsLeft=3;loadStatus(true);});resume.hidden=true;
+  const controls=make("div",null,"atlm-controls");controls.append(refreshStatus,resume);statusPanel.append(statusHeading,statusBody,controls);
+  async function api(path,options={}){
+    const response=await fetch(path,{cache:"no-store",...options,headers:{"content-type":"application/json",...options.headers}});
+    const data=await response.json().catch(()=>null);
+    if(!response.ok){const error=new Error(data?.error?.message||"Не удалось получить ответ сервера.");error.code=data?.error?.code;throw error;}
+    if(!data||typeof data!=="object")throw new Error("Сервер вернул неполный ответ. Повторите загрузку.");return data;
+  }
+  function reasonText(reason){return reasons[reason]||"Причина: "+String(reason)+".";}
+  function showStatus(data){
+    if(!data.training||!statuses[data.training.status]||![data.newPlansSinceTraining,data.eligibleSampleCount,data.excludedSampleCount].every(value=>Number.isSafeInteger(value)&&value>=0)||!Number.isSafeInteger(data.retrainEveryNewPlans)||data.retrainEveryNewPlans<1||typeof data.training.due!=="boolean"||!Object.hasOwn(data,"activeModel")||(data.activeModel!==null&&(!Number.isSafeInteger(data.activeModel.sampleCount)||data.activeModel.sampleCount<1)))throw new Error("Не удалось прочитать состояние обучения.");
+    const exclusionsOpen=statusBody.querySelector("details")?.open===true;
+    statusBody.replaceChildren();statusBody.append(make("p",statuses[data.training.status]));
+    statusBody.append(make("p",count(data.newPlansSinceTraining)+" новых пригодных планов из "+data.retrainEveryNewPlans+" до следующей попытки обучения."));
+    statusBody.append(make("p","Всего пригодных планов: "+count(data.eligibleSampleCount)+". Исключено: "+count(data.excludedSampleCount)+".","atlm-note"));
+    if(Array.isArray(data.exclusionReasons)&&data.exclusionReasons.length){
+      const disclosure=make("details"),list=make("ul");disclosure.open=exclusionsOpen;disclosure.append(make("summary","Почему планы не учитываются"));
+      for(const item of data.exclusionReasons)if(typeof item.reason==="string"&&Number.isSafeInteger(item.count)&&item.count>0)list.append(make("li",reasonText(item.reason)+" Планов: "+item.count+"."));
+      disclosure.append(list,make("p","У одного плана может быть несколько причин.","atlm-note"));statusBody.append(disclosure);
+    }
+    if(data.activeModel)statusBody.append(make("p","Действующая модель: "+String(data.activeModel.modelVersion||data.activeModel.modelId)+". В обучении использовано планов: "+count(data.activeModel.sampleCount)+".","atlm-note"));
+    else statusBody.append(make("p","Первой модели может понадобиться больше пяти планов: нужны данные для обучения и отдельной проверки.","atlm-note"));
+    if(data.training.status==="REJECTED"&&data.activeModel)statusBody.append(make("p","Предыдущая пригодная модель продолжает давать прогнозы.","atlm-note"));
+    if(data.training.progress&&Number.isSafeInteger(data.training.progress.totalCases)&&data.training.progress.totalCases>0)statusBody.append(make("p","Проверено случаев: "+count(data.training.progress.completedCases)+" из "+data.training.progress.totalCases+".","atlm-note"));
+    if(data.training.status==="RETRY_WAIT"&&Number.isFinite(data.training.nextAttemptAt))statusBody.append(make("p","Повторная попытка не раньше "+new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short",timeZone:document.querySelector("#tz")?.value||"UTC"}).format(new Date(data.training.nextAttemptAt))+".","atlm-note"));
+    const reason=data.lastError||data.lastReason;if(reason)statusBody.append(make("p",reasonText(reason),data.lastError?"error":"atlm-note"));
+    if(lastProcessFailure)statusBody.append(make("p",lastProcessFailure,"error"));
+    resume.hidden=!data.training.due||(autoBudget>0&&!processed.has(queueKey(data)));resume.disabled=processPending;
+  }
+  function queueKey(data){const t=data.training;return JSON.stringify([data.datasetRevision,t.generation,t.progressRevision,t.pendingRefreshCount,t.nextAttemptAt]);}
+  function schedulePoll(){clearTimeout(pollTimer);if(pollsLeft>0){pollsLeft--;pollTimer=setTimeout(()=>loadStatus(true),750);}}
+  function loadStatus(allowProcess=true){
+    if(!supported)return Promise.resolve();if(statusPending)return statusPending;
+    statusPanel.setAttribute("aria-busy","true");refreshStatus.disabled=true;
+    statusPending=(async()=>{
+      try{
+        const data=await api("/api/tracker/estimation-model");showStatus(data);
+        const key=queueKey(data);
+        if(allowProcess&&data.training.due&&!processPending&&autoBudget>0&&!processed.has(key)){
+          processed.add(key);autoBudget--;processPending=true;resume.disabled=true;
+          try{await api("/api/tracker/estimation-model/process",{method:"POST",body:"{}"});lastProcessFailure=null;pollsLeft=Math.max(pollsLeft,3);}
+          catch(error){lastProcessFailure="Не удалось продолжить обучение. "+error.message;statusBody.append(make("p",lastProcessFailure,"error"));resume.hidden=false;}
+          finally{processPending=false;resume.disabled=false;}
+          schedulePoll();
+        }else if(allowProcess&&(data.training.status==="RUNNING"||data.training.due))schedulePoll();
+      }catch(error){statusBody.replaceChildren(make("p","Не удалось загрузить состояние обучения. "+error.message,"error"));resume.hidden=true;}
+      finally{statusPending=null;refreshStatus.disabled=false;statusPanel.removeAttribute("aria-busy");}
+    })();return statusPending;
+  }
+  async function loadPlan(planId){
+    if(!supported||!planId||planRoot.dataset.planId!==planId)return;
+    const token=++planToken;planAbort?.abort();planAbort=new AbortController();
+    planRoot.querySelector(".atlm-plan-estimate")?.remove();
+    const panel=make("section",null,"atlm-panel atlm-plan-estimate");panel.dataset.planId=planId;panel.setAttribute("aria-labelledby","atlm-plan-heading");panel.setAttribute("aria-busy","true");
+    const heading=make("h3","Прогноз активного времени");heading.id="atlm-plan-heading";
+    const toolbar=make("div",null,"atlm-heading"),refresh=button("Обновить прогноз",()=>loadPlan(planId));toolbar.append(heading,refresh);
+    const body=make("div","Загружаю сохранённую оценку…");body.setAttribute("role","status");body.setAttribute("aria-live","polite");panel.append(toolbar,body);planRoot.insertBefore(panel,planRoot.children[2]||null);
+    refresh.disabled=true;
+    try{
+      const data=await api("/api/tracker/plans/"+encodeURIComponent(planId)+"/estimate",{signal:planAbort.signal});
+      if(token!==planToken||planRoot.dataset.planId!==planId||!panel.isConnected)return;
+      if(data.planId!==planId)throw new Error("Ответ относится к другому плану. Повторите загрузку.");
+      if(!Object.hasOwn(data,"serverEstimation")||typeof data.isStale!=="boolean")throw new Error("Сервер вернул неполную оценку. Повторите загрузку.");
+      body.replaceChildren();const estimate=data.serverEstimation;
+      if(estimate==null){body.append(make("p","Исходная оценка до запуска не сохранена.","atlm-note"));}
+      else if(estimate.status==="AVAILABLE"&&Number.isFinite(estimate.pointMs)&&estimate.pointMs>=0){
+        body.append(make("p","Около "+minutes(estimate.pointMs),"atlm-point"));
+        body.append(make("p","Полное активное время от первого запуска. Паузы исключены; подготовка оценки до запуска не входит.","atlm-note"));
+        if(estimate.modelVersion||estimate.modelId)body.append(make("p","Модель: "+String(estimate.modelVersion||estimate.modelId)+".","atlm-note"));
+        const evaluation=estimate.evaluation;
+        if(evaluation&&Number.isFinite(evaluation.maeMs)&&evaluation.maeMs>=0&&Number.isSafeInteger(evaluation.caseCount)&&evaluation.caseCount>0)body.append(make("p","Средняя ошибка прошлых проверок: "+minutes(evaluation.maeMs)+". Проверено случаев: "+count(evaluation.caseCount)+". Это не гарантия длительности.","atlm-note"));
+      }else if(estimate.status==="UNAVAILABLE"){
+        body.append(make("p",reasonText(estimate.unavailableReason||"COLLECTING_DATA"),"atlm-note"));
+        body.append(make("p","Исходные признаки сохраняются; разрешённую работу можно продолжать.","atlm-note"));
+      }else throw new Error("Сервер вернул некорректную оценку.");
+      if(data.isStale)body.append(make("p","Оценка устарела: изменился объём задачи или исходные данные модели. Сохранённое значение показано для истории.","atlm-stale"));
+    }catch(error){if(token!==planToken||planRoot.dataset.planId!==planId||error.name==="AbortError")return;body.replaceChildren(make("p","Не удалось загрузить прогноз. "+error.message,"error"));}
+    finally{if(token===planToken&&panel.isConnected){refresh.disabled=false;panel.removeAttribute("aria-busy");}}
+  }
+  async function discover(){
+    if(capabilityPending)return;capabilityPending=true;
+    try{const capabilities=await api("/api/tracker/capabilities");supported=!!capabilities.assessments?.atlm;if(!supported){statusPanel.remove();return;}if(!statusPanel.isConnected)settingsRoot.append(statusPanel);pollsLeft=3;await loadStatus(true);if(planRoot.dataset.planId)await loadPlan(planRoot.dataset.planId);}
+    catch(error){if(!statusPanel.isConnected)settingsRoot.append(statusPanel);statusBody.replaceChildren(make("p","Не удалось проверить поддержку прогноза. "+error.message,"error"),button("Повторить проверку прогноза",discover));controls.hidden=true;}
+    finally{capabilityPending=false;if(supported)controls.hidden=false;}
+  }
+  window.addEventListener("plan-time-tracker:plan-will-render",()=>{planToken++;planAbort?.abort();});
+  window.addEventListener("plan-time-tracker:plan-rendered",event=>{loadPlan(event.detail?.planId);loadStatus(true);});
+  document.querySelector('[data-view="settings"]')?.addEventListener("click",()=>{pollsLeft=3;loadStatus(true);});
+  window.addEventListener("pagehide",()=>{clearTimeout(pollTimer);planAbort?.abort();});
+  discover();
+})();`;
+
 const UI_ACCESSIBILITY = String.raw`(()=>{
  const modal=document.querySelector('#modal');
  document.addEventListener('keydown',event=>{
@@ -3067,7 +3341,7 @@ function uiHtml() {
     "<div id=\"modal\" class=\"modal hidden\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"modalTitle\"><div class=\"modalbox\"><div class=\"toolbar\"><h2 id=\"modalTitle\" style=\"flex:1\">Новый план</h2><button id=\"close\">Закрыть</button></div><form id=\"create\" class=\"form\"><div class=\"field\"><label for=\"title\">Название</label><input id=\"title\" maxlength=\"200\" required></div><div class=\"field\"><label for=\"description\">Описание</label><textarea id=\"description\"></textarea></div><div class=\"field\"><label for=\"criteria\">Критерии приёмки</label><textarea id=\"criteria\"></textarea></div><div class=\"field\"><label for=\"createdDate\">Дата составления</label><input id=\"createdDate\" type=\"date\" required></div><div class=\"actions\"><button type=\"button\" id=\"cancel\">Отмена</button><button class=\"primary\">Создать план</button></div></form></div></div><div id=\"toast\" class=\"toast hidden\" role=\"status\" aria-live=\"polite\"></div>",
     "</main>",
     "<script>(()=>{" + UI_ANALYTICS + "const q=s=>document.querySelector(s), all=s=>[...document.querySelectorAll(s)];const supportedZones=" + JSON.stringify(UI_TIME_ZONES.map((option) => option.value)) + ";const normalizeZone=value=>supportedZones.includes(value)?value:\"Asia/Omsk\";let plans=[],activePlans=[],deletedRequestId=0,currentDetailPlan=null,detailReturnView=\"plans\",receivedAt=Date.now(),todayActiveMs=0,todayDate=null,refreshRequestId=0,zone=\"Asia/Omsk\",serverNow=Date.now(),pending=new Map(),rejectedValidation=new Set(),rejectedVersion=new Map(),analyticsRequestId=0,detailRequestId=0,timer,modalReturnFocus=null;const uid=()=>crypto.randomUUID();const dateLocal=d=>{const value=Object.fromEntries(new Intl.DateTimeFormat(\"en-CA\",{timeZone:zone,year:\"numeric\",month:\"2-digit\",day:\"2-digit\"}).formatToParts(d).map(part=>[part.type,part.value]));return value.year+\"-\"+value.month+\"-\"+value.day};const duration=n=>{if(n==null)return\"—\";n=Math.max(0,Math.round(n/60000));const day=Math.floor(n/1440),h=Math.floor(n%1440/60),m=n%60;return day?day+\" д \"+h+\" ч \"+m+\" мин\":h?h+\" ч \"+m+\" мин\":m+\" мин\"};const formatPlanSample=n=>{const count=Number(n)||0,lastTwo=count%100;return\"по \"+count+\" \"+((lastTwo>=11&&lastTwo<=14)||count%10!==1?\"планам\":\"плану\")};const dateFmt=n=>n==null?\"—\":new Intl.DateTimeFormat(\"ru-RU\",{dateStyle:\"medium\",timeStyle:\"short\",timeZone:zone}).format(new Date(n));const statusText=status=>({PLANNED:\"Запланирован\",RUNNING:\"Выполняется\",PAUSED:\"На паузе\",COMPLETED:\"Завершён\"})[status]||status;function showToast(t,err){const x=q(\"#toast\");x.textContent=t;x.classList.toggle(\"error\",!!err);x.classList.remove(\"hidden\");clearTimeout(timer);timer=setTimeout(()=>x.classList.add(\"hidden\"),4500)}async function call(path,opt){const r=await fetch(path,{...opt,headers:{\"content-type\":\"application/json\",...(opt&&opt.headers||{})},cache:\"no-store\"});let v={};try{v=await r.json()}catch{}if(!r.ok){const e=new Error(v.error&&v.error.message||\"HTTP \"+r.status);e.status=r.status;e.code=v.error&&v.error.code;e.details=v.error&&v.error.details;throw e}return v}const rejectedTerminal=new Set();async function hasFinalPlanRejection(type,envelope,error){if(error.status!==409||!((type===\"FinishPlan\"&&error.code===\"CHECKPOINTS_INCOMPLETE\")||(type===\"DeletePlan\"&&error.code===\"PLAN_DELETED\")||(type===\"RestorePlan\"&&error.code===\"PLAN_NOT_DELETED\")))return false;try{const receipt=await call(\"/api/tracker/commands/\"+encodeURIComponent(envelope.commandId));return receipt.status===\"FINAL\"&&receipt.commandId===envelope.commandId&&receipt.commandType===envelope.commandType&&receipt.error?.code===error.code&&!receipt.result}catch{return false}}function makeCmd(type,plan,payload){const key=type+\":\"+(plan?plan.planId:\"new\"),nextPayload={...(plan?{planId:plan.planId}:{}),...(payload||{})};let c=pending.get(key);const newVersion=plan?plan.version:undefined;if(c&&rejectedTerminal.has(key)){c=null;pending.delete(key);rejectedTerminal.delete(key)}if(c&&rejectedValidation.has(key)&&JSON.stringify(c.payload)!==JSON.stringify(nextPayload)){c=null;pending.delete(key);rejectedValidation.delete(key)}if(c&&rejectedVersion.has(key)&&c.expectedVersion!==newVersion){c=null;pending.delete(key);rejectedVersion.delete(key)}if(c&&JSON.stringify(c.payload)!==JSON.stringify(nextPayload)){const e=new Error(\"Исход предыдущей команды неизвестен. Повторите её без изменения данных или обновите состояние перед новой командой.\");e.code=\"COMMAND_OUTCOME_UNKNOWN\";throw e}if(!c){c={schemaVersion:1,commandId:uid(),commandType:type,expectedVersion:newVersion,payload:nextPayload};pending.set(key,c)}return [key,c]}async function command(type,plan,payload){let prepared;try{prepared=makeCmd(type,plan,payload)}catch(e){showToast((e.code||\"ERROR\")+\": \"+e.message,true);throw e}const [key,c]=prepared;let r;try{r=await call(\"/api/commands\",{method:\"POST\",body:JSON.stringify(c)});if(r?.commandId!==c.commandId||r.outcome!==\"OK\"||typeof r.applied!==\"boolean\"||typeof r.replayed!==\"boolean\"||r.applied===r.replayed||!r.result||typeof r.result!==\"object\"||Array.isArray(r.result)||r.error){const e=new Error(\"Ответ команды не подтверждает её результат. Повторите запрос без изменения данных.\");e.code=\"COMMAND_OUTCOME_UNKNOWN\";throw e}}catch(e){if(e.code===\"VALIDATION_ERROR\")rejectedValidation.add(key);else if(await hasFinalPlanRejection(type,c,e))rejectedTerminal.add(key);if(e.code===\"VERSION_CONFLICT\"&&Number.isSafeInteger(e.details&&e.details.currentVersion)){rejectedVersion.set(key,e.details.currentVersion);if(plan)plan.version=e.details.currentVersion}showToast((e.code||\"ERROR\")+\": \"+e.message,true);if(e.code===\"VERSION_CONFLICT\")try{await refresh()}catch{}throw e}pending.delete(key);rejectedValidation.delete(key);rejectedVersion.delete(key);rejectedTerminal.delete(key);showToast(r.replayed?\"Повторный запрос обработан по сохранённому результату.\":\"Изменение сохранено.\");try{await refresh()}catch{showToast(\"Изменение сохранено, но данные не обновились. Перезагрузите страницу.\",true)}return r}window.addEventListener(\"plan-time-tracker:command\",event=>{const detail=event.detail||{};command(detail.commandType,detail.plan,detail.payload).then(detail.resolve,detail.reject)});window.addEventListener(\"plan-time-tracker:refresh-plan\",event=>{const detail=event.detail||{},navigationToken=detailRequestId;(async()=>{await refresh();if(navigationToken===detailRequestId&&!q(\"#view-detail\").classList.contains(\"hidden\")&&q(\"#planDetail\").dataset.planId===detail.planId)await openPlan(detail.planId,detail.successMessage)})().then(detail.resolve,detail.reject)});function btn(text,fn,cls){const b=document.createElement(\"button\");b.textContent=text;if(cls)b.className=cls;b.onclick=async e=>{e.stopPropagation();if(b.disabled)return;b.disabled=true;try{await fn()}catch{}finally{b.disabled=false}};return b}function deletionButton(p){const restoring=p.deletedAt!=null;return btn(restoring?\"Восстановить\":\"Удалить\",async()=>{if(!window.confirm(restoring?\"Восстановить план «\"+p.title+\"»? Таймер останется остановленным.\":\"Удалить план «\"+p.title+\"»? Активное время и попытки будут остановлены. План можно восстановить в настройках, в разделе «Удалённые планы».\"))return;const navigationToken=detailRequestId;await command(restoring?\"RestorePlan\":\"DeletePlan\",p);if(navigationToken===detailRequestId&&q(\"#planDetail\").dataset.planId===p.planId&&!q(\"#view-detail\").classList.contains(\"hidden\"))await openPlan(p.planId)},restoring?\"\":\"danger\")}async function loadDeleted(){const requestId=++deletedRequestId,list=q(\"#deleted\");list.textContent=\"Загружаю удалённые планы…\";try{let page=await call(\"/api/plans?deleted=true&limit=100\"),collected=[...page.plans];while(page.nextCursor){page=await call(\"/api/plans?deleted=true&limit=100&cursor=\"+encodeURIComponent(page.nextCursor));if(requestId!==deletedRequestId)return;collected.push(...page.plans)}if(requestId!==deletedRequestId)return;list.replaceChildren();if(!collected.length)list.textContent=\"Удалённых планов нет.\";else collected.forEach(p=>list.append(card(p)))}catch(error){if(requestId!==deletedRequestId)return;list.textContent=\"Не удалось загрузить удалённые планы. \"+error.message;list.append(btn(\"Повторить\",loadDeleted));}}function finishButton(p,confirmation){let b;if(p.completion&&!p.completion.readyToFinish){b=btn(\"Условия завершения\",()=>openPlan(p.planId));b.title=\"Не выполнены условия этапов: \"+p.completion.incompleteStepCount}else b=btn(\"Завершить\",async()=>{if(!window.confirm(confirmation))return;try{await command(\"FinishPlan\",p)}finally{if(q(\"#planDetail\").dataset.planId===p.planId&&!q(\"#view-detail\").classList.contains(\"hidden\"))await openPlan(p.planId)}},\"danger\");b.dataset.finishPlan=p.planId;return b}window.addEventListener(\"plan-time-tracker:completion-updated\",event=>{const next=event.detail;if(!next?.completion)return;const summaries=[...plans,...activePlans,currentDetailPlan].filter(p=>p&&p.planId===next.planId);for(const p of summaries)p.completion=next.completion;const p=summaries[0];if(p)for(const button of all(\"[data-finish-plan]\"))if(button.dataset.finishPlan===p.planId)button.replaceWith(finishButton(p,\"Завершить план? Сервер остановит таймер.\"))});function card(p){const row=document.createElement(\"div\");row.className=\"row\";row.dataset.planId=p.planId;const left=document.createElement(\"button\"),title=document.createElement(\"span\"),meta=document.createElement(\"span\");left.type=\"button\";left.className=\"plan-open\";left.onclick=()=>openPlan(p.planId);left.setAttribute(\"aria-label\",p.title);title.className=\"row-title\";title.textContent=p.title;meta.className=\"row-meta\";meta.textContent=(p.status===\"RUNNING\"?\"Выполняется\":p.status===\"PAUSED\"?\"Пауза\":p.status===\"COMPLETED\"?\"Завершён\":\"Запланирован\")+\" · активно \"+duration(p.activeMs)+\" · создан \"+dateFmt(p.registeredAt);left.append(title,meta);const right=document.createElement(\"div\");right.className=\"row-right\";const badge=document.createElement(\"span\");badge.className=\"badge \"+p.status.toLowerCase();badge.textContent=statusText(p.status);right.append(badge);if(p.deletedAt!=null){badge.textContent=\"Удалён\";meta.textContent=\"Удалён \"+dateFmt(p.deletedAt)+\" · активно \"+duration(p.activeMs);right.append(deletionButton(p));row.append(left,right);return row}if(p.status===\"PLANNED\")right.append(btn(\"Запустить\",()=>command(\"StartPlan\",p),\"primary\"));if(p.status===\"RUNNING\")right.append(btn(\"Пауза\",()=>command(\"PausePlan\",p)));if(p.status===\"PAUSED\")right.append(btn(\"Продолжить\",()=>command(\"ResumePlan\",p),\"primary\"));if(p.status===\"RUNNING\"||p.status===\"PAUSED\")right.append(finishButton(p,\"Завершить план? Сервер остановит таймер.\"));right.append(deletionButton(p));row.append(left,right);return row}async function openPlan(planId,successMessage){const returnView=!q(\"#view-detail\").classList.contains(\"hidden\")?detailReturnView:!q(\"#view-deleted\").classList.contains(\"hidden\")?\"deleted\":\"plans\";const requestToken=++detailRequestId;try{const p=(await call(\"/api/plans/\"+encodeURIComponent(planId)+\"?includeEvents=false\")).plan;if(requestToken!==detailRequestId)return;detailReturnView=returnView;q(\"#backPlans\").textContent=returnView===\"deleted\"?\"← К удалённым планам\":\"← К планам\";currentDetailPlan=p;const box=q(\"#planDetail\");window.dispatchEvent(new CustomEvent(\"plan-time-tracker:plan-will-render\"));box.dataset.planId=planId;box.replaceChildren();const h=document.createElement(\"h2\");h.textContent=p.title;box.append(h);const m=document.createElement(\"p\");m.className=\"muted\";m.textContent=\"Дата плана: \"+(p.planCreatedAt.precision===\"dateOnly\"?p.planCreatedAt.on:dateFmt(Date.parse(p.planCreatedAt.value)))+\" · создан \"+dateFmt(p.registeredAt)+\" · \"+statusText(p.status);box.append(m);const deletionActions=document.createElement(\"div\");deletionActions.className=\"actions\";deletionActions.append(deletionButton(p));box.append(deletionActions);if(p.deletedAt!=null){const notice=document.createElement(\"p\");notice.className=\"notice\";notice.textContent=\"План удалён. История доступна только для чтения. Восстановление не запускает таймер.\";box.append(notice)}if(p.deletedAt==null&&(p.status===\"RUNNING\"||p.status===\"PAUSED\")){const actions=document.createElement(\"div\");actions.className=\"actions plan-completion-actions\";actions.append(finishButton(p,\"Завершить план? Сервер остановит таймер.\"));box.append(actions)}for(const label of [p.description||\"Описание не задано.\",\"Критерии приёмки: \"+(p.acceptanceCriteria||\"не заданы\"),\"Активно \"+duration(p.activeMs)+\" · календарное \"+duration(p.calendarMs)+\" · пауза \"+duration(p.pausedMs)]){const e=document.createElement(\"p\");e.textContent=label;box.append(e)}if(p.deletedAt==null){const edit=document.createElement(\"form\");edit.className=\"form\";edit.dataset.trackerForm=\"plan-metadata\";const title=document.createElement(\"input\");title.value=p.title;title.maxLength=200;title.setAttribute(\"aria-label\",\"Название плана\");const description=document.createElement(\"textarea\");description.value=p.description||\"\";description.maxLength=20000;description.setAttribute(\"aria-label\",\"Описание\");const criteria=document.createElement(\"textarea\");criteria.value=p.acceptanceCriteria||\"\";criteria.maxLength=20000;criteria.setAttribute(\"aria-label\",\"Критерии приёмки\");const date=document.createElement(\"input\");date.type=\"date\";date.value=p.planCreatedAt.precision===\"dateOnly\"?p.planCreatedAt.on:dateLocal(Date.parse(p.planCreatedAt.value));date.setAttribute(\"aria-label\",\"Дата составления\");const reason=document.createElement(\"input\");reason.placeholder=\"Причина правки даты\";reason.setAttribute(\"aria-label\",\"Причина правки даты\");const label=document.createElement(\"label\"),confirm=document.createElement(\"input\");confirm.type=\"checkbox\";confirm.dataset.draftField=\"confirmDateAnomaly\";label.className=\"checkbox-field\";const confirmText=document.createElement(\"span\");confirmText.textContent=\"Подтверждаю дату составления после первого старта\";label.append(confirm,confirmText);const save=document.createElement(\"button\");save.textContent=\"Сохранить изменения\";const labelled=(text,control)=>{const field=document.createElement(\"label\");field.className=\"field\";field.append(document.createTextNode(text),control);return field};edit.append(labelled(\"Название плана\",title),labelled(\"Описание\",description),labelled(\"Критерии приёмки\",criteria),labelled(\"Дата составления\",date),labelled(\"Причина правки даты\",reason),label,save);edit.onsubmit=async e=>{e.preventDefault();const draftSubmission={planId:p.planId,form:edit};window.dispatchEvent(new CustomEvent(\"plan-time-tracker:draft-submitted\",{detail:draftSubmission}));await command(\"UpdatePlanMetadata\",p,{title:title.value,description:description.value,acceptanceCriteria:criteria.value,planCreatedAt:p.planCreatedAt.precision===\"instant\"&&date.value===dateLocal(Date.parse(p.planCreatedAt.value))?p.planCreatedAt:{precision:\"dateOnly\",on:date.value,timeZone:zone},reason:reason.value,confirmDateAnomaly:confirm.checked});window.dispatchEvent(new CustomEvent(\"plan-time-tracker:draft-cleared\",{detail:{submission:draftSubmission.submission}}));await openPlan(p.planId)};box.append(edit);}const intervals=document.createElement(\"div\"),ih=document.createElement(\"h3\");ih.textContent=\"Интервалы\";intervals.append(ih);p.intervals.forEach(i=>{const e=document.createElement(\"p\");e.textContent=dateFmt(i.start_ms)+\" — \"+dateFmt(i.end_ms)+\" · \"+duration((i.end_ms||p.serverNow)-i.start_ms);intervals.append(e)});box.append(intervals);view(\"detail\");window.dispatchEvent(new CustomEvent(\"plan-time-tracker:plan-rendered\",{detail:{planId,successMessage}}))}catch(e){showToast((e.code||\"ERROR\")+\": \"+e.message,true)}}function renderActive(){const el=q(\"#active\");el.replaceChildren();q(\"#activeCount\").textContent=String(activePlans.length);if(!activePlans.length){const p=document.createElement(\"p\");p.className=\"muted\";p.textContent=\"Активных планов нет. Создайте план и запустите, когда начнёте работу.\";el.append(p,btn(\"Создать план\",openModal,\"primary\"));return}for(const plan of activePlans){const panel=document.createElement(\"section\");panel.className=\"active-plan\";panel.dataset.planId=plan.planId;panel.setAttribute(\"aria-label\",plan.title);const title=document.createElement(\"h3\");title.append(btn(plan.title,()=>openPlan(plan.planId),\"plan-open\"));const clock=document.createElement(\"div\");clock.className=\"timer\";clock.dataset.clockPlan=plan.planId;clock.setAttribute(\"aria-label\",\"Активное время: \"+plan.title);clock.textContent=duration(plan.activeMs+Math.max(0,Date.now()-receivedAt));const detail=document.createElement(\"div\");detail.className=\"muted\";detail.textContent=\"Начат \"+dateFmt(plan.firstStartedAt);const actions=document.createElement(\"div\");actions.className=\"actions\";actions.append(btn(\"Пауза\",()=>command(\"PausePlan\",plan)),finishButton(plan,\"Завершить план? Время будет остановлено сервером.\"),deletionButton(plan));panel.append(title,clock,detail,actions);el.append(panel)}}" + UI_PLAN_LISTS + "async function refresh(){const requestId=++refreshRequestId;const [first,w,settings]=await Promise.all([call(\"/api/plans?limit=100\"),call(\"/api/whoami\"),call(\"/api/settings\")]);let collected=[...first.plans],cursor=first.nextCursor;while(cursor){const page=await call(\"/api/plans?limit=100&cursor=\"+encodeURIComponent(cursor));if(requestId!==refreshRequestId)return;collected.push(...page.plans);cursor=page.nextCursor}const nextZone=normalizeZone(settings.timezone),dateParts=Object.fromEntries(new Intl.DateTimeFormat(\"en-CA\",{timeZone:nextZone,year:\"numeric\",month:\"2-digit\",day:\"2-digit\"}).formatToParts(first.serverNow).map(part=>[part.type,part.value])),today=dateParts.year+\"-\"+dateParts.month+\"-\"+dateParts.day;const daily=await call(\"/api/analytics?\"+new URLSearchParams({from:today,to:today,timeZone:nextZone}));if(requestId!==refreshRequestId)return;plans=collected.map(plan=>plan.status===\"RUNNING\"?{...plan,activeMs:plan.activeMs+Math.max(0,daily.serverNow-plan.serverNow),calendarMs:plan.calendarMs+Math.max(0,daily.serverNow-plan.serverNow),serverNow:daily.serverNow}:plan);activePlans=plans.filter(plan=>plan.status===\"RUNNING\");serverNow=daily.serverNow;receivedAt=Date.now();todayActiveMs=daily.totalActiveMs;todayDate=today;zone=nextZone;q(\"#who\").textContent=w.email||\"Личный аккаунт\";q(\"#tz\").value=zone;render();if(!q(\"#view-deleted\").classList.contains(\"hidden\"))await loadDeleted()}function openModal(){modalReturnFocus=document.activeElement;document.body.style.overflow=\"hidden\";q(\"#modal\").classList.remove(\"hidden\");q(\"#createdDate\").value=dateLocal(Date.now());q(\"#title\").focus();}function closeModal(){if(q(\"#create\").getAttribute(\"aria-busy\")===\"true\")return;q(\"#modal\").classList.add(\"hidden\");document.body.style.overflow=\"\";if(modalReturnFocus?.isConnected)modalReturnFocus.focus()}async function loadAnalytics(){const requestId=++analyticsRequestId;const d=new Date(),from=new Date(d);from.setDate(from.getDate()-29);if(!q(\"#from\").value)q(\"#from\").value=dateLocal(from);if(!q(\"#to\").value)q(\"#to\").value=dateLocal(d);const u=new URLSearchParams({from:q(\"#from\").value,to:q(\"#to\").value,timeZone:zone});let a;try{a=await call(\"/api/analytics?\"+u)}catch(error){if(requestId!==analyticsRequestId)return;throw error}if(requestId!==analyticsRequestId)return;const stats=q(\"#stats\");stats.replaceChildren();const medianText=duration(a.completedMedianActiveMs)+(a.completedMedianActiveMs==null?\"\":\" · \"+formatPlanSample(a.completedMeasuredN));[[\"Общее время за период\",duration(a.totalActiveMs)],[\"Завершено планов\",String(a.completedPlans)],[\"Медиана активного времени\",medianText],[\"Сумма времени планов\",duration(a.sumPlanActiveMs)]].forEach(([k,v],index)=>{const box=document.createElement(\"div\"),small=document.createElement(\"small\"),strong=document.createElement(\"strong\");box.className=\"metric\";small.textContent=k;strong.textContent=v;box.append(small,strong);if(index===2&&a.completedSmallSample){const note=document.createElement(\"small\");note.className=\"sample-note\";note.textContent=\"Малая выборка\";note.title=\"Медиана рассчитана по менее чем пяти завершённым планам.\";note.setAttribute(\"aria-label\",\"Малая выборка: менее пяти завершённых планов.\");box.append(note)}stats.append(box)});const chart=q(\"#chart\");chart.replaceChildren();const max=Math.max(1,...a.activeByDay.map(x=>x.activeMs));a.activeByDay.forEach(x=>{const row=document.createElement(\"div\"),date=document.createElement(\"span\"),bar=document.createElement(\"div\"),fill=document.createElement(\"span\"),v=document.createElement(\"span\");row.className=\"barrow\";bar.className=\"bar\";fill.style.width=(100*x.activeMs/max)+\"%\";bar.append(fill);date.textContent=x.date;v.textContent=duration(x.activeMs);row.append(date,bar,v);chart.append(row)});const list=q(\"#analyticPlans\");list.replaceChildren();if(!a.plans.length){const p=document.createElement(\"p\");p.className=\"muted\";p.textContent=\"За выбранный период данных нет.\";list.append(p)}else renderAnalyticsPlanCards(list,a)}function view(name){if(name!==\"detail\")detailRequestId++;all(\"[id^=view-]\").forEach(x=>x.classList.toggle(\"hidden\",x.id!==\"view-\"+name));all(\".nav button\").forEach(b=>b.setAttribute(\"aria-current\",b.dataset.view===(name===\"deleted\"||(name===\"detail\"&&detailReturnView===\"deleted\")?\"settings\":name===\"detail\"?\"plans\":name)?\"page\":\"false\"));if(name===\"deleted\")loadDeleted();if(name===\"analytics\")loadAnalytics().catch(e=>showToast(e.message,true));}all(\".nav button\").forEach(b=>b.onclick=()=>view(b.dataset.view));q(\"#backPlans\").onclick=()=>{view(detailReturnView);if(detailReturnView===\"deleted\")q(\"#deletedHeading\").focus()};q(\"#openDeleted\").onclick=()=>{view(\"deleted\");q(\"#deletedHeading\").focus()};q(\"#backSettings\").onclick=()=>{view(\"settings\");q(\"#openDeleted\").focus()};q(\"#newPlan\").onclick=openModal;q(\"#newPlan2\").onclick=openModal;q(\"#close\").onclick=closeModal;q(\"#cancel\").onclick=closeModal;q(\"#modal\").onclick=e=>{if(e.target.id===\"modal\")closeModal()};q(\"#create\").onsubmit=async e=>{e.preventDefault();const payload={title:q(\"#title\").value,description:q(\"#description\").value,acceptanceCriteria:q(\"#criteria\").value,planCreatedAt:{precision:\"dateOnly\",on:q(\"#createdDate\").value,timeZone:zone}};try{await command(\"CreatePlan\",null,payload);e.target.removeAttribute(\"aria-busy\");closeModal();e.target.reset();showToast(\"План создан. Таймер не запущен.\")}catch(x){showToast((x.code||\"ERROR\")+\": \"+x.message,true)}};q(\"#apply\").onclick=()=>loadAnalytics().catch(e=>showToast(e.message,true));q(\"#settings\").onsubmit=async e=>{e.preventDefault();try{const r=await call(\"/api/settings\",{method:\"POST\",body:JSON.stringify({timezone:q(\"#tz\").value})});zone=normalizeZone(r.timezone);q(\"#tz\").value=zone;window.dispatchEvent(new CustomEvent(\"plan-time-zone-changed\",{detail:zone}));await refresh();showToast(\"Часовой пояс сохранён.\")}catch(x){showToast((x.code||\"ERROR\")+\": \"+x.message,true)}};setInterval(()=>{const elapsed=Math.max(0,Date.now()-receivedAt);for(const plan of activePlans){const clock=all(\"[data-clock-plan]\").find(node=>node.dataset.clockPlan===plan.planId);if(clock)clock.textContent=duration(plan.activeMs+elapsed)}if(todayDate&&dateLocal(serverNow+elapsed)!==todayDate){todayDate=null;refresh().catch(e=>showToast(e.message,true))}else if(q(\"#today\"))q(\"#today\").textContent=duration(todayActiveMs+(activePlans.length?elapsed:0))},1000);refresh().catch(e=>{q(\"#who\").textContent=\"Требуется вход\";showToast(e.message,true)})})();</script></body></html>"
-  ].join("").replace("</head>", "<style>" + UI_FONT_CSS + UI_ANALYTICS_CSS + UI_PLAN_LISTS_CSS + "</style></head>").replace("</body></html>", "<script>" + UI_ENHANCEMENTS + "</script><script>" + UI_TRACKER + "</script><script>" + UI_ACCESSIBILITY + "</script><style>" + UI_CONSOLE_PAPER_CSS + "</style></body></html>");
+  ].join("").replace("</head>", "<style>" + UI_FONT_CSS + UI_ANALYTICS_CSS + UI_PLAN_LISTS_CSS + "</style></head>").replace("</body></html>", "<script>" + UI_ENHANCEMENTS + "</script><script>" + UI_TRACKER + UI_ATLM + "</script><script>" + UI_ACCESSIBILITY + "</script><style>" + UI_CONSOLE_PAPER_CSS + "</style></body></html>");
 }
 
 const RETIRED_COMMANDS = new Set(["SyncRepository","AttachPlanRepository","ReviewCommitLink"]);
@@ -3082,6 +3356,428 @@ function validatePublicCommand(envelope) {
 }
 // Historical source identities remain in immutable storage and the readiness views.
 // Public clients see their status, revision and permitted snapshot digests, without a Git interface.
+// ATLM training state is durable in D1. A background promise only drains that state.
+export const ATLM_RETRAIN_EVERY_NEW_PLANS = 5;
+const ATLM_TRAINING_LEASE_MS = 60000;
+const ATLM_TRAINING_BUDGET_MS = 10000;
+const ATLM_TRAINING_LIMIT = 5000;
+const ATLM_TRAINING_RETRY_MS = [60000, 300000, 900000];
+const ATLM_LATEST_SAMPLE_SQL = "s.sequence=(SELECT MAX(current.sequence) FROM estimation_samples current WHERE current.owner_id=s.owner_id AND current.plan_id=s.plan_id)";
+const ATLM_PENDING_REFRESH_SQL = "SELECT 1 FROM estimation_jobs r WHERE r.owner_id=estimation_owner_state.owner_id AND r.kind='REFRESH_SAMPLE' AND r.generation>r.processed_generation";
+
+function atlmTrainingJson(value, fallback = null) {
+  return value == null ? fallback : JSON.parse(value) ?? fallback;
+}
+function atlmTrainingErrorCode(error) {
+  return ["INVALID_ESTIMATION_SOURCE", "SOURCE_UNAVAILABLE", "INTERNAL_ERROR", "DATASET_LIMIT_REACHED"].includes(error?.code) ? error.code : "TRAINING_EXECUTION_FAILED";
+}
+function atlmJobDue(job, nowMs) {
+  if (!job || job.generation <= job.processed_generation || job.status === "FAILED") return false;
+  if (job.status === "RUNNING") return job.lease_until <= nowMs;
+  return job.next_attempt_at <= nowMs;
+}
+function atlmPublicEvaluation(evaluation) {
+  if (!evaluation) return null;
+  return { caseCount: evaluation.paired?.caseCount ?? 0, coverage: evaluation.metrics?.atlm?.forecastRate ?? 0,
+    maeMs: evaluation.paired?.atlm?.maeMs ?? null, medianBaselineMaeMs: evaluation.paired?.median?.maeMs ?? null,
+    wapePercent: evaluation.paired?.atlm?.wapePercent ?? null, signedBiasPercent: evaluation.paired?.atlm?.signedBiasPercent ?? null,
+    excludedCaseCount: evaluation.excluded?.length ?? 0, selectedCaseCount: evaluation.caseCount ?? 0,
+    cutoff: evaluation.cutoff ?? null, protocolVersion: evaluation.protocolVersion ?? 1 };
+}
+function atlmPublicModel(row) {
+  return row ? { modelId: row.model_id, modelVersion: row.model_version, trainedAt: row.activated_at ?? row.created_at,
+    sampleCount: row.sample_count, evaluation: atlmPublicEvaluation(atlmTrainingJson(row.metrics_json)) } : null;
+}
+
+// An immutable artifact is readable only while every manifest source is still current and clean.
+async function atlmReadActiveModel(db, ownerId) {
+  return dbFirst(db, `SELECT m.* FROM estimation_models m JOIN estimation_owner_state o
+    ON o.owner_id=m.owner_id AND o.active_model_id=m.model_id
+    WHERE m.owner_id=? AND m.status='ACTIVE' AND m.method_version='agent-v1' AND m.feature_version='agent-task-v1'
+    AND NOT EXISTS(SELECT 1 FROM json_each(m.manifest_json) item
+      LEFT JOIN estimation_samples s ON s.owner_id=m.owner_id AND s.sequence=CAST(item.value AS INTEGER)
+      WHERE s.sequence IS NULL OR s.eligibility<>'ELIGIBLE'
+        OR s.sequence<>(SELECT MAX(latest.sequence) FROM estimation_samples latest WHERE latest.owner_id=s.owner_id AND latest.plan_id=s.plan_id)
+        OR EXISTS(SELECT 1 FROM estimation_jobs dirty WHERE dirty.owner_id=s.owner_id AND dirty.plan_id=s.plan_id
+          AND dirty.kind='REFRESH_SAMPLE' AND dirty.generation>dirty.processed_generation))`, ownerId);
+}
+
+export async function predictWithActiveModel(db, ownerId, features, nowMs) {
+  const model = await atlmReadActiveModel(db, ownerId);
+  const unavailable = reason => ({ status: "UNAVAILABLE", pointMs: null, modelId: null, modelVersion: null,
+    sampleCount: 0, evaluation: null, unavailableReason: reason, accuracy: "NOT_VALIDATED" });
+  if (!model) {
+    const state = await dbFirst(db, "SELECT active_model_id FROM estimation_owner_state WHERE owner_id=?", ownerId);
+    return unavailable(state?.active_model_id ? "MODEL_INVALIDATED" : "COLLECTING_DATA");
+  }
+  let prediction;
+  try { prediction = predictAtlm(atlmTrainingJson(model.artifact_json), features); }
+  catch { throw appError("SOURCE_UNAVAILABLE", "Сохранённая модель ATLM повреждена.", 503, { reason: "INVALID_ARTIFACT" }); }
+  if (prediction.reason === "INVALID_ARTIFACT") throw appError("SOURCE_UNAVAILABLE", "Сохранённая модель ATLM повреждена.", 503, { reason: "INVALID_ARTIFACT" });
+  const metadata = { modelId: model.model_id, modelVersion: model.model_version, sampleCount: model.sample_count,
+    evaluation: atlmPublicEvaluation(atlmTrainingJson(model.metrics_json)), accuracy: "HISTORICALLY_EVALUATED" };
+  if (prediction.status !== "AVAILABLE") return { ...unavailable(prediction.reason), ...metadata,
+    ...(prediction.missingFields ? { missingFields: prediction.missingFields } : {}) };
+  return { status: "AVAILABLE", pointMs: prediction.pointMs, ...metadata, unavailableReason: null };
+}
+
+export async function getEstimationModelStatus(db, ownerId, nowMs) {
+  const [state, train, pending, counts, exclusions, active] = await Promise.all([
+    dbFirst(db, "SELECT * FROM estimation_owner_state WHERE owner_id=?", ownerId),
+    dbFirst(db, "SELECT * FROM estimation_jobs WHERE owner_id=? AND job_key='train'", ownerId),
+    dbAll(db, "SELECT * FROM estimation_jobs WHERE owner_id=? AND kind='REFRESH_SAMPLE' AND generation>processed_generation ORDER BY job_key", ownerId),
+    dbFirst(db, `SELECT COUNT(*) AS total,COALESCE(SUM(s.eligibility='ELIGIBLE'),0) AS eligible FROM estimation_samples s WHERE s.owner_id=? AND ${ATLM_LATEST_SAMPLE_SQL}`, ownerId),
+    dbAll(db, `SELECT reason.value AS reason,COUNT(*) AS count FROM estimation_samples s,json_each(s.reasons_json) reason
+      WHERE s.owner_id=? AND ${ATLM_LATEST_SAMPLE_SQL} GROUP BY reason.value ORDER BY reason.value`, ownerId),
+    atlmReadActiveModel(db, ownerId),
+  ]);
+  const newPlans = Math.max(0, (state?.new_sample_count ?? 0) - (state?.last_attempted_new_sample_count ?? 0));
+  const trainPending = Boolean(train && train.generation > train.processed_generation);
+  const checkpoint = atlmTrainingJson(train?.checkpoint_json, {});
+  const snapshot = atlmTrainingJson(train?.snapshot_json, {});
+  const refreshFailed = pending.find(job => job.status === "FAILED");
+  const refreshRunning = pending.find(job => job.status === "RUNNING" && job.lease_until > nowMs);
+  const refreshWaiting = pending.find(job => job.status === "RETRY_WAIT" && job.next_attempt_at > nowMs);
+  const triggerDue = Boolean((state?.forced_retrain || newPlans >= ATLM_RETRAIN_EVERY_NEW_PLANS) && !trainPending && !pending.length);
+  const due = pending.some(job => atlmJobDue(job, nowMs)) || (!pending.length && atlmJobDue(train, nowMs)) || triggerDue;
+  let status = trainPending ? train.status : (state?.last_training_status || (active ? "IDLE" : "COLLECTING_DATA"));
+  if (!active && status === "IDLE") status = "COLLECTING_DATA";
+  if (refreshFailed && !due) status = "FAILED";
+  else if (refreshRunning) status = "RUNNING";
+  else if (refreshWaiting && !due) status = "RETRY_WAIT";
+  else if (pending.length || triggerDue) status = "QUEUED";
+  const nextAttemptAt = Math.min(...[...(trainPending && train?.next_attempt_at > nowMs ? [train.next_attempt_at] : []),
+    ...pending.filter(job => job.status === "RETRY_WAIT" && job.next_attempt_at > nowMs).map(job => job.next_attempt_at)]);
+  return { method: { id: "atlm", version: "agent-v1" }, featureSchemaVersion: "agent-task-v1", metric: "PLAN_ACTIVE",
+    forecastScope: "FULL_FROM_FIRST_START", retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
+    datasetRevision: state?.dataset_revision ?? 0, eligibleSampleCount: counts?.eligible ?? 0,
+    excludedSampleCount: (counts?.total ?? 0) - (counts?.eligible ?? 0), newPlansSinceTraining: newPlans,
+    exclusionReasons: exclusions, activeModel: atlmPublicModel(active),
+    training: { status, generation: train?.generation ?? state?.training_generation ?? 0, due,
+      attempts: trainPending ? train.attempts : 0, nextAttemptAt: Number.isFinite(nextAttemptAt) ? nextAttemptAt : null,
+      pendingRefreshCount: pending.length, progressRevision: checkpoint.progressRevision ?? 0,
+      progress: { phase: checkpoint.phase ?? null, completedCases: checkpoint.cases?.length ?? 0,
+        totalCases: snapshot.selection?.caseSampleIds?.length ?? 0 } },
+    lastError: refreshFailed?.last_error ?? train?.last_error ?? null,
+    lastReason: state?.last_training_reason ?? null };
+}
+
+function atlmEnqueueTrainingStatements(db, ownerId, nowMs) {
+  return [
+    db.prepare(`INSERT INTO estimation_jobs(owner_id,job_key,kind,generation,status,created_at,updated_at)
+      SELECT owner_id,'train','TRAIN',training_generation+1,'QUEUED',?,? FROM estimation_owner_state
+      WHERE owner_id=? AND (forced_retrain=1 OR new_sample_count-last_attempted_new_sample_count>=?)
+        AND NOT EXISTS(${ATLM_PENDING_REFRESH_SQL})
+      ON CONFLICT(owner_id,job_key) DO UPDATE SET generation=estimation_jobs.generation+1,
+        processed_generation=estimation_jobs.generation,status='QUEUED',lease_until=NULL,attempts=0,next_attempt_at=0,
+        snapshot_json=NULL,checkpoint_json=NULL,last_error=NULL,updated_at=excluded.updated_at
+      WHERE estimation_jobs.generation=estimation_jobs.processed_generation OR estimation_jobs.status='FAILED'`)
+      .bind(nowMs, nowMs, ownerId, ATLM_RETRAIN_EVERY_NEW_PLANS),
+    db.prepare(`UPDATE estimation_owner_state SET training_generation=COALESCE((SELECT generation FROM estimation_jobs WHERE owner_id=? AND job_key='train'),training_generation)
+      WHERE owner_id=?`).bind(ownerId, ownerId),
+  ];
+}
+async function atlmEnqueueTraining(db, ownerId, nowMs) {
+  await db.batch(atlmEnqueueTrainingStatements(db, ownerId, nowMs));
+}
+async function atlmReleaseSuperseded(db, ownerId, job, nowMs) {
+  await db.prepare(`UPDATE estimation_jobs SET status='QUEUED',lease_until=NULL,attempts=0,next_attempt_at=0,
+    snapshot_json=NULL,checkpoint_json=NULL,last_error=NULL,updated_at=?
+    WHERE owner_id=? AND job_key=? AND fence=? AND generation>? AND status='RUNNING' AND lease_until>?`)
+    .bind(nowMs, ownerId, job.job_key, job.fence, job.generation, nowMs).run();
+}
+async function atlmCheckpoint(db, ownerId, job, checkpoint, nowMs, { snapshot, release = false } = {}) {
+  const fields = ["checkpoint_json=?", "updated_at=?"], values = [JSON.stringify(checkpoint), nowMs];
+  if (snapshot !== undefined) { fields.push("snapshot_json=?"); values.push(JSON.stringify(snapshot)); }
+  if (release) fields.push("status='QUEUED'", "lease_until=NULL");
+  return dbFirst(db, `UPDATE estimation_jobs SET ${fields.join(",")}
+    WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>? RETURNING *`,
+    ...values, ownerId, job.job_key, job.generation, job.fence, nowMs);
+}
+async function atlmManifestRows(db, ownerId, manifest) {
+  const rows = await dbAll(db, `SELECT s.* FROM estimation_samples s WHERE s.owner_id=?
+    AND s.sequence IN (SELECT CAST(value AS INTEGER) FROM json_each(?)) ORDER BY s.sequence`, ownerId, JSON.stringify(manifest));
+  if (rows.length !== manifest.length) throw appError("INVALID_ESTIMATION_SOURCE", "ATLM snapshot sources are unavailable.", 500);
+  return rows.map(row => ({ sampleId: String(row.sequence), planId: row.plan_id, capturedAt: row.captured_at,
+    sourceAvailableAt: row.source_available_at, features: atlmTrainingJson(row.features_json), actualMs: row.actual_ms }));
+}
+function atlmSourceValiditySql(owner = "j.owner_id", manifest = "json_extract(j.snapshot_json,'$.manifest')") {
+  return `NOT EXISTS(SELECT 1 FROM json_each(${manifest}) member
+    LEFT JOIN estimation_samples s ON s.owner_id=${owner} AND s.sequence=CAST(member.value AS INTEGER)
+    WHERE s.sequence IS NULL OR s.eligibility<>'ELIGIBLE' OR s.sequence<>(SELECT MAX(latest.sequence) FROM estimation_samples latest
+      WHERE latest.owner_id=s.owner_id AND latest.plan_id=s.plan_id)
+      OR EXISTS(SELECT 1 FROM estimation_jobs source WHERE source.owner_id=s.owner_id AND source.kind='REFRESH_SAMPLE'
+        AND source.plan_id=s.plan_id AND source.generation>source.processed_generation))`;
+}
+async function atlmSnapshot(db, ownerId, job, clock) {
+  const values = await db.batch([
+    db.prepare("SELECT * FROM estimation_owner_state WHERE owner_id=?").bind(ownerId),
+    db.prepare(`SELECT s.* FROM estimation_samples s WHERE s.owner_id=? AND ${ATLM_LATEST_SAMPLE_SQL} AND s.eligibility='ELIGIBLE' ORDER BY s.sequence LIMIT ?`).bind(ownerId, ATLM_TRAINING_LIMIT + 1),
+    db.prepare("SELECT * FROM estimation_models WHERE owner_id=? AND model_id=(SELECT active_model_id FROM estimation_owner_state WHERE owner_id=?)").bind(ownerId, ownerId),
+  ]);
+  const state = values[0].results[0], sampleRows = values[1].results, previous = values[2].results[0];
+  const nowMs = clock();
+  if (sampleRows.some(row => row.source_available_at > nowMs)) throw appError("INVALID_ESTIMATION_SOURCE", "ATLM source availability is in the future.", 500);
+  const limited = sampleRows.length > ATLM_TRAINING_LIMIT;
+  const manifest = limited ? [] : sampleRows.map(row => row.sequence);
+  const rows = limited ? [] : sampleRows.map(row => ({ sampleId: String(row.sequence), planId: row.plan_id,
+    capturedAt: row.captured_at, sourceAvailableAt: row.source_available_at, features: atlmTrainingJson(row.features_json), actualMs: row.actual_ms }));
+  const snapshot = { formatVersion: 1, generation: job.generation, modelId: "atlm-" + job.generation,
+    modelVersion: job.generation, trainCutoff: nowMs, datasetRevision: state.dataset_revision,
+    newSampleCount: state.new_sample_count, newSampleSequence: sampleRows.reduce((max, row) => Math.max(max, row.sequence), 0),
+    activePointer: state.active_model_id, incumbentId: previous?.status === "ACTIVE" ? previous.model_id : null,
+    forcedRetrain: Boolean(state.forced_retrain), manifest, resourceLimitReached: limited,
+    selection: limited ? null : selectAtlmEvaluationCases(rows, { protocolVersion: 1, cutoff: nowMs }) };
+  if (!limited && (snapshot.selection.status !== "AVAILABLE" || snapshot.selection.eligibleCount !== rows.length)) {
+    throw appError("INVALID_ESTIMATION_SOURCE", "ATLM eligible snapshot contains invalid sources.", 500);
+  }
+  const checkpoint = { phase: limited ? "LIMIT" : "EVALUATE", cases: [], progressRevision: 1 };
+  const saved = await dbFirst(db, `UPDATE estimation_jobs SET snapshot_json=?,checkpoint_json=?,updated_at=?
+    WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?
+      AND EXISTS(SELECT 1 FROM estimation_owner_state WHERE owner_id=? AND dataset_revision=?)
+      AND NOT EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND kind='REFRESH_SAMPLE' AND generation>processed_generation)
+    RETURNING *`, JSON.stringify(snapshot), JSON.stringify(checkpoint), nowMs, ownerId, job.generation, job.fence,
+    nowMs, ownerId, state.dataset_revision, ownerId);
+  return saved ? { snapshot, checkpoint, rows } : null;
+}
+
+function atlmCompareIncumbent(evaluation, incumbent) {
+  if (!incumbent) return { accepted: true, reason: null, comparison: null };
+  const artifact = atlmTrainingJson(incumbent.artifact_json);
+  const seenPlans = new Set((artifact.manifest || []).map(row => row.planId));
+  const cases = evaluation.cases.filter(c => !seenPlans.has(c.planId) && c.capturedAt >= incumbent.train_cutoff
+    && c.capturedAt > incumbent.latest_source_available_at);
+  const pairs = cases.map(c => ({ candidate: c.atlm, incumbent: predictAtlm(artifact, c.features), actualMs: c.actualMs }));
+  const candidateCount = pairs.filter(p => p.candidate.status === "AVAILABLE").length;
+  const incumbentCount = pairs.filter(p => p.incumbent.status === "AVAILABLE").length;
+  const common = pairs.filter(p => p.candidate.status === "AVAILABLE" && p.incumbent.status === "AVAILABLE");
+  const mae = key => common.length ? common.reduce((sum, p) => sum + Math.abs(p[key].pointMs - p.actualMs), 0) / common.length : null;
+  const comparison = { caseCount: cases.length, commonCaseCount: common.length,
+    candidateCoverage: cases.length ? candidateCount / cases.length : 0, incumbentCoverage: cases.length ? incumbentCount / cases.length : 0,
+    candidateMaeMs: mae("candidate"), incumbentMaeMs: mae("incumbent") };
+  if (common.length < 5) return { accepted: false, reason: "INSUFFICIENT_INCUMBENT_CASES", comparison };
+  return { accepted: candidateCount >= incumbentCount && comparison.candidateMaeMs <= comparison.incumbentMaeMs,
+    reason: candidateCount < incumbentCount ? "CANDIDATE_COVERAGE_WORSE" : comparison.candidateMaeMs > comparison.incumbentMaeMs ? "CANDIDATE_MAE_WORSE" : null, comparison };
+}
+
+async function atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, result, nowMs) {
+  const finalGuard = `EXISTS(SELECT 1 FROM estimation_jobs j JOIN estimation_owner_state o ON o.owner_id=j.owner_id
+    WHERE j.owner_id=? AND j.job_key='train' AND j.generation=? AND j.fence=? AND j.status='RUNNING' AND j.lease_until>?
+      AND o.active_model_id IS ? ${result.activate ? "AND " + atlmSourceValiditySql() : ""})`;
+  const guardValues = [ownerId, job.generation, job.fence, nowMs, snapshot.activePointer];
+  const modelStatus = result.activate ? "CANDIDATE" : "REJECTED";
+  const digest = result.artifact?.datasetDigest || "sha256:" + await hashCommandInput({ manifest: snapshot.manifest, datasetRevision: snapshot.datasetRevision });
+  const statements = [
+    db.prepare(`INSERT OR IGNORE INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,
+      train_cutoff,metrics_json,sample_count,reason,created_at)
+      SELECT ?,?,?,?,?,?,?,?,?,?,?,? WHERE ${finalGuard}`).bind(ownerId, snapshot.modelId, snapshot.modelVersion, modelStatus,
+      result.artifact ? JSON.stringify(result.artifact) : null, JSON.stringify(snapshot.manifest), digest, snapshot.trainCutoff,
+      result.evaluation ? JSON.stringify(result.evaluation) : null, snapshot.manifest.length, result.reason, nowMs, ...guardValues),
+  ];
+  const candidateGuard = `${finalGuard} AND EXISTS(SELECT 1 FROM estimation_models WHERE owner_id=? AND model_id=? AND status=?)`;
+  const candidateValues = [...guardValues, ownerId, snapshot.modelId, modelStatus];
+  if (result.activate) {
+    statements.push(db.prepare(`UPDATE estimation_models SET status='RETIRED' WHERE owner_id=? AND status='ACTIVE' AND ${candidateGuard}`)
+      .bind(ownerId, ...candidateValues));
+    statements.push(db.prepare(`UPDATE estimation_models SET status='ACTIVE',activated_at=? WHERE owner_id=? AND model_id=? AND status='CANDIDATE' AND ${finalGuard}`)
+      .bind(nowMs, ownerId, snapshot.modelId, ...guardValues));
+  }
+  // Only an artifact successfully inserted by this fenced generation may acknowledge its experience.
+  const completedGuard = `${finalGuard} AND EXISTS(SELECT 1 FROM estimation_models WHERE owner_id=? AND model_id=? AND status=?)`;
+  const completedValues = [...guardValues, ownerId, snapshot.modelId, result.activate ? "ACTIVE" : "REJECTED"];
+  statements.push(db.prepare(`UPDATE estimation_owner_state SET last_attempted_new_sample_count=MAX(last_attempted_new_sample_count,?),
+    last_attempted_new_sample_sequence=MAX(last_attempted_new_sample_sequence,?),last_training_status=?,last_training_reason=?,updated_at=?,
+    forced_retrain=CASE WHEN dataset_revision=? AND NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END
+    WHERE owner_id=? AND ${completedGuard}`)
+    .bind(snapshot.newSampleCount, snapshot.newSampleSequence, result.status, result.reason, nowMs, snapshot.datasetRevision, ownerId, ...completedValues));
+  // Update the pointer last, after all guards which compare the old pointer.
+  if (result.activate) statements.push(db.prepare(`UPDATE estimation_owner_state SET active_model_id=? WHERE owner_id=? AND ${completedGuard}`)
+    .bind(snapshot.modelId, ownerId, ...completedValues));
+  // Pointer now names the candidate on success; use the same fence and immutable model receipt.
+  statements.push(db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',lease_until=NULL,next_attempt_at=0,last_error=?,
+    checkpoint_json=?,updated_at=? WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?
+    AND EXISTS(SELECT 1 FROM estimation_models WHERE owner_id=? AND model_id=? AND status=?)`)
+    .bind(result.status === "FAILED" ? result.reason : null,
+      JSON.stringify({ ...checkpoint, phase: "DONE", progressRevision: checkpoint.progressRevision + 1 }), nowMs,
+      ownerId, job.generation, job.fence, nowMs, ownerId, snapshot.modelId, result.activate ? "ACTIVE" : "REJECTED"));
+  statements.push(...atlmEnqueueTrainingStatements(db, ownerId, nowMs));
+  await db.batch(statements);
+  const receipt = await dbFirst(db, "SELECT status FROM estimation_models WHERE owner_id=? AND model_id=?", ownerId, snapshot.modelId);
+  return Boolean(receipt && receipt.status === (result.activate ? "ACTIVE" : "REJECTED"));
+}
+
+async function atlmSupersedeSnapshot(db, ownerId, job, snapshot, nowMs) {
+  const guard = `EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key='train' AND generation=?
+    AND fence=? AND status='RUNNING' AND lease_until>?)`;
+  const values = [ownerId, job.generation, job.fence, nowMs];
+  // Keep the obsolete manifest as an immutable receipt, then allocate another generation.
+  await db.batch([
+    db.prepare(`INSERT OR IGNORE INTO estimation_models(owner_id,model_id,model_version,status,manifest_json,dataset_digest,
+      train_cutoff,sample_count,reason,created_at)
+      SELECT ?,?,?,'REJECTED',?,?,?,?, 'SNAPSHOT_INVALIDATED',? WHERE ${guard}`)
+      .bind(ownerId, snapshot.modelId, snapshot.modelVersion, JSON.stringify(snapshot.manifest),
+        "sha256:" + await hashCommandInput({ manifest: snapshot.manifest, datasetRevision: snapshot.datasetRevision }),
+        snapshot.trainCutoff, snapshot.manifest.length, nowMs, ...values),
+    db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,generation=generation+1,status='QUEUED',
+      lease_until=NULL,attempts=0,next_attempt_at=0,snapshot_json=NULL,checkpoint_json=NULL,last_error=NULL,updated_at=?
+      WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`)
+      .bind(nowMs, ...values),
+    db.prepare(`UPDATE estimation_owner_state SET training_generation=(SELECT generation FROM estimation_jobs WHERE owner_id=? AND job_key='train'),
+      last_training_status='QUEUED',last_training_reason='SNAPSHOT_INVALIDATED',updated_at=?
+      WHERE owner_id=? AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key='train' AND generation=? AND fence=?)`)
+      .bind(ownerId, nowMs, ownerId, ownerId, job.generation + 1, job.fence),
+  ]);
+}
+
+async function atlmRecordFailure(db, ownerId, job, error, nowMs) {
+  const code = atlmTrainingErrorCode(error), exhausted = job.attempts >= 4;
+  const snapshot = atlmTrainingJson(job.snapshot_json);
+  const nextAttempt = exhausted ? 0 : nowMs + ATLM_TRAINING_RETRY_MS[Math.max(0, job.attempts - 1)];
+  const statements = [];
+  if (exhausted && job.kind === "TRAIN") statements.push(db.prepare(`UPDATE estimation_owner_state SET
+    last_attempted_new_sample_count=MAX(last_attempted_new_sample_count,COALESCE(?,new_sample_count)),
+    last_attempted_new_sample_sequence=MAX(last_attempted_new_sample_sequence,COALESCE(?,(SELECT MAX(sequence) FROM estimation_samples WHERE owner_id=estimation_owner_state.owner_id),0)),
+    last_training_status='FAILED',last_training_reason=?,
+    forced_retrain=CASE WHEN NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END,updated_at=?
+    WHERE owner_id=? AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?)`)
+    .bind(snapshot?.newSampleCount ?? null, snapshot?.newSampleSequence ?? null, code, nowMs, ownerId, ownerId, job.job_key, job.generation, job.fence, nowMs));
+  statements.push(db.prepare(`UPDATE estimation_jobs SET status=?,lease_until=NULL,next_attempt_at=?,last_error=?,updated_at=?
+    WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`)
+    .bind(exhausted ? "FAILED" : "RETRY_WAIT", nextAttempt, code, nowMs, ownerId, job.job_key, job.generation, job.fence, nowMs));
+  await db.batch(statements);
+  await atlmReleaseSuperseded(db, ownerId, job, nowMs);
+}
+
+export async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
+  const wallClock = typeof options.wallClock === "function" ? options.wallClock : () => performance.now();
+  const started = wallClock();
+  const clock = typeof options.clock === "function" ? options.clock : () => nowMs + Math.max(0, Math.floor(wallClock() - started));
+  const budget = () => wallClock() - started < ATLM_TRAINING_BUDGET_MS;
+  await db.prepare("INSERT OR IGNORE INTO estimation_owner_state(owner_id) SELECT owner_id FROM owners WHERE owner_id=?").bind(ownerId).run();
+  // A crashed fourth attempt remains failed until new source data creates another generation.
+  const expiredAt = clock();
+  await db.batch([
+    db.prepare(`UPDATE estimation_owner_state SET last_attempted_new_sample_count=MAX(last_attempted_new_sample_count,
+      COALESCE((SELECT json_extract(snapshot_json,'$.newSampleCount') FROM estimation_jobs WHERE owner_id=? AND job_key='train'),new_sample_count)),
+      last_attempted_new_sample_sequence=MAX(last_attempted_new_sample_sequence,
+        COALESCE((SELECT json_extract(snapshot_json,'$.newSampleSequence') FROM estimation_jobs WHERE owner_id=estimation_owner_state.owner_id AND job_key='train'),
+          (SELECT MAX(sequence) FROM estimation_samples WHERE owner_id=estimation_owner_state.owner_id),0)),
+      last_training_status='FAILED',last_training_reason='LEASE_EXPIRED',updated_at=?,
+      forced_retrain=CASE WHEN NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END
+      WHERE owner_id=? AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key='train'
+        AND status='RUNNING' AND lease_until<=? AND attempts>=4)`).bind(ownerId, expiredAt, ownerId, ownerId, expiredAt),
+    db.prepare(`UPDATE estimation_jobs SET status=CASE WHEN attempts>=4 THEN 'FAILED' WHEN attempts=0 THEN 'QUEUED' ELSE 'RETRY_WAIT' END,
+      next_attempt_at=CASE WHEN attempts>=4 OR attempts=0 THEN 0 ELSE lease_until+CASE attempts WHEN 1 THEN 60000 WHEN 2 THEN 300000 ELSE 900000 END END,
+      lease_until=NULL,last_error=CASE WHEN attempts=0 THEN NULL ELSE 'LEASE_EXPIRED' END,updated_at=?
+      WHERE owner_id=? AND status='RUNNING' AND lease_until<=?`).bind(expiredAt, ownerId, expiredAt),
+  ]);
+  for (let operations = 0; operations < 100 && budget(); operations += 1) {
+    await atlmEnqueueTraining(db, ownerId, clock());
+    const next = await dbFirst(db, `SELECT * FROM estimation_jobs j WHERE j.owner_id=? AND j.generation>j.processed_generation
+      AND j.status IN ('QUEUED','RETRY_WAIT') AND j.next_attempt_at<=?
+      AND (j.kind='REFRESH_SAMPLE' OR NOT EXISTS(SELECT 1 FROM estimation_jobs r WHERE r.owner_id=j.owner_id AND r.kind='REFRESH_SAMPLE' AND r.generation>r.processed_generation))
+      ORDER BY CASE j.kind WHEN 'REFRESH_SAMPLE' THEN 0 ELSE 1 END,j.updated_at,j.job_key LIMIT 1`, ownerId, clock());
+    if (!next) break;
+    let job = await claimAtlmJob(db, ownerId, next.job_key, clock(), ATLM_TRAINING_LEASE_MS, { allowExpiredLease: false });
+    if (!job) continue;
+    try {
+      if (job.kind === "REFRESH_SAMPLE") {
+        const source = await readAtlmSampleSource(db, ownerId, job.plan_id, clock());
+        await persistAtlmSample(db, ownerId, source, clock(), { generation: job.generation, fence: job.fence });
+        await db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',lease_until=NULL,next_attempt_at=0,last_error=NULL,updated_at=?
+          WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`)
+          .bind(clock(), ownerId, job.job_key, job.generation, job.fence, clock()).run();
+        await atlmReleaseSuperseded(db, ownerId, job, clock());
+        continue;
+      }
+      let snapshot = atlmTrainingJson(job.snapshot_json), checkpoint = atlmTrainingJson(job.checkpoint_json), rows;
+      if (!snapshot) {
+        const initial = await atlmSnapshot(db, ownerId, job, clock);
+        if (!initial) { await atlmCheckpoint(db, ownerId, job, { phase: "SNAPSHOT", cases: [], progressRevision: (checkpoint?.progressRevision ?? 0) + 1 }, clock(), { release: true }); break; }
+        ({ snapshot, checkpoint, rows } = initial);
+        job.snapshot_json = JSON.stringify(snapshot);
+      }
+      if (snapshot.resourceLimitReached) {
+        await atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint,
+          { activate: false, status: "FAILED", reason: "DATASET_LIMIT_REACHED", artifact: null, evaluation: null }, clock());
+        continue;
+      }
+      rows ||= await atlmManifestRows(db, ownerId, snapshot.manifest);
+      if (snapshot.selection?.status !== "AVAILABLE") {
+        await atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint,
+          { activate: false, status: "COLLECTING_DATA", reason: snapshot.selection?.reason || "INVALID_DATASET", artifact: null, evaluation: null }, clock());
+        continue;
+      }
+      let lostLease = false;
+      while (checkpoint.cases.length < snapshot.selection.caseSampleIds.length && budget()) {
+        const result = await evaluateAtlmCase(rows, snapshot.selection.caseSampleIds[checkpoint.cases.length], { protocolVersion: 1, cutoff: snapshot.trainCutoff });
+        checkpoint = { ...checkpoint, phase: "EVALUATE", cases: [...checkpoint.cases, result], progressRevision: checkpoint.progressRevision + 1 };
+        const saved = await atlmCheckpoint(db, ownerId, job, checkpoint, clock());
+        if (!saved) { lostLease = true; break; }
+      }
+      if (lostLease) break;
+      if (!budget() || checkpoint.cases.length < snapshot.selection.caseSampleIds.length) {
+        await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true });
+        break;
+      }
+      const evaluation = summarizeAtlmEvaluation(checkpoint.cases, snapshot.selection);
+      const initialReady = evaluation.paired?.caseCount >= 5;
+      const initialGood = initialReady && evaluation.paired.atlm.maeMs <= evaluation.paired.median.maeMs;
+      let rejection = !initialReady ? "INSUFFICIENT_EVALUATION_CASES" : !initialGood ? "MEDIAN_BASELINE_BETTER" : null;
+      const incumbent = snapshot.incumbentId ? await dbFirst(db, `SELECT m.*,(SELECT MAX(s.source_available_at) FROM estimation_samples s
+        WHERE s.owner_id=m.owner_id AND s.sequence IN (SELECT value FROM json_each(m.manifest_json))) AS latest_source_available_at
+        FROM estimation_models m WHERE m.owner_id=? AND m.model_id=?`, ownerId, snapshot.incumbentId) : null;
+      if (!rejection) {
+        const comparison = atlmCompareIncumbent(evaluation, incumbent);
+        evaluation.incumbentComparison = comparison.comparison;
+        if (!comparison.accepted) rejection = comparison.reason;
+      }
+      if (rejection) {
+        await atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, { activate: false,
+          status: rejection.startsWith("INSUFFICIENT_") ? "COLLECTING_DATA" : "REJECTED", reason: rejection, artifact: null, evaluation }, clock());
+        continue;
+      }
+      checkpoint = { ...checkpoint, phase: "FIT", progressRevision: checkpoint.progressRevision + 1 };
+      if (!await atlmCheckpoint(db, ownerId, job, checkpoint, clock())) break;
+      if (!budget()) { await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true }); break; }
+      const fitted = await fitAtlm(rows);
+      const final = { activate: fitted.status === "AVAILABLE", status: fitted.status === "AVAILABLE" ? "IDLE" : "COLLECTING_DATA",
+        artifact: fitted.artifact || null, reason: fitted.reason || null, evaluation };
+      if (!await atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, final, clock())) {
+        // A changed source invalidates this snapshot. A new generation captures current facts.
+        await atlmSupersedeSnapshot(db, ownerId, job, snapshot, clock());
+        break;
+      }
+    } catch (error) {
+      await atlmRecordFailure(db, ownerId, job, error, clock());
+      throw appError("SOURCE_UNAVAILABLE", "Не удалось завершить фоновое обучение. Задание сохранено для повтора.", 503,
+        { retryable: true, reason: atlmTrainingErrorCode(error) });
+    }
+  }
+  return getEstimationModelStatus(db, ownerId, clock());
+}
+
+export function scheduleAtlmTraining(db, ownerId, nowMs, ctx, clock) {
+  if (!ctx || typeof ctx.waitUntil !== "function") return;
+  try {
+    const scheduledAt = performance.now();
+    const trainingClock = typeof clock === "function" ? clock : () => nowMs + Math.max(0, Math.floor(performance.now() - scheduledAt));
+    const task = Promise.resolve().then(async () => {
+      // At most two bounded passes fit within the host's usual waitUntil lifetime.
+      let previous = null;
+      for (let pass = 0; pass < 2; pass += 1) {
+        const status = await processEstimationTraining(db, ownerId, trainingClock(), { clock: trainingClock });
+        const progress = canonical([status.datasetRevision, status.training.generation, status.training.progressRevision, status.training.pendingRefreshCount]);
+        if (!status.training.due || progress === previous) break;
+        previous = progress;
+      }
+    }).catch(error => { console.error(JSON.stringify({ event: "atlm_training_background_error", reason: atlmTrainingErrorCode(error) })); });
+    ctx.waitUntil(task);
+  } catch (error) {
+    console.error(JSON.stringify({ event: "atlm_training_schedule_error", reason: atlmTrainingErrorCode(error) }));
+  }
+}
+
 function publicView(value) {
   if(Array.isArray(value)) return value.map(publicView);
   if(!value || typeof value!=="object") return value;
@@ -3093,7 +3789,7 @@ function publicView(value) {
   return result;
 }
 
-async function apiRoute(request, env, url, channel, now, clock = () => now) {
+async function apiRoute(request, env, url, channel, now, clock = () => now, ctx) {
   validateOrigin(request);
   const identity = requireOwner(request);
   if (!env.DB) throw appError("INTERNAL_ERROR", "D1 binding DB не настроен.", 503);
@@ -3128,6 +3824,17 @@ async function apiRoute(request, env, url, channel, now, clock = () => now) {
 
   if (request.method === "GET" && url.pathname === "/api/tracker/capabilities") return json(await readTrackerCapabilities(env.DB, identity.ownerId));
   if (request.method === "POST" && url.pathname === "/api/tracker/assessment") return json(await readAssessment(env.DB, identity.ownerId, await bodyJson(request), now));
+  const atlmPaths = { "/api/tracker/atlm-estimate": "CalculateAtlmEstimate", "/api/tracker/atlm-dataset": "GetAtlmDataset", "/api/tracker/estimation-model/process": "ProcessEstimationTraining" };
+  if (request.method === "POST" && atlmPaths[url.pathname]) return json(await executeAtlmTool(env.DB, identity.ownerId, atlmPaths[url.pathname], await bodyJson(request), now, clock));
+  if (request.method === "GET" && url.pathname === "/api/tracker/estimation-model") {
+    if (url.search) throw appError("VALIDATION_ERROR", "Model status accepts no query parameters.");
+    return json(await executeAtlmTool(env.DB, identity.ownerId, "GetEstimationModelStatus", {}, now, clock));
+  }
+  const atlmPlanMatch = url.pathname.match(/^\/api\/tracker\/plans\/([^/]+)\/estimate$/);
+  if (request.method === "GET" && atlmPlanMatch) {
+    if (url.search) throw appError("VALIDATION_ERROR", "Plan estimate accepts only planId.");
+    return json(await executeAtlmTool(env.DB, identity.ownerId, "GetPlanEstimate", { planId: decodeURIComponent(atlmPlanMatch[1]) }, now, clock));
+  }
   if (request.method === "POST" && url.pathname === "/api/tracker/estimation-history") return json(await readEstimationHistory(env.DB, identity.ownerId, await bodyJson(request), now));
   const trackerReceiptMatch = url.pathname.match(/^\/api\/tracker\/commands\/([^/]+)$/);
   if (request.method === "GET" && trackerReceiptMatch) return json(await readCommandReceipt(env.DB, identity.ownerId, decodeURIComponent(trackerReceiptMatch[1])));
@@ -3151,7 +3858,9 @@ async function apiRoute(request, env, url, channel, now, clock = () => now) {
   }
   if (request.method === "POST" && url.pathname === "/api/commands") {
     const envelope=await bodyJson(request); validatePublicCommand(envelope);
-    return json(await executeCommand(env.DB, identity, envelope, channel, now));
+    const result = await executeCommand(env.DB, identity, envelope, channel, now);
+    scheduleAtlmTraining(env.DB, identity.ownerId, now, ctx, clock);
+    return json(result);
   }
   const stepAnalyticsMatch = url.pathname.match(/^\/api\/analytics\/plans\/([^/]+)\/steps$/);
   if (request.method === "GET" && stepAnalyticsMatch) {
@@ -3172,7 +3881,7 @@ async function apiRoute(request, env, url, channel, now, clock = () => now) {
   throw appError("NOT_FOUND", "Маршрут не найден.", 404);
 }
 
-const TOOL_NAMES = ["CreatePlan", "GetPlan", "ListPlans", "StartPlan", "PausePlan", "ResumePlan", "FinishPlan", "DeletePlan", "RestorePlan", "UpdatePlanMetadata", "GetAnalytics", ...TRACKER_READ_TOOLS, ...TRACKER_COMMANDS];
+const TOOL_NAMES = ["CreatePlan", "GetPlan", "ListPlans", "StartPlan", "PausePlan", "ResumePlan", "FinishPlan", "DeletePlan", "RestorePlan", "UpdatePlanMetadata", "GetAnalytics", ...TRACKER_READ_TOOLS, ...TRACKER_COMMANDS, "ProcessEstimationTraining"];
 function mcpTools() {
   const writeNames = new Set([...WRITE_COMMANDS, ...TRACKER_COMMANDS]);
   const assessmentDescriptions = {
@@ -3183,6 +3892,13 @@ function mcpTools() {
   };
   return TOOL_NAMES.map((name) => {
     let inputSchema = { type: "object", additionalProperties: false };
+    if (Object.hasOwn(ATLM_TOOL_SCHEMAS, name)) return { name, description: ({
+      CalculateAtlmEstimate: "Предпросмотр полного PLAN_ACTIVE по активной ATLM-модели владельца до первого StartPlan. Только факты AgentTaskV1; ничего не обучает и не сохраняет.",
+      GetPlanEstimate: "Сохранённый прогноз плана; после первого запуска только исходная frozen-оценка. isStale отмечает изменение требований или исходных данных модели.",
+      GetEstimationModelStatus: "Состояние модели, накопление пригодных планов и очередь обучения владельца. Только чтение.",
+      ProcessEstimationTraining: "Один ограниченный проход долговечной очереди владельца. Идемпотентная мутация без planId, с lease и fence; может потребоваться повторный проход.",
+      GetAtlmDataset: "Приватная постраничная выгрузка неизменяемых sample-версий. Сохраняйте nextCursor; DATASET_CHANGED требует начать заново. Используется последняя версия каждого плана, только если она пригодна.",
+    })[name], inputSchema: ATLM_TOOL_SCHEMAS[name], annotations: { readOnlyHint: name !== "ProcessEstimationTraining", destructiveHint: false, idempotentHint: true, openWorldHint: false } };
     if (name === "GetPlan") inputSchema = { type: "object", required: ["planId"], properties: { planId: { type: "string", format: "uuid" } }, additionalProperties: false };
     else if (name === "ListPlans") inputSchema = { type: "object", properties: {
       statuses: { type: "array", minItems: 1, maxItems: 4, uniqueItems: true, items: { enum: PLAN_STATUSES } },
@@ -3331,7 +4047,7 @@ function unexpectedMcpErrorReason(error) {
   return "UNEXPECTED_ERROR";
 }
 
-async function mcpRoute(request, env, now) {
+async function mcpRoute(request, env, now, ctx, clock = () => now) {
   if (request.method !== "POST") return json({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "POST required" } }, 405);
   validateOrigin(request);
   const rpc = await bodyJson(request);
@@ -3352,7 +4068,8 @@ async function mcpRoute(request, env, now) {
     if(WRITE_COMMANDS.has(name)||TRACKER_COMMANDS.has(name)) validatePublicCommand({...args,commandType:name});
     await ensureOwner(env.DB, identity, now);
     let result;
-    if (name === "GetPlan") result = await readPlan(env.DB, identity.ownerId, args.planId, now);
+    if (Object.hasOwn(ATLM_TOOL_SCHEMAS, name)) result = await executeAtlmTool(env.DB, identity.ownerId, name, rpc.params?.arguments === undefined ? {} : rpc.params.arguments, now, clock);
+    else if (name === "GetPlan") result = await readPlan(env.DB, identity.ownerId, args.planId, now);
     else if (name === "GetAssessment") result = await readAssessment(env.DB, identity.ownerId, args, now);
     else if (name === "CalculateEstimate") result = await readCalculatedEstimate(env.DB, identity.ownerId, args, now);
     else if (name === "GetEstimationHistory") result = await readEstimationHistory(env.DB, identity.ownerId, args, now);
@@ -3365,6 +4082,7 @@ async function mcpRoute(request, env, now) {
     else if (WRITE_COMMANDS.has(name) || TRACKER_COMMANDS.has(name)) {
       const envelope = { ...args, schemaVersion: args.schemaVersion || 1, commandType: name };
       result = await executeCommand(env.DB, identity, envelope, "mcp", now);
+      scheduleAtlmTraining(env.DB, identity.ownerId, now, ctx, clock);
     } else throw appError("VALIDATION_ERROR", "Неизвестный MCP tool.");
     return json({ jsonrpc: "2.0", id: id, result: { content: [{ type: "text", text: JSON.stringify(publicView(result)) }], structuredContent: publicView(result) } });
   } catch (error) {
@@ -3401,9 +4119,9 @@ export function createWorker(clock) {
       const url = new URL(request.url);
       try {
         const now = getNow();
-        if (url.pathname === "/mcp") return await mcpRoute(request, env, now);
+        if (url.pathname === "/mcp") return await mcpRoute(request, env, now, ctx, getNow);
         if (url.pathname.startsWith("/api/")) {
-          const response=await apiRoute(request,env,url,"ui",now,getNow);
+          const response=await apiRoute(request,env,url,"ui",now,getNow,ctx);
           return new Response(JSON.stringify(publicView(await response.json())),{status:response.status,headers:response.headers});
         }
         if (request.method !== "GET" && request.method !== "HEAD") throw appError("NOT_FOUND", "Маршрут не найден.", 404);

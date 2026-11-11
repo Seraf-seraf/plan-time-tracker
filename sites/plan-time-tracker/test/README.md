@@ -1,5 +1,40 @@
 # Isolated verification
 
+ATLM adds `atlm-core`, `atlm-evaluation`, `atlm-features`, `atlm-storage`,
+`atlm-migration`, `atlm-training`, and `atlm-mcp` tests to the existing `npm test`
+pattern. Their fixed examples exercise numerical correctness, chronological
+cutoffs, atomic pre-start input capture, one-time experience counts, owner scope,
+queue recovery/fencing and HTTP/MCP compatibility. Synthetic evidence is not a
+claim of forecast accuracy on the owner's tasks.
+
+`ui-atlm.mjs` is part of `npm run test:ui`. It checks the saved forecast, unavailable
+input/cold-start, stale forecasts, retained predictions while a candidate is
+rejected, real HTTP error/retry, bounded automatic queue recovery, late responses
+after plan switches, keyboard controls and 320/390/768/1440 px layouts. The suite
+uses real Worker/SQLite for the initial empty model and pending-source recovery path and controlled responses
+for model/status scenarios. No production data is written. Screenshots are saved
+in `UI_ACCEPTANCE_ARTIFACT_DIR` (default `/tmp/tracker-atlm-ui`).
+
+Run plugin instructions/package checks from plugin/plan-time-tracker with
+`node --test test/atlm-instructions.test.mjs test/package.test.mjs`. The instruction
+test checks the delivered text against actual MCP discovery and submits its sample
+assessment using the real schema. It does not prove a hosted agent always invokes
+the skill or supplies semantically perfect inputs.
+
+
+The implementation review included two independent classifications of the same
+three requirements without durations. Both passes agreed on all structural fields:
+
+| Fixed requirement | Profile | Outcomes / contracts / checks |
+| --- | --- | --- |
+| Fix existing mobile button layout, build and browser check, finish locally | MODIFY_MECHANISM / PARTIAL / LOCAL_VERIFIED | 1 / 0 / BUILD_STATIC + UI_E2E |
+| Create absent MCP AddNote and notes table, unit/integration, publish | CREATE_MECHANISM / ABSENT / PUBLISHED | 1 / 2 (MCP + STORAGE) / UNIT + INTEGRATION |
+| Investigate two independent causes, report only, no required automated checks | INVESTIGATE / ABSENT / ANALYSIS | 2 / 0 / empty |
+
+The report in the third case carries the two results; it is not a third outcome.
+This small instruction calibration does not establish agreement on arbitrary tasks
+or forecast accuracy. No calibration case was added to the production dataset.
+
 `status-history.test.js` verifies bounded owner-scoped pages of legacy and tracker events, stable pagination while new events arrive, parameter validation, and omission of event queries from lightweight plan reads. `ui-status-history.mjs` is included in `test:ui`: it checks that history is not fetched until opened, error/retry, cached previous pages, explicit refresh, empty history, late responses after switching plans, and 320–1440px layouts. Set `SITE_WORKER_MODULE` to test a separately built Sites Worker with the same isolated fixtures.
 
 Run `npm test` for built-artifact, owner/lifecycle/timer, receipt replay, concurrency, historical-schema, v2 evidence and VM client-contract checks. The SQLite databases are in memory and use all canonical migrations.

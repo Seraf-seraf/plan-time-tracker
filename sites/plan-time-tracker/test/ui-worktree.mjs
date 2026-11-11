@@ -1,24 +1,15 @@
 // Real Worker + migrated, in-memory SQLite behind a local browser route. No production traffic.
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
-import { readFileSync, readdirSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createWorker } from "../worker/index.js";
+import { context as databaseContext } from "./fixtures/tracker-db.mjs";
 const modulePath = process.env.PLAYWRIGHT_MODULE || "playwright";
 const { chromium } = await import(modulePath.startsWith("/") ? pathToFileURL(modulePath).href : modulePath);
-const sqlite = new DatabaseSync(":memory:");
-const migrations = new URL("../drizzle/", import.meta.url);
-for (const file of readdirSync(migrations).filter(file => file.endsWith(".sql")).sort()) sqlite.exec(readFileSync(new URL(file, migrations), "utf8"));
-class Statement {
-  constructor(sql, args = []) { Object.assign(this, { sql, args }); }
-  bind(...args) { return new Statement(this.sql, args); }
-  async run() { return { meta: { changes: Number(sqlite.prepare(this.sql).run(...this.args).changes) } }; }
-  async first() { return sqlite.prepare(this.sql).get(...this.args) || null; }
-  async all() { return { results: sqlite.prepare(this.sql).all(...this.args) }; }
-}
+const { db } = databaseContext(), sqlite = db.sqlite; // shared atomic D1 batch adapter
 let now = Date.now();
-const db = { prepare(sql) { return new Statement(sql); } }, worker = createWorker(() => now), owner = "source-browser-fixture";
+const worker = createWorker(() => now), owner = "source-browser-fixture";
 const origin = "http://localhost", digest = "sha256:" + "a".repeat(64);
 const legacyPlan = "11111111-1111-4111-8111-111111111111", snapshotPlan = "22222222-2222-4222-8222-222222222222";
 const requiredChecks = ["unit", "postgres", "typecheck", "lint"];
@@ -51,19 +42,22 @@ mkdirSync(artifactDir, { recursive: true });
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE || "/usr/bin/chromium", headless: true, args: ["--no-sandbox"] });
 const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
 await context.addInitScript(() => { window.__confirmChoice = false; window.confirm = () => window.__confirmChoice; });
-const page = await context.newPage(), posts = [], errors = [];
+const page = await context.newPage(), posts = [], errors = [], queuePasses = [];
 page.setDefaultTimeout(5000);
 page.on("pageerror", error => errors.push(error.message));
 await page.route("**/*", async route => {
   const request = route.request(), url = new URL(request.url());
   assert.equal(url.origin, origin, "production/external traffic is forbidden in this fixture");
-  if (request.method() === "POST") posts.push({ path: url.pathname, body: request.postDataJSON() });
+  const body = request.postDataJSON(), queuePass = request.method() === "POST" && url.pathname === "/api/tracker/estimation-model/process" && JSON.stringify(body) === "{}";
+  if (request.method() === "POST" && !queuePass) posts.push({ path: url.pathname, body });
   const response = await fetchLocal(url.pathname + url.search, { method: request.method(), ...(request.postData() ? { body: request.postData() } : {}) });
-  if (response.status >= 400) console.error(url.pathname, response.status, await response.clone().text());
+  if (queuePass) queuePasses.push(response.status);
+  if (response.status >= 500 || (queuePass && !response.ok)) errors.push("HTTP " + response.status + " " + url.pathname);
   await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() });
 });
 try {
-  await page.goto(origin);
+  const navigation = await page.goto(origin, { waitUntil: "domcontentloaded" });
+  assert.equal(navigation?.status(), 200, "owner UI document must be delivered successfully");
   await page.locator('#plans[data-loaded="true"]').waitFor({ state: "attached" });
   assert.equal(await page.getByRole("button",{name:"Репозитории",exact:true}).count(),0);
   assert.equal(await page.locator('#repoIds,#sync,#repos,#overviewRepo,#planRepo,#analyticsRepo').count(),0);
@@ -144,8 +138,10 @@ try {
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS n FROM tracker_finish_exceptions").get().n, 0);
   assert(!posts.some(post=>/Repository|Commit/.test(post.body.commandType)));
   assert(!posts.some(post=>/repositoryId|commitPolicy|pushPolicy|revisionSha|testedSha/.test(JSON.stringify(post.body))));
+  assert(queuePasses.length > 0, "the shared adapter must execute the pending ATLM source refresh");
+  assert(queuePasses.every(status => status === 200), "queue maintenance must succeed, not be suppressed");
   assert.deepEqual(errors, []);
-  const report = { passed: true, backend: "actual Worker + in-memory migrated SQLite", productionRequests: 0, widths, commands: posts.map(post => post.body.commandType), checks: ["source-less legacy block", "consistent badges and conditions", "snapshot result and checks", "repository-free evidence", "cancel normal/exception", "double-click finish", "no Git prerequisite", "closed timer"] };
+  const report = { passed: true, backend: "actual Worker + in-memory migrated SQLite", productionRequests: 0, widths, commands: posts.map(post => post.body.commandType), queuePasses: queuePasses.length, checks: ["source-less legacy block", "consistent badges and conditions", "snapshot result and checks", "repository-free evidence", "cancel normal/exception", "double-click finish", "no Git prerequisite", "closed timer", "atomic queue maintenance"] };
   writeFileSync(resolve(artifactDir, "report.json"), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report));
 } catch (error) { console.error(JSON.stringify({fixturePageErrors:errors,rows:await page.locator("#plans").innerHTML(),toast:await page.locator("#toast").innerText(),detail:(await page.locator("#planDetail").innerText()).slice(0,300)}));throw error; } finally { await browser.close(); sqlite.close(); }

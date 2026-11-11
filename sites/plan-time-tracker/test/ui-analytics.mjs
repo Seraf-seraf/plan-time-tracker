@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { context, OWNER, PLAN, ok, result, rows } from "./fixtures/tracker-db.mjs";
+import { context, OWNER, PLAN, ok, result, rows, call } from "./fixtures/tracker-db.mjs";
 const modulePath = process.env.PLAYWRIGHT_MODULE || "playwright";
 const { chromium } = await import(modulePath.startsWith("/") ? pathToFileURL(modulePath).href : modulePath);
 const c = context();c.advance(Date.UTC(2026, 9, 15, 10) - c.now());
@@ -54,14 +54,33 @@ await seedOverlap(fullOverlapId, 0);await seedOverlap(partialOverlapId, 60000);
 await ok(c, "CreatePlan", { planId: lazyId, title: "Проверка среза · тестовые данные", planCreatedAt: { precision: "dateOnly", on: "2026-10-15", timeZone: "UTC" } });
 await ok(c, "CreateStep", { planId: lazyId, ordinal: 0, title: "Пункт на момент отчёта", expectedResult: "Synthetic cutoff", requiredChecks: [] });
 await ok(c, "StartPlan", { planId: lazyId }, 0);c.advance(1000);
+// Settle fixture-created background work before proving that analytics reads leave
+// every table unchanged. Real UI queue recovery is covered by ui-atlm.mjs.
+let preparedQueuePasses = 0;
+async function settleSourceRefresh() {
+  for (let pass = 0; pass <= 8; pass++) {
+    const status = await call(c, "/api/tracker/estimation-model");
+    assert.equal(status.status, 200, JSON.stringify(status.value));
+    if (!status.value.training.due) return;
+    assert(pass < 8, "fixture source refresh must finish in a bounded number of passes");
+    const processed = await call(c, "/api/tracker/estimation-model/process", {});
+    assert.equal(processed.status, 200, JSON.stringify(processed.value));preparedQueuePasses++;
+  }
+}
+await settleSourceRefresh();
 let before = rows(c);
 async function routePage(page) {
   page.setDefaultTimeout(8000);page.on("pageerror", e => errors.push(e.message));
   await page.route("**/*", async route => {
     const request = route.request(), url = new URL(request.url());
-    assert.equal(url.origin, "http://localhost", "external requests are forbidden");requests.push({ method: request.method(), path: url.pathname });
+    assert.equal(url.origin, "http://localhost", "external requests are forbidden");
+    const body = request.postDataJSON(), entry = { method: request.method(), path: url.pathname, body };
+    const queuePass = entry.method === "POST" && entry.path === "/api/tracker/estimation-model/process" && JSON.stringify(body) === "{}";
+    requests.push(entry);
     if (url.pathname.includes("/steps") && failOnce) { failOnce = false;return route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { message: "Synthetic temporary failure" } }) }); }
-    const response = await c.worker.fetch(new Request(request.url(), { method: request.method(), headers: { "oai-authenticated-user-id": OWNER } }), { DB: c.db });
+    const response = await c.worker.fetch(new Request(request.url(), { method: request.method(), headers: { "content-type": "application/json", "oai-authenticated-user-id": OWNER }, ...(request.postData() ? { body: request.postData() } : {}) }), { DB: c.db });
+    entry.responseStatus = response.status;
+    if (response.status >= 500 || (queuePass && !response.ok)) errors.push("HTTP " + response.status + " " + url.pathname);
     if (url.pathname.includes("/steps") && pendingDetail) { const hold = pendingDetail;pendingDetail = null;await hold; }
     return route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() });
   });
@@ -119,7 +138,7 @@ try {
   assert.match(await partial.locator(".step-column").first().getAttribute("aria-label"), /только однозначная часть/);
   assert.deepEqual(rows(c), before, "reads before the cutoff mutation do not change data");
   c.advance(1);await ok(c, "CreateStep", { planId: lazyId, ordinal: 1, title: "Создан после отчёта", expectedResult: "Synthetic late section", requiredChecks: [] });
-  before = rows(c);const lazy = card(page, lazyId);await lazy.locator("summary.row").click();await lazy.locator(".step-column").first().waitFor();
+  await settleSourceRefresh();before = rows(c);const lazy = card(page, lazyId);await lazy.locator("summary.row").click();await lazy.locator(".step-column").first().waitFor();
   assert.equal(await lazy.locator(".step-column").count(), 1, "lazy expansion uses the accepted report cutoff");
   await page.locator("#apply").click();await page.waitForFunction(() => !document.querySelector(".analytics-plan[open]"));
   await card(page, lazyId).locator("summary.row").click();await card(page, lazyId).locator(".step-column").nth(1).waitFor();
@@ -175,7 +194,9 @@ try {
       assert.equal(await mobile.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     }
   }
-  assert.deepEqual(rows(c), before, "browser analytics never mutates plan data");assert(requests.every(r => r.method === "GET"));assert.deepEqual(errors, []);
-  const report = { passed: true, backend: "actual Worker + isolated SQLite", productionRequests: 0, widths: [360, 390, 768, 1440], checks: ["name and document title", "preserved metrics/day bars/navigation", "hover bar and X label", "full long title and exact milliseconds", "focus/Tab/Escape", "mobile touch bar and label", "collapse and keyboard reopen", "one/zero/40 sections", "zero vs unavailable attribution", "full overlap is uncertain, not zero", "partial overlap is visibly incomplete and accessible by focus/tap", "lazy expansion excludes a later section until a fresh report", "local horizontal scrolling without page overflow", "load error and retry", "stale response after period change", "read-only requests and unchanged DB apart from the explicit synthetic late-section fixture"] };
+  assert.deepEqual(rows(c), before, "browser analytics never mutates any data after explicit fixture preparation");
+  assert(requests.every(r => r.method === "GET"), "analytics remains read-only after fixture queue preparation");
+  assert.deepEqual(errors, []);
+  const report = { passed: true, backend: "actual Worker + isolated SQLite", productionRequests: 0, widths: [360, 390, 768, 1440], preparedQueuePasses, checks: ["name and document title", "preserved metrics/day bars/navigation", "hover bar and X label", "full long title and exact milliseconds", "focus/Tab/Escape", "mobile touch bar and label", "collapse and keyboard reopen", "one/zero/40 sections", "zero vs unavailable attribution", "full overlap is uncertain, not zero", "partial overlap is visibly incomplete and accessible by focus/tap", "lazy expansion excludes a later section until a fresh report", "local horizontal scrolling without page overflow", "load error and retry", "stale response after period change", "read-only requests and unchanged DB apart from explicit synthetic fixture preparation", "fixture ATLM source refresh confirmed over HTTP"] };
   writeFileSync(resolve(artifacts, "analytics-report.json"), JSON.stringify(report, null, 2));console.log(JSON.stringify(report));
 } finally { releaseDetail?.();await browser.close();c.close(); }

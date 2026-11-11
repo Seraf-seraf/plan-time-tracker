@@ -14,6 +14,16 @@ Use this skill for `/plan`, ordinary planning, assessment, execution and continu
 3. Confirm the requested checkpoint, scope, expected result, required checks, current result revision, attempts and server readiness. `GetPlan` and `GetPlanExecutionSnapshot` always take the bound `planId`.
 4. Use current tool discovery. Removed repository/synchronization/commit/push tools and fields are unsupported, including replay of old commands. Historical evidence is retained internally and is never a prerequisite for a new result.
 
+## ATLM pre-start assessment and accumulated experience
+
+Discover `assessments.atlm` with GetTrackerCapabilities. Before the first StartPlan, use assess-task to read GetAssessment({planId}) without assessmentId, describe facts in `context.agentTask` (`agent-task-v1`) and save RecordAssessment with `predictionRequest:{method:"ATLM",methodVersion:1}` and the previously read expectedRequirementsDigest. All existing required assessment fields and receipt/CAS rules still apply. The server writes `assessment.serverEstimation`; clients never supply that field, coefficients, durations or candidates for ATLM. Unknown categories/lists remain UNKNOWN/null; confirmed absence is []. A point alone leaves legacy forecast UNKNOWN with null bounds and confidence UNKNOWN.
+
+The first-start transaction captures an already committed matching assessment; Resume, later revisions and restored plans never replace it. Missing source features do not become invented historical training data. GetPlanEstimate returns the saved initial forecast and isStale; it does not estimate already started plans retroactively. ATLM predicts complete PLAN_ACTIVE/FULL_FROM_FIRST_START, not remaining work. Preserve the initial assessment/modelId at handoff; changed scope needs a new reasoned revision without predictionRequest after start, not replacement of the original snapshot.
+
+At session start call GetEstimationModelStatus; when `training.due=true`, make one ProcessEstimationTraining call. Queue maintenance never creates a recursive plan or starts a timer. COLLECTING_DATA is an explicit data state, while authentication/DB failures remain errors. Successful completion and actual required checks feed eligible samples; every five new eligible unique plans trigger a checked refit using accumulated history. Retries, revisions and restoration do not count as new plans. Training failure cannot undo confirmed FinishPlan. A persisted interrupted queue resumes on the next interaction; no retry timer is promised while there is no traffic.
+
+The canonical input definitions and examples are in the bundled assess-task skill; use discovered runtime schemas, not a second hand-maintained field list. The historical CalculateEstimate/GetEstimationHistory workflow remains separate and unchanged. Runtime release, GitHub package and installed hosted plugin have separate version/delivery checks.
+
 ## Explicit time and checkpoint lifecycle
 
 - `CreatePlan` only registers a plan. On the user's request to execute that specific plan, call `StartPlan` when PLANNED; on their request to continue that specific paused plan, call `ResumePlan`. These requests already provide the required lifecycle intent. An already RUNNING plan needs neither registration nor another start. A completed plan is not silently duplicated or reopened.
