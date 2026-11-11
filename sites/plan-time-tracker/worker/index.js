@@ -1,6 +1,6 @@
 import { UI_FONT_CSS } from "./fonts.js";
 
-const TRACKER_VERSION = "0.4.0";
+const TRACKER_VERSION = "0.5.0";
 const BODY_LIMIT = 128 * 1024;
 const TRACKER_LEASE_MS = 10 * 60 * 1000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

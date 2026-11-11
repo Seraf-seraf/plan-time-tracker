@@ -192,9 +192,9 @@ test("MCP discovery and HTTP expose the same strict neutral contract and version
       assert.equal((await mcp(c, "GetEstimationHistory", args)).value.result.isError, true);
     }
     const init = await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "initialize" });
-    assert.equal(init.value.result.serverInfo.version, "0.4.0");
+    assert.equal(init.value.result.serverInfo.version, "0.5.0");
     const caps = (await mcp(c, "GetTrackerCapabilities")).value.result.structuredContent;
-    assert.equal(caps.version, "0.4.0"); assert.equal(caps.assessments.methodologyControlsExecution, false);
+    assert.equal(caps.version, "0.5.0"); assert.equal(caps.assessments.methodologyControlsExecution, false);
     const listing = await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const tool = listing.value.result.tools.find(t => t.name === "RecordAssessment");
     assert.ok(tool.inputSchema.required.includes("expectedVersion"));
