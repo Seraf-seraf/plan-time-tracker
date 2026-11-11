@@ -18,7 +18,20 @@ class Statement {
 export function context(until = migrations.length, { databasePath = ":memory:" } = {}) {
   const sqlite = new DatabaseSync(databasePath);
   for (const name of migrations.slice(0, until)) sqlite.exec(migration(name));
-  const db = { sqlite, prepare(sql) { return new Statement(this, sql); } };
+  const db = { sqlite, prepare(sql) { return new Statement(this, sql); }, async batch(statements) {
+    sqlite.exec("SAVEPOINT d1_batch");
+    try {
+      const result = statements.map(item => {
+        if (!(item instanceof Statement) || item.db !== this) throw new Error("batch statement belongs to another database");
+        const statement = sqlite.prepare(item.sql);
+        if (statement.columns().length) return { results: statement.all(...item.args), success: true, meta: {} };
+        const applied = statement.run(...item.args);
+        return { results: [], success: true, meta: { changes: Number(applied.changes), last_row_id: Number(applied.lastInsertRowid) } };
+      });
+      sqlite.exec("RELEASE d1_batch");
+      return result;
+    } catch (error) { sqlite.exec("ROLLBACK TO d1_batch; RELEASE d1_batch"); throw error; }
+  } };
   let now = 1800000000000;
   const worker = createWorker(() => now);
   return { db, worker, now: () => now, advance: ms => { now += ms; }, close: () => sqlite.close() };
@@ -61,3 +74,37 @@ export function rows(c) {
   return Object.fromEntries(names.map(name => [name, c.db.sqlite.prepare('SELECT * FROM "' + name + '"').all().map(row => JSON.stringify(row)).sort()]));
 }
 export const internalCommand = (c, type, payload, version, id) => executeCommand(c.db, { ownerId: OWNER }, envelope(type, payload, version, id), "ui", c.now());
+
+export function atlmTask() {
+  return { schemaVersion: "agent-task-v1", profile: { workKind: "MODIFY_MECHANISM", reuseState: "PARTIAL", doneBoundary: "LOCAL_VERIFIED" },
+    outcomes: [{ id: "feature", description: "Change existing behavior", evidence: "Synthetic requirement" }], changedContracts: [], verificationKinds: ["UNIT"],
+    profileEvidence: { workKind: "Existing behavior changes", reuseState: "Existing mechanism needs modification", doneBoundary: "Local checked result" },
+    runtimeContext: { modelId: null, reasoningEffort: null, environmentId: null, plannedParallelAgents: null, provenance: "UNKNOWN" } };
+}
+export async function atlmAssessment(c, planId = PLAN, task = atlmTask(), overrides = {}) {
+  const response = await mcp(c, "GetAssessment", { planId });
+  const expectedRequirementsDigest = response.value.result.structuredContent.currentRequirementsDigest;
+  return { assessmentId: crypto.randomUUID(), planId, expectedRequirementsDigest, phase: "planning", context: { agentTask: task },
+    method: { id: "agent-task-features", version: "1", scale: { schema: "agent-task-v1" } },
+    complexity: { status: "UNKNOWN", value: null, rationale: "Descriptive inputs only" }, unknowns: [], assumptions: [], dependencies: [],
+    forecast: { status: "UNKNOWN", metric: "PLAN_ACTIVE", lowerMs: null, upperMs: null, confidence: "UNKNOWN", basis: "No model yet", sampleCount: 0 },
+    sources: [], approach: { description: "Modify and verify", rationale: "Existing mechanism" }, ...overrides };
+}
+export async function plannedAtlm(c, planId = PLAN, task = atlmTask()) {
+  await ok(c, "CreatePlan", { planId, title: "ATLM synthetic feature", planCreatedAt: { precision: "dateOnly", on: "2027-01-01", timeZone: "UTC" } });
+  const step = await ok(c, "CreateStep", { planId, ordinal: 0, title: "Feature", expectedResult: "Checked change", requiredChecks: ["unit"] });
+  const assessment = await atlmAssessment(c, planId, task);
+  await ok(c, "RecordAssessment", assessment, 0);
+  return { step, assessment, planId };
+}
+export async function completeAtlm(c, planned, elapsed = 1000) {
+  await ok(c, "StartPlan", { planId: planned.planId }, 0);
+  const claim = await ok(c, "ClaimStepAttempt", { stepId: planned.step.stepId, sessionId: crypto.randomUUID(), sourceId: "fixture" }, 1);
+  const lease = { stepId: planned.step.stepId, attemptId: claim.attemptId, fence: claim.fence };
+  await ok(c, "StartStep", lease, 1);
+  c.advance(elapsed);
+  await result(c, lease);
+  await ok(c, "RecordCheck", check(lease.stepId));
+  await ok(c, "FinishPlan", { planId: planned.planId }, 1);
+  return lease;
+}

@@ -896,6 +896,207 @@ function validateObservationPayload(payload) {
   assertSafeMetadataText(canonical(data), "data");
 }
 
+// Shared schema is used by assessment discovery and by the server normalizer.
+export const AGENT_TASK_SCHEMA = {
+  type: "object", additionalProperties: false,
+  required: ["schemaVersion", "profile", "outcomes", "changedContracts", "verificationKinds", "profileEvidence", "runtimeContext"],
+  properties: {
+    schemaVersion: { enum: ["agent-task-v1"] },
+    profile: { type: "object", additionalProperties: false, required: [...ESTIMATE_PROFILE_FIELDS], properties: {
+      workKind: { enum: [...ESTIMATE_WORK_KINDS] }, reuseState: { enum: [...ESTIMATE_REUSE_STATES] }, doneBoundary: { enum: [...ESTIMATE_DONE_BOUNDARIES] },
+    } },
+    outcomes: { type: ["array", "null"], maxItems: 20, items: { type: "object", additionalProperties: false,
+      required: ["id", "description", "evidence"], properties: {
+        id: { type: "string", minLength: 1, maxLength: 128 }, description: { type: "string", minLength: 1, maxLength: 400 }, evidence: { type: "string", minLength: 1, maxLength: 400 },
+      } } },
+    changedContracts: { type: ["array", "null"], maxItems: 20, items: { type: "object", additionalProperties: false,
+      required: ["kind", "key", "description", "evidence"], properties: {
+        kind: { enum: ["API", "MCP", "EVENT", "STORAGE", "OTHER"] }, key: { type: "string", minLength: 1, maxLength: 128 },
+        description: { type: "string", minLength: 1, maxLength: 400 }, evidence: { type: "string", minLength: 1, maxLength: 400 },
+      } } },
+    verificationKinds: { type: ["array", "null"], maxItems: 20, items: { enum: ["BUILD_STATIC", "UNIT", "INTEGRATION", "UI_E2E", "DEPLOY_SMOKE"] } },
+    profileEvidence: { type: "object", additionalProperties: false, required: [...ESTIMATE_PROFILE_FIELDS], properties: Object.fromEntries(ESTIMATE_PROFILE_FIELDS.map(key => [key, { type: "string", minLength: 1, maxLength: 400 }])) },
+    runtimeContext: { type: "object", additionalProperties: false, required: ["modelId", "reasoningEffort", "environmentId", "plannedParallelAgents", "provenance"], properties: {
+      ...Object.fromEntries(["modelId", "reasoningEffort", "environmentId"].map(key => [key, { type: ["string", "null"], minLength: 1, maxLength: 128 }])),
+      plannedParallelAgents: { type: ["integer", "null"], minimum: 1 }, provenance: { enum: ["CLIENT_REPORTED", "UNKNOWN"] },
+    } },
+  },
+};
+export function normalizeAgentTaskV1(input) {
+  validateAssessmentValue(input, AGENT_TASK_SCHEMA, "agentTask");
+  const agentTask = JSON.parse(JSON.stringify(input));
+  const dedupe = (items, key) => {
+    if (items === null) return null;
+    const seen = new Map();
+    for (const item of items) {
+      const id = key(item), previous = seen.get(id);
+      if (previous && canonical(previous) !== canonical(item)) throw appError("VALIDATION_ERROR", "Conflicting duplicate agentTask key: " + id);
+      seen.set(id, item);
+    }
+    return [...seen.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, item]) => item);
+  };
+  agentTask.outcomes = dedupe(agentTask.outcomes, item => item.id);
+  agentTask.changedContracts = dedupe(agentTask.changedContracts, item => item.kind + ":" + item.key);
+  if (agentTask.verificationKinds !== null) {
+    const order = AGENT_TASK_SCHEMA.properties.verificationKinds.items.enum;
+    agentTask.verificationKinds = [...new Set(agentTask.verificationKinds)].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  }
+  const missingFields = ESTIMATE_PROFILE_FIELDS.filter(key => agentTask.profile[key] === "UNKNOWN").map(key => "profile." + key);
+  for (const key of ["outcomes", "changedContracts", "verificationKinds"]) if (agentTask[key] === null) missingFields.push(key);
+  const features = { ...agentTask.profile, outcomeCount: agentTask.outcomes?.length ?? null,
+    contractCount: agentTask.changedContracts?.length ?? null, verificationKindCount: agentTask.verificationKinds?.length ?? null };
+  return { agentTask, features, missingFields };
+}
+
+// Observe the current source in one SQLite read snapshot, not several independently timed reads.
+export async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
+  if (!UUID.test(planId || "") || !Number.isSafeInteger(nowMs) || nowMs < 0) throw appError("VALIDATION_ERROR", "Invalid ATLM source arguments.");
+  const row = await dbFirst(db, `SELECT p.*,
+    i.assessment_sequence AS input_assessment_sequence,i.selection_status,i.requirements_json AS input_requirements_json,
+    i.requirements_digest AS input_requirements_digest,i.captured_receipt_rowid,
+    a.assessment_json,a.recorded_at AS captured_at,t.requirements_json AS current_requirements_json,
+    COALESCE(j.generation,0) AS source_generation,COALESCE(j.source_changed_at,p.registered_at) AS source_changed_at,
+    EXISTS(SELECT 1 FROM tracker_plan_config cfg WHERE cfg.owner_id=p.owner_id AND cfg.plan_id=p.plan_id AND cfg.enabled=1) AS tracker_enabled,
+    (SELECT COUNT(*) FROM tracker_incomplete_steps s WHERE s.owner_id=p.owner_id AND s.plan_id=p.plan_id) AS incomplete_step_count,
+    (SELECT json_group_array(json_object('startMs',w.start_ms,'endMs',w.end_ms)) FROM work_intervals w WHERE w.owner_id=p.owner_id AND w.plan_id=p.plan_id) AS intervals_json,
+    (SELECT json_group_array(json_object('rowid',r.rowid,'type',r.command_type,'at',r.server_now_ms)) FROM command_receipts r
+      WHERE r.owner_id=p.owner_id AND r.plan_id=p.plan_id AND r.outcome_code='OK'
+        AND r.command_type IN ('StartPlan','ResumePlan','PausePlan','FinishPlan','DeletePlan')) AS timer_commands_json,
+    (SELECT json_group_array(json_object('stepId',s.step_id,'ordinal',s.ordinal,'title',s.title,'expectedResult',s.expected_result,
+      'requiredChecks',json(s.required_checks_json),'status',s.status,'resultRevision',s.current_result_revision,'resultOutcome',r.outcome,'resultCreatedAt',r.created_at))
+      FROM plan_steps s LEFT JOIN step_results r ON r.owner_id=s.owner_id AND r.step_id=s.step_id AND r.revision=s.current_result_revision
+      WHERE s.owner_id=p.owner_id AND s.plan_id=p.plan_id) AS steps_json,
+    (SELECT json_group_array(json_object('stepId',c.step_id,'resultRevision',c.result_revision,'key',c.check_key,'status',c.status,'exitCode',c.exit_code,'matchesResult',c.matches_result,'createdAt',c.created_at))
+      FROM tracker_latest_checks c JOIN plan_steps s ON s.owner_id=c.owner_id AND s.step_id=c.step_id AND s.current_result_revision=c.result_revision
+      WHERE s.owner_id=p.owner_id AND s.plan_id=p.plan_id AND EXISTS(SELECT 1 FROM json_each(s.required_checks_json) k WHERE k.value=c.check_key)) AS checks_json,
+    (SELECT json_group_array(json_object('rowid',r.rowid,'type',r.command_type,'payload',json(r.payload_json))) FROM command_receipts r
+      WHERE r.owner_id=p.owner_id AND r.plan_id=p.plan_id AND r.outcome_code='OK' AND r.rowid>i.captured_receipt_rowid
+       AND r.command_type IN ('UpdatePlanMetadata','UpdateStep','CreateStep')) AS scope_commands_json
+    FROM plans p LEFT JOIN plan_estimation_inputs i ON i.owner_id=p.owner_id AND i.plan_id=p.plan_id
+    LEFT JOIN assessment_revisions a ON a.owner_id=p.owner_id AND a.plan_id=p.plan_id AND a.sequence=i.assessment_sequence
+    LEFT JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id AND t.step_id IS NULL
+    LEFT JOIN estimation_jobs j ON j.owner_id=p.owner_id AND j.job_key='refresh:'||p.plan_id
+    WHERE p.owner_id=? AND p.plan_id=?`, ownerId, planId);
+  if (!row) throw appError("PLAN_NOT_FOUND", messageFor("PLAN_NOT_FOUND"), 404);
+  const reasons = [], intervals = JSON.parse(row.intervals_json), steps = JSON.parse(row.steps_json), checks = JSON.parse(row.checks_json);
+  let features = null;
+  if (row.selection_status !== "CAPTURED") reasons.push("MISSING_FEATURES");
+  else {
+    try {
+      const normalized = normalizeAgentTaskV1(JSON.parse(row.assessment_json).context.agentTask);
+      if (normalized.missingFields.length) reasons.push("INCOMPLETE_FEATURES"); else features = normalized.features;
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== "VALIDATION_ERROR") throw error;
+      reasons.push("INVALID_FEATURES");
+    }
+  }
+  if (row.deleted_at !== null) reasons.push("PLAN_DELETED");
+  if (row.status !== "COMPLETED") reasons.push("PLAN_NOT_COMPLETED");
+  if (!row.tracker_enabled || !steps.length || row.incomplete_step_count !== 0) reasons.push("RESULT_NOT_VERIFIED");
+  let scopeChanged = Boolean(row.input_requirements_json && row.input_requirements_json !== row.current_requirements_json);
+  if (row.input_requirements_json) {
+    const original = JSON.parse(row.input_requirements_json), initialSteps = new Map((original.steps || []).map(step => [step.stepId, step]));
+    for (const change of JSON.parse(row.scope_commands_json).sort((a, b) => a.rowid - b.rowid)) {
+      const p = change.payload;
+      if (change.type === "CreateStep") scopeChanged = true;
+      if (change.type === "UpdatePlanMetadata") for (const key of ["title", "description", "acceptanceCriteria"]) {
+        if (Object.hasOwn(p, key) && (p[key] ?? "") !== original.plan[key]) scopeChanged = true;
+      }
+      if (change.type === "UpdateStep") {
+        const originalStep = initialSteps.get(p.stepId), fields = p.changes || {};
+        if (!originalStep) { scopeChanged = true; continue; }
+        for (const key of ["ordinal", "title", "expectedResult"]) if (Object.hasOwn(fields, key) && fields[key] !== originalStep[key]) scopeChanged = true;
+        if (Object.hasOwn(fields, "requiredChecksJson") && canonical(JSON.parse(fields.requiredChecksJson)) !== canonical(originalStep.requiredChecks)) scopeChanged = true;
+      }
+    }
+  }
+  if (scopeChanged) reasons.push("SCOPE_CHANGED");
+  let actualMs = null;
+  const safeTime = value => Number.isSafeInteger(value) && value >= 0 && value <= nowMs;
+  // Receipts prove that no opening/closing interval disappeared from the full lifecycle.
+  const expectedIntervals = [];
+  let openAt = null, timerHistoryValid = true, finishedAt = null;
+  for (const event of JSON.parse(row.timer_commands_json).sort((a, b) => a.rowid - b.rowid)) {
+    if (!safeTime(event.at) || (finishedAt !== null && event.type !== "DeletePlan")) { timerHistoryValid = false; break; }
+    if (["StartPlan", "ResumePlan"].includes(event.type)) {
+      if (openAt !== null) { timerHistoryValid = false; break; }
+      openAt = event.at;
+    } else {
+      if (openAt !== null) { expectedIntervals.push([openAt, event.type === "DeletePlan" ? Math.max(openAt, event.at) : event.at]); openAt = null; }
+      else if (!["FinishPlan", "DeletePlan"].includes(event.type)) { timerHistoryValid = false; break; }
+      if (event.type === "FinishPlan") finishedAt = event.at;
+    }
+  }
+  const intervalOrder = (a, b) => a[0] - b[0] || a[1] - b[1];
+  timerHistoryValid &&= openAt === null && finishedAt === row.finished_at
+    && expectedIntervals.length > 0 && expectedIntervals[0][0] === row.first_started_at
+    && canonical(expectedIntervals.sort(intervalOrder)) === canonical(intervals.map(i => [i.startMs, i.endMs]).sort(intervalOrder));
+  const complete = timerHistoryValid && row.status === "COMPLETED" && safeTime(row.first_started_at) && safeTime(row.finished_at)
+    && row.finished_at >= row.first_started_at && intervals.length > 0
+    && intervals.every(i => safeTime(i.startMs) && safeTime(i.endMs) && i.startMs >= row.first_started_at && i.endMs >= i.startMs && i.endMs <= row.finished_at);
+  if (complete) {
+    actualMs = unionIntervals(intervals.map(i => [i.startMs, i.endMs])).reduce((total, [start, end]) => total + end - start, 0);
+    if (!Number.isSafeInteger(actualMs)) throw appError("INVALID_ESTIMATION_SOURCE", "ATLM source duration exceeds safe integer.", 500);
+  } else reasons.push("INCOMPLETE_MEASUREMENT");
+  const sourceAvailableAt = Math.max(row.registered_at, row.finished_at ?? 0, row.source_changed_at,
+    ...steps.map(s => s.resultCreatedAt ?? 0), ...checks.map(c => c.createdAt));
+  if (!safeTime(sourceAvailableAt)) throw appError("INVALID_ESTIMATION_SOURCE", "ATLM source timestamps are invalid.", 500);
+  const originalPrediction = row.assessment_json ? JSON.parse(row.assessment_json).serverEstimation : null;
+  const issuedPrediction = reasons.length === 0 && originalPrediction?.status === "AVAILABLE"
+    && typeof originalPrediction.modelId === "string" && Number.isSafeInteger(originalPrediction.pointMs) && originalPrediction.pointMs >= 0
+    ? { modelId: originalPrediction.modelId, pointMs: originalPrediction.pointMs, actualMs, errorMs: originalPrediction.pointMs - actualMs } : null;
+  const source = { planId, issuedPrediction, inputAssessmentSequence: row.input_assessment_sequence ?? null,
+    eligibility: reasons.length ? "EXCLUDED" : "ELIGIBLE", reasons, features, actualMs,
+    capturedAt: row.captured_at ?? null, sourceAvailableAt, observedAt: nowMs, sourceGeneration: row.source_generation };
+  // Versions reflect source changes, not repeated observations or the current wall clock.
+  source.sourceDigest = "sha256:" + await hashCommandInput({ ...source, observedAt: undefined, sourceGeneration: undefined,
+    requirements: row.current_requirements_json, intervals: intervals.sort((a, b) => a.startMs - b.startMs || (a.endMs ?? Infinity) - (b.endMs ?? Infinity)),
+    steps: steps.sort((a, b) => a.stepId < b.stepId ? -1 : a.stepId > b.stepId ? 1 : 0),
+    checks: checks.sort((a, b) => (a.stepId + a.key) < (b.stepId + b.key) ? -1 : (a.stepId + a.key) > (b.stepId + b.key) ? 1 : 0) });
+  return source;
+}
+
+export async function claimAtlmJob(db, ownerId, jobKey, nowMs, leaseMs = 60000) {
+  if (!Number.isSafeInteger(nowMs) || !Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw appError("VALIDATION_ERROR", "Invalid ATLM lease.");
+  return dbFirst(db, `UPDATE estimation_jobs SET status='RUNNING',lease_until=?,fence=fence+1,attempts=attempts+CASE WHEN status='QUEUED' AND checkpoint_json IS NOT NULL THEN 0 ELSE 1 END
+    WHERE owner_id=? AND job_key=? AND generation>processed_generation AND next_attempt_at<=?
+      AND status<>'FAILED' AND (attempts<4 OR (status='QUEUED' AND checkpoint_json IS NOT NULL AND attempts<=4))
+      AND (status<>'RUNNING' OR lease_until<=?) RETURNING *`, nowMs + leaseMs, ownerId, jobKey, nowMs, nowMs);
+}
+
+export async function persistAtlmSample(db, ownerId, source, nowMs, guard) {
+  if (!guard || !Number.isSafeInteger(guard.generation) || !Number.isSafeInteger(guard.fence)) throw appError("VALIDATION_ERROR", "ATLM sample requires a leased job guard.");
+  const params = [ownerId, source.planId, source.inputAssessmentSequence, source.sourceDigest, source.sourceGeneration,
+    source.eligibility, JSON.stringify(source.reasons), source.features === null ? null : JSON.stringify(source.features),
+    source.issuedPrediction == null ? null : JSON.stringify(source.issuedPrediction),
+    source.actualMs, source.capturedAt, source.sourceAvailableAt, nowMs, source.eligibility, ownerId, source.planId,
+    ownerId, 'refresh:' + source.planId, guard.generation, guard.fence, nowMs, source.sourceGeneration,
+    ownerId, source.planId, source.sourceDigest];
+  const inserted = await dbFirst(db, `INSERT INTO estimation_samples(owner_id,plan_id,input_assessment_sequence,source_digest,source_generation,
+    eligibility,reasons_json,features_json,issued_prediction_json,actual_ms,captured_at,source_available_at,observed_at,is_first_eligible)
+    SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ?='ELIGIBLE' AND NOT EXISTS(SELECT 1 FROM estimation_samples WHERE owner_id=? AND plan_id=? AND is_first_eligible=1) THEN 1 ELSE 0 END
+    WHERE EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND lease_until>?
+      AND generation=? AND status='RUNNING')
+      AND NOT EXISTS(SELECT 1 FROM estimation_samples WHERE sequence=(SELECT MAX(sequence) FROM estimation_samples WHERE owner_id=? AND plan_id=?) AND source_digest=?)
+    RETURNING *`, ...params);
+  return inserted ? { inserted: true, sample: atlmSampleView(inserted) } : { inserted: false, sample: null };
+}
+
+export function atlmSampleView(row) {
+  return { sampleId: String(row.sequence), planId: row.plan_id, inputAssessmentSequence: row.input_assessment_sequence,
+    sourceDigest: row.source_digest, sourceGeneration: row.source_generation, eligibility: row.eligibility,
+    reasons: JSON.parse(row.reasons_json), features: row.features_json ? JSON.parse(row.features_json) : null,
+    issuedPrediction: row.issued_prediction_json ? JSON.parse(row.issued_prediction_json) : null,
+    actualMs: row.actual_ms, capturedAt: row.captured_at, sourceAvailableAt: row.source_available_at,
+    observedAt: row.observed_at, firstEligible: Boolean(row.is_first_eligible) };
+}
+
+export async function readAtlmSamples(db, ownerId, { latestOnly = true, afterSequence = 0, limit = 100 } = {}) {
+  if (typeof latestOnly !== "boolean" || !Number.isSafeInteger(afterSequence) || afterSequence < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 5001) throw appError("VALIDATION_ERROR", "Invalid ATLM sample page.");
+  const rows = await dbAll(db, `SELECT s.* FROM estimation_samples s WHERE s.owner_id=? AND s.sequence>? ${latestOnly ? "AND s.sequence=(SELECT MAX(current.sequence) FROM estimation_samples current WHERE current.owner_id=s.owner_id AND current.plan_id=s.plan_id)" : ""} ORDER BY s.sequence LIMIT ?`, ownerId, afterSequence, limit);
+  return rows.map(atlmSampleView);
+}
+
 const FORECAST_METRICS = ["PLAN_ACTIVE", "CALENDAR", "PAUSED", "STEP_ATTRIBUTED", "ATTEMPT", "TOOL"];
 const assessmentPayloadSchema = {
   type: "object", additionalProperties: false,
@@ -903,7 +1104,7 @@ const assessmentPayloadSchema = {
   properties: {
     assessmentId: { type: "string", format: "uuid" }, planId: { type: "string", format: "uuid" }, stepId: { type: "string", format: "uuid" },
     expectedRequirementsDigest: { type: "string", pattern: "^sha256:[a-f0-9]{64}$", description: "Digest of the requirements read by the agent before assessing; never refresh it just to retry a write" },
-    context: { type: "object", description: "Bounded JSON: expected result, scope and checks" },
+    context: { type: "object", properties: { agentTask: AGENT_TASK_SCHEMA }, description: "Bounded JSON: expected result, scope and checks" },
     method: { type: "object", additionalProperties: false, required: ["id", "version", "scale"], properties: {
       id: { type: "string", minLength: 1, maxLength: 128 }, version: { type: "string", minLength: 1, maxLength: 128 }, scale: { description: "Agent-declared scale, bounded JSON" },
     } },
@@ -956,6 +1157,7 @@ function validateAssessmentCommand(envelope) {
   validateAssessmentValue(envelope.payload, assessmentPayloadSchema);
   if (new TextEncoder().encode(JSON.stringify(envelope.payload)).length > 24000) throw appError("VALIDATION_ERROR", "Assessment exceeds 24000 UTF-8 bytes.");
   const p = envelope.payload, f = p.forecast, c = p.complexity;
+  if (Object.hasOwn(p.context, "agentTask")) normalizeAgentTaskV1(p.context.agentTask);
   if (!isSnapshotDigest(p.expectedRequirementsDigest)) throw appError("VALIDATION_ERROR", "expectedRequirementsDigest must identify the requirements assessed by the agent.");
   if (p.method.scale === null || p.method.scale === "") throw appError("VALIDATION_ERROR", "Declare the assessment scale.");
   if ((c.status === "UNKNOWN") !== (c.value === null)) throw appError("VALIDATION_ERROR", "Unknown complexity requires null; known complexity requires a value.");
@@ -1497,7 +1699,8 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
   if (envelope.commandType === "RecordAssessment") {
     const target = await assessmentTarget(db, identity.ownerId, input.planId, input.stepId);
     const requirementsJson = target?.requirements_json || "{}";
-    Object.assign(payload, { assessmentJson: JSON.stringify(input), requirementsJson,
+    const storedInput = Object.hasOwn(input.context, "agentTask") ? { ...input, context: { ...input.context, agentTask: normalizeAgentTaskV1(input.context.agentTask).agentTask } } : input;
+    Object.assign(payload, { assessmentJson: JSON.stringify(storedInput), requirementsJson,
       requirementsDigest: "sha256:" + await hashCommandInput(JSON.parse(requirementsJson)),
       ...await addEvent({ assessmentId: input.assessmentId, revision: envelope.expectedVersion + 1 }),
     });
