@@ -1,75 +1,11 @@
-# Isolated verification
+# Проверки текущей модели
 
-ATLM adds `atlm-core`, `atlm-evaluation`, `atlm-features`, `atlm-storage`,
-`atlm-migration`, `atlm-training`, and `atlm-mcp` tests to the existing `npm test`
-pattern. Their fixed examples exercise numerical correctness, chronological
-cutoffs, atomic pre-start input capture, one-time experience counts, owner scope,
-queue recovery/fencing and HTTP/MCP compatibility. Synthetic evidence is not a
-claim of forecast accuracy on the owner's tasks.
+`npm test` проверяет календарное время, изоляцию владельцев, независимость планов, квитанции/CAS, исходный Markdown, текущие статусы, оценки, экспорт v2 и ATLM. `simple-model.test.js` проверяет физическое отсутствие удалённых таблиц, полей и API, точные повторы, конкурирующие записи и откат при сбое.
 
-`ui-atlm.mjs` is part of `npm run test:ui`. It checks the saved forecast, unavailable
-input/cold-start, stale forecasts, retained predictions while a candidate is
-rejected, real HTTP error/retry, bounded automatic queue recovery, late responses
-after plan switches, keyboard controls and 320/390/768/1440 px layouts. The suite
-uses real Worker/SQLite for the initial empty model and pending-source recovery path and controlled responses
-for model/status scenarios. No production data is written. Screenshots are saved
-in `UI_ACCEPTANCE_ARTIFACT_DIR` (default `/tmp/tracker-atlm-ui`).
+Миграционный сценарий загружает синтетический снимок прежней схемы из `fixtures/pre-simple-data.json`, включает foreign keys, применяет новую миграцию транзакционно и проверяет весь сохранённый рабочий набор. Снимок создан версией c05844c и содержит 15 обучающих примеров, активную модель и открытый интервал. Пользовательских записей в нём нет.
 
-Run plugin instructions/package checks from plugin/plan-time-tracker with
-`node --test test/atlm-instructions.test.mjs test/package.test.mjs`. The instruction
-test checks the delivered text against actual MCP discovery and submits its sample
-assessment using the real schema. It does not prove a hosted agent always invokes
-the skill or supplies semantically perfect inputs.
+Для проверки фактического ledger Sites задайте `SITES_SOURCE_ROOT=/absolute/path/to/site/source` при запуске `node --test test/simple-model.test.js`. Старые SQL, metadata и snapshots не переписываются. `npm run validate` проверяет собранный Worker ESM и его default.fetch.
 
+`npm run test:ui` запускает браузерные сценарии с реальным Worker и изолированной SQLite: чекбокс даты и клавиатура, статусная форма, исходный Markdown, точный повтор после потери ответа, параллельные планы, удаление/восстановление, пагинация, аналитика планов и ATLM. Все HTTP-запросы перехватываются; рабочий Site не используется. PLAYWRIGHT_MODULE и CHROMIUM_EXECUTABLE задают доступные зависимости, UI_ACCEPTANCE_ARTIFACT_DIR — каталог снимков.
 
-The implementation review included two independent classifications of the same
-three requirements without durations. Both passes agreed on all structural fields:
-
-| Fixed requirement | Profile | Outcomes / contracts / checks |
-| --- | --- | --- |
-| Fix existing mobile button layout, build and browser check, finish locally | MODIFY_MECHANISM / PARTIAL / LOCAL_VERIFIED | 1 / 0 / BUILD_STATIC + UI_E2E |
-| Create absent MCP AddNote and notes table, unit/integration, publish | CREATE_MECHANISM / ABSENT / PUBLISHED | 1 / 2 (MCP + STORAGE) / UNIT + INTEGRATION |
-| Investigate two independent causes, report only, no required automated checks | INVESTIGATE / ABSENT / ANALYSIS | 2 / 0 / empty |
-
-The report in the third case carries the two results; it is not a third outcome.
-This small instruction calibration does not establish agreement on arbitrary tasks
-or forecast accuracy. No calibration case was added to the production dataset.
-
-`status-history.test.js` verifies bounded owner-scoped pages of legacy and tracker events, stable pagination while new events arrive, parameter validation, and omission of event queries from lightweight plan reads. `ui-status-history.mjs` is included in `test:ui`: it checks that history is not fetched until opened, error/retry, cached previous pages, explicit refresh, empty history, late responses after switching plans, and 320–1440px layouts. Set `SITE_WORKER_MODULE` to test a separately built Sites Worker with the same isolated fixtures.
-
-Run `npm test` for built-artifact, owner/lifecycle/timer, receipt replay, concurrency, historical-schema, v2 evidence and VM client-contract checks. The SQLite databases are in memory and use all canonical migrations.
-
-`d1-query-limits.test.js` also requires Python 3.11+ with `sqlite3.Connection.setlimit`.
-It executes captured Worker SQL and bindings against temporary SQLite files with
-the compound SELECT limit set to 5 and the bound-parameter limit to 100.
-These adapter checks supplement the Node tests; hosted D1 acceptance remains separate.
-
-`export.test.js` verifies the versioned analytic JSON report: complete result/attempt/check/assessment history beyond UI limits, links and requirement snapshots, timeline deduplication and noise filtering, protected historical evidence, parallel/paused/expired/deleted timing, owner isolation, a single read snapshot and failure without a partial document. `ui-acceptance.mjs` downloads and parses the actual JSON file through the browser.
-
-`analytics-steps.test.js` also verifies real-interval attribution across repeated attempts, pauses, local dates and period boundaries, snapshot time, lease expiry/renewal, parallel sections, missing data and measured zero, owner isolation and read-only behavior. `ui-analytics.mjs` is included in `npm run test:ui`: it uses synthetic plans to check section disclosure, hover/focus/touch, exact tooltips, long titles, zero/one/40 sections, local scrolling at 360/390/768/1440px, loading failure/retry and stale detail responses. It produces `analytics-desktop.png`, `analytics-mobile.png`, `analytics-mobile-many.png` and `analytics-report.json` in the chosen artifact directory. No real plans are read or changed by these tests.
-
-Final-review regressions also cover sections created at/after `asOf`, missing totals before the first start versus exact-start zero, and full/partial overlap uncertainty per section. The browser suite verifies full overlap as «—», partial values with «*» and incomplete-time text by focus/touch, and lazy expansion before/after a fresh report with a newly created synthetic section. It additionally captures `analytics-full-overlap.png`.
-
-Visual-gate regressions verify Y-axis alignment with the plot baseline and mobile 360/390px tooltips with 200-character overlap titles. On mobile, hints flow below the plot without covering X labels or the caption; outside-tap dismissal must not move a different card before its tap completes. Actual PNG inspection complements these geometry checks.
-
-Run `npm run test:ui` with an existing Playwright module and Chromium (`PLAYWRIGHT_MODULE`, `CHROMIUM_EXECUTABLE`). `UI_ACCEPTANCE_ARTIFACT_DIR` chooses an output directory outside source, normally `/tmp/tracker-source-ui`. The first suite verifies navigation/responsiveness, modal keyboard behavior, new plan/checkpoint creation without Git, unknown-outcome exact replay and explicit interval timing. The companion `ui-worktree.mjs` (historical filename) verifies the current v2 source result/check/finish flow with real Worker+SQLite. Every request is intercepted on localhost; external requests are forbidden. No production state or authentication is exercised. `ui-recovery.mjs` additionally checks closed, abandoned, expired, newly expired, unstarted and paused attempts, client clock skew, duplicate clicks and lost Claim/Start acknowledgements.
-
-Removed Git feature tests have been replaced with explicit public refusal, field/schema removal, populated-history preservation and repository-free evidence cases. The retained `tracker-schema.test.js` intentionally exercises historical schema invariants on the revised fresh-install chain; it does not test upgrading a deployed single-plan database. Plugin helper and queue tests run separately: `node --test ../../plugin/plan-time-tracker/test/*.test.mjs`.
-
-`parallel-plans.test.js` verifies independent lifecycle and retry receipts, multiple RUNNING/PAUSED/PLANNED lists with stable pagination and owner isolation, per-plan attempts/results/readiness, and unique versus summed time for overlaps, nesting, touching intervals and local midnight. `ui-parallel.mjs` is part of `test:ui`; it loads 102 plans over two pages, puts active plans on different pages, delays the first read, skews the client clock by two days, and checks both timers, union time today, independent commands, exact replay after a lost Pause reply, version conflict, and another plan's unsaved draft/navigation. It captures `parallel-{360,390,768,1440}.png` and `parallel-report.json`.
-
-The skill recovery fixtures include drafting versus execution without the tracker keyword, known-plan continuation without duplication, ambiguous identity, parallel contexts, missing tracking and changed-source evidence. They are agent evaluation scenarios for the connected client; local server/browser tests do not prove automatic invocation in every host. Queue tests exercise independent retry/acknowledgment state for two plan scopes.
-
-`plan-deletion.test.js` проверяет мягкое удаление/восстановление во всех статусах, MCP discovery, owner isolation, повтор квитанций, запрет записей, конкурентные команды, rollback при ошибке и миграцию заполненной v3-базы. `ui-deletion.mjs` входит в `test:ui`: отмена подтверждения, потеря ответа Delete/Restore с точным повтором, 102 удалённых плана на двух страницах, история только для чтения, восстановление без таймера и сохранение черновика другого плана. Артефакты: `deletion-readonly-{360,1440}.png`, `deletion-report.json`. Все данные синтетические, запросы браузера ограничены localhost.
-
-Карточки дополнительно проверяются на ширинах 320/360/390/600/1440 px: длинные названия, все статусы, кнопки удаления и восстановления, одинаковые колонки и отступы, touch targets, отсутствие пересечений, обрезания и горизонтального overflow. Снимки: `cards-{plans,overview,deleted}-{320,360,390,600,1440}.png`; геометрия: `card-layout-report.json`. До 360 px кнопки располагаются в одну колонку, выше — в две. Desktop сохраняет flex-раскладку. Дополнительные снимки `card-active-{width}.png`, `cards-recent-{width}.png` и `cards-inactive-{width}.png` показывают сами карточки без необходимости прокручивать фильтры.
-
-`artifact-migrations.test.js` проверяет deployment sidecars в официальном пути `.openai/drizzle/`, идентичность исходных SQL/metadata и применение упакованной 0016 к заполненной локальной схеме 0015: результаты, проверки, квитанции и активный таймер другого плана сохраняются. Тест входит в `npm test`; состояние production migration ledger не проверяет.
-
-## План целиком и статусы
-
-`plan-document.test.js` проверяет точное сохранение Markdown (включая CRLF), выделение реальных этапов без примеров внутри кода, разные ID, изоляцию владельца, текущие версии, повторы квитанций, завершение по статусам, атомарный отказ импорта и обновление заполненной базы 0019 → 0020. Старые JSON требований, доказательства и таймеры должны сохраниться.
-
-`ui-plan-document.mjs` проверяет новый основной флоу через реальный Worker и SQLite: создание из одного текста, статусы этапов, потерю ответа и точный повтор, сохранение черновика, повторное открытие, безопасное чтение Markdown и размеры заголовков на 320/360/390/768/1440/1920 px. Снимки и отчёт сохраняются в `document/` выбранного каталога артефактов.
-
-Технические формы проверок, снимков и попыток удалены из UI полностью, включая старые планы. Исторически названный `ui-worktree.mjs` теперь проверяет чтение старых этапов без этих форм, сохранность доказательств на сервере и актуальную готовность к завершению. `ui-recovery.mjs` проверяет, что технические элементы не возвращаются для закрытой, прерванной, истёкшей или приостановленной работы. Серверные тесты попыток и доказательств сохраняют прежнее покрытие API.
+Тесты старого механизма попыток, evidence snapshots и поэтапной атрибуции времени удалены вместе с механизмом. Новый сценарий миграции проверяет перенос этих данных и отсутствие путей исполнения удалённых команд.

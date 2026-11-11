@@ -119,17 +119,17 @@ test("agent sets statuses without technical evidence; completion and exact repla
     );
     await ok(c, "FinishPlan", { planId: PLAN }, 1);
     assert.equal(
-      c.db.sqlite.prepare("SELECT COUNT(*) n FROM step_attempts").get().n,
+      c.db.sqlite.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name='step_attempts'").get().n,
       0,
     );
     assert.equal(
-      c.db.sqlite.prepare("SELECT COUNT(*) n FROM step_results").get().n,
+      c.db.sqlite.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name='step_results'").get().n,
       0,
     );
     assert.equal(
       c.db.sqlite
         .prepare(
-          "SELECT COUNT(*) n FROM tracker_journal WHERE event_type='STEP_STATUS_CHANGED'",
+          "SELECT COUNT(*) n FROM command_receipts WHERE command_type='SetStepStatus' AND outcome_code='OK'",
         )
         .get().n,
       3,
@@ -138,7 +138,7 @@ test("agent sets statuses without technical evidence; completion and exact repla
     c.close();
   }
 });
-test("status writes enforce owner, current version, active plan and deletion; legacy evidence cannot be bypassed", async () => {
+test("status writes enforce owner, current version, active plan and deletion for every stored step", async () => {
   const c = context();
   try {
     await create(c);
@@ -203,8 +203,8 @@ test("status writes enforce owner, current version, active plan and deletion; le
           { stepId: lease.stepId, status: "DONE" },
           2,
         )
-      ).value.error.code,
-      "INVALID_TRANSITION",
+      ).status,
+      200,
     );
   } finally {
     c.close();
@@ -244,7 +244,7 @@ test("document import is atomic and rejects missing, ambiguous or duplicate stag
           requiredChecks: [],
         })
       ).value.error.code,
-      "INVALID_TRANSITION",
+      "VALIDATION_ERROR",
     );
     const tools = (
       await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" })
@@ -259,49 +259,11 @@ test("document import is atomic and rejects missing, ambiguous or duplicate stag
   }
 });
 
-test("0020 upgrades populated history without changing old requirements, evidence or timers", async () => {
-  const c = context(migrations.indexOf("0020_plan_documents.sql"));
-  try {
-    const lease = await running(c, []);
-    await result(c, lease);
-    const before = rows(c);
-    const requirements = c.db.sqlite
-      .prepare(
-        "SELECT requirements_json FROM assessment_targets ORDER BY plan_id,step_id",
-      )
-      .all();
-    c.db.sqlite.exec(
-      (await import("node:fs")).readFileSync(
-        new URL("../drizzle/0020_plan_documents.sql", import.meta.url),
-        "utf8",
-      ),
-    );
-    const after = rows(c);
-    assert.deepEqual(after.plan_documents, []);
-    assert.deepEqual(after.plan_document_sections, []);
-    delete after.plan_documents;
-    delete after.plan_document_sections;
-    assert.deepEqual(after, before);
-    assert.deepEqual(
-      c.db.sqlite
-        .prepare(
-          "SELECT requirements_json FROM assessment_targets ORDER BY plan_id,step_id",
-        )
-        .all(),
-      requirements,
-    );
-    assert.deepEqual(c.db.sqlite.prepare("PRAGMA foreign_key_check").all(), []);
-    assert.equal((await progress(c)).steps[0].readyToFinish, true);
-  } finally {
-    c.close();
-  }
-});
-
 test("failed document import rolls back the source, stages and receipt as one operation", async () => {
   const c = context();
   try {
     c.db.sqlite.exec(
-      "CREATE TRIGGER fail_document_fixture BEFORE INSERT ON plan_document_sections BEGIN SELECT RAISE(ABORT,'fixture failure'); END;",
+      "CREATE TRIGGER fail_document_fixture BEFORE INSERT ON plan_steps BEGIN SELECT RAISE(ABORT,'fixture failure'); END;",
     );
     const response = await command(c, "CreatePlan", {
       title: "Atomic import",
@@ -317,9 +279,8 @@ test("failed document import rolls back the source, stages and receipt as one op
       "plans",
       "plan_steps",
       "plan_documents",
-      "plan_document_sections",
       "command_receipts",
-      "tracker_journal",
+      "assessment_targets",
     ])
       assert.equal(
         c.db.sqlite.prepare("SELECT COUNT(*) n FROM " + table).get().n,

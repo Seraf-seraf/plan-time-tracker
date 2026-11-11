@@ -28,14 +28,5 @@ test('document stages use a status form and contain no technical evidence editor
   assert.equal((source.match(/setInterval\(/g)||[]).length,1);
 });
 
-test('legacy stage reading keeps prose and actual results without a diagnostic summary',async()=>{
-  const source=await html();
-  for(const marker of ['Что нужно сделать','Результат','step.expected_result','step.currentResult.summary','step.readyToFinish'])assert(source.includes(marker),marker);
-  for(const removed of ['Сводка: блокировок','задержка до первой проверки','Серверная последовательность:','Время клиента:'])assert(!source.includes(removed),removed);
-});
-
-test('status history keeps server paging and describes stage status changes',async()=>{
-  const source=await html();for(const marker of ['/status-history?','История статусов','STEP_STATUS_CHANGED','event.stepTitle'])assert(source.includes(marker),marker);
-});
 
 test('timezone selector keeps supported choices, falls back to Omsk, and drives persistence and display',async()=>{const source=await html();const select=source.match(/<select id="tz" required>([\s\S]*?)<\/select>/);assert(select);assert.deepEqual([...select[1].matchAll(/<option value="([^"]+)"([^>]*)>([^<]+)<\/option>/g)].map(([,value,attrs,label])=>({value,selected:attrs.includes('selected'),label})),[{value:'Europe/Moscow',selected:false,label:'Москва (UTC+3)'},{value:'Asia/Omsk',selected:true,label:'Омск (UTC+6)'}]);const scripts=[...source.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(([,script])=>script);assert(scripts[0].includes('normalizeZone(settings.timezone)'));assert(scripts[0].includes('timezone:q("#tz").value'));assert(scripts[0].includes('timeZone:zone'));assert(scripts[0].includes('plan-time-zone-changed'));assert(scripts[1].includes('normalizeZone(settings.timezone)'));assert(scripts[1].includes('timeZone:state.zone'));assert(source.includes('<label for="tz">Часовой пояс</label>'));for(const old of ['IANA timezone','Явный учёт интервалов','Медиана сопровождается размером выборки N'])assert(!source.includes(old),old);});

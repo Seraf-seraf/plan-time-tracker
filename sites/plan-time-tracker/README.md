@@ -1,148 +1,43 @@
-# Plan Time Tracker
+# Трекер планов: Worker 0.6.0
 
-[План целиком и статусы этапов](../../docs/plan-documents.md) — основной флоу: исходный Markdown, этапы из плана и SetStepStatus. Технические формы удалены из интерфейса, исторические данные сохранены. Новая каноническая миграция: 0020 после 0019.
+Приложение использует Cloudflare Worker ESM, привязку D1 `DB` и аутентифицированного владельца. Project ID рабочего Sites находится в `.openai/hosting.json`. Его идентичность и аудитория сохраняются при обновлении.
 
-The tracker records work time through explicit authenticated MCP commands and the owner UI. `CreatePlan` registers a plan; only Start/Pause/Resume/Finish change server-timed intervals. Observations, tools, attempts and source changes never accrue or stop time on their own. One owner may run several plans at once. Start/Resume/Pause/Finish only affect the supplied planId. Calendar/active/paused durations remain per-plan. The connected skills register plans, substantial steps and assessments during planning, including /plan, without implementation or a timer; they also track authorized execution and continuation.
+## Контракт
 
-The current contract removes repository management/filters, synchronization, commit attribution, commit/push policies and Git observations. It requires no external integration token. GitHub source publication does not deploy the Worker or update installed tools.
+CreatePlan сохраняет исходный Markdown в `planText` и выделяет этапы по заголовкам одного уровня. GetPlan возвращает документ и метаданные; GetPlanProgress — текущие этапы `{stepId, ordinal, title, content, status, version}`. Идентификаторы в HTTP-снимке используют существующее имя `step_id`.
 
-## ATLM и накопление опыта
+SetStepStatus принимает стандартный конверт `schemaVersion:1`, стабильный `commandId`, текущую `expectedVersion` этапа и `payload:{stepId,status}`. Разрешены PENDING, RUNNING, BLOCKED, FAILED и DONE. План должен быть RUNNING и не удалён. Обновление этапа и квитанция атомарны. Точный повтор возвращает прежний результат, другой payload с тем же ID отклоняется.
 
-Исходный `context.agentTask` сохраняется до первого StartPlan; `assessments.atlm`
-объявляет новые прогнозы и управление очередью. Сервер записывает serverEstimation
-в immutable assessment и проверяет новую модель после каждых пяти новых пригодных
-планов. [Полный контракт](../../docs/atlm.md) определяет признаки, metric/scope,
-cold-start, проверку кандидатов и восстановление после сбоя.
+Статусы хранятся только как текущее состояние. API назначений, попыток, событий, истории статусов и старых отдельных результатов/проверок отсутствуют. Изменять исходный документ через UpdatePlan нельзя. Метаданные и дата редактируются с контролем версии плана; исправление даты сохраняет причину.
 
-GitHub-схема добавляет `0019_atlm.sql` после `0018_estimation_history_indexes.sql`,
-без переоценивания старых планов задним числом. Источник Sites сохраняет собственный
-ledger и получает эквивалентную добавочную миграцию; не заменяйте его старые SQL
-цепочкой GitHub. В актуальном источнике Sites, как и здесь, build встраивает
-локальные worker/fonts.js через scripts/font-data.mjs: переносите исходник с
-зависимостью и запускайте штатную сборку каждого источника. Версии runtime,
-репозиторного пакета и отдельно установленного hosted плагина не обязаны совпадать.
+Время задаётся серверными Start/Pause/Resume/Finish. Несколько планов могут одновременно работать. Обычное завершение требует DONE у всех этапов; `allowIncomplete:true` с причиной сохраняет явное исключение. DeletePlan закрывает интервал своего плана, переводит его RUNNING в PAUSED и текущие RUNNING-этапы в BLOCKED. RestorePlan не запускает время.
 
-Численное ядро не требует внешней ML/LLM-службы. Состояние очереди хранится в D1;
-ctx.waitUntil ускоряет обработку после команды, а следующий сеанс/UI продолжает
-незавершённую due-работу. Без нового трафика после аварии повтор не гарантируется.
-Ресурсный предел v1 — 5000 пригодных строк без скрытого усечения накопленного опыта;
-CPU бюджет целевой среды нужно подтверждать отдельно от времени теста Node.
+GetTimeReport и `/api/analytics` используют только фактические интервалы планов: объединение по владельцу и локальным дням, отдельную сумму планов и выборку завершённых измеренных планов для медианы. GetTimeHistory возвращает PLAN_ACTIVE, CALENDAR, PAUSED и ревизии оценок. Экспорт — [формат 2](../../docs/json-report.md).
 
-Проверка: `npm test`, `npm run validate`, `npm run test:ui`; отдельный CLI:
-`node scripts/evaluate-atlm.mjs <dataset.json>`. Синтетическая проверка реализации
-не подтверждает реальную точность и успешную публикацию.
+## ATLM и требования
 
-## Аналитический JSON-отчёт
+Шесть признаков `agent-task-v1`, сохранение исходного прогноза до первого запуска, критерии пригодности и цикл обучения не меняются. Требования представлены текущими `assessment_targets`; миграция копирует прежний JSON без изменения digest. Assessment revisions, frozen inputs, samples и model artifacts сохраняются. Служебная очередь обучения имеет собственную защиту параллельного исполнения.
 
-Аналитический JSON-экспорт: [состав, полнота, единицы времени и исключённый шум](../../docs/json-report.md).
-`GET /api/export` возвращает формат 1 с полной содержательной историей;
-это отчёт для анализа, не формат восстановления базы.
+## Схема и проверки
 
-## Оценки задач (0.5.0)
-
-Нейтральные RecordAssessment/GetAssessment/GetEstimationHistory и независимые
-assess-task/track-plan описаны в [контракте](../../docs/assessments.md).
-Версии package.json, plugin.json, serverInfo и capabilities репозиторного пакета согласованы на 0.5.0;
-schemaVersion команд остаётся 1, версия методики задаётся агентом отдельно.
-Для HTTP запись использует POST /api/commands, чтение — POST
-/api/tracker/assessment и /api/tracker/estimation-history с теми же JSON-полями,
-что MCP. GetTrackerCapabilities сообщает assessments; ни балл, ни методика не
-служат условием исполнения. Перед оценкой GetAssessment({planId, stepId?}) без assessmentId возвращает текущий контекст и digest; запись требует expectedRequirementsDigest этого контекста. Изменение требований после анализа отклоняет запись с ASSESSMENT_CONTEXT_CHANGED, без создания ревизии.
-
-В локально подготовленном источнике также есть read-only MCP `CalculateEstimate`,
-объявляемый capability `assessments.calculator`. Он читает только явные планы
-владельца и считает историческую точку полного `PLAN_ACTIVE`; свежие записи,
-таймеры и оценки не меняет. Результат имеет `accuracy: "NOT_VALIDATED"`: при наличии
-только point baseline в `context.estimation` штатный `forecast` остаётся `UNKNOWN`
-с null-границами. Сохранённый snapshot и digest отделены от экспертной поправки;
-новая оценка не перезаписывает старую ревизию.
-
-Для локальной проверки расчёта на внешнем frozen JSON (не реальных данных владельца):
+Каноническая установка применяет все SQL 0001–0021. Последняя миграция удаляет старое исполнение и пересоздаёт команды с прямым изменением состояния. Все foreign keys проверяются после переноса. Старые команды нельзя продолжать или воспроизводить; их квитанции удаляются.
 
 ```sh
-mkdir -p /tmp/tracker-estimation
-node scripts/evaluate-estimates.mjs /tmp/tracker-estimation/cases.json
-```
-
-Runner выводит `EXTERNAL_FIXTURE`, не подключается к D1, сети или MCP и не является
-зависимостью навыков или поставляемого Worker. Эти локальные исходники и тесты сами
-по себе не развёртывают MCP и не подтверждают точность прогноза.
-
-Историческое обновление оценок 0.4.0 добавляло 0017_assessments.sql после 0016;
-тогда новой базе требовалась цепочка 0001–0017. Это описание прежней миграции,
-не инструкция публикации 0.5.0: текущая каноническая цепочка заканчивается 0020,
-а отдельная Sites-цепочка — 0004. См. [актуальный порядок развёртывания](../../README.md#миграции).
-Тесты проверяют сохранность старых строк и отсутствие выдуманных baseline. Ревизии оценок нельзя менять/удалять;
-откат приложения не должен удалять эту таблицу или повторять миграцию. Миграция
-добавляет таблицу, индексы, view и триггеры без переписывания существующих таблиц;
-локальная SQLite-проверка не измеряет production-блокировки или объём D1.
-
-Секция ниже документирует сохранённый контракт удаления,
-введённый в 3.1.0; его историческая миграция не изменялась.
-
-## Удаление и восстановление планов (3.1.0)
-
-`DeletePlan` выполняет мягкое удаление атомарно: записывает `plans.deleted_at`, увеличивает версию плана, закрывает его открытый рабочий интервал и все OPEN-попытки как ABANDONED. RUNNING-план становится PAUSED. Этапы RUNNING становятся BLOCKED; версии и `current_fence` этапов увеличиваются, поэтому прежние исполнители не могут продолжить работу после восстановления. Результаты, проверки, интервалы, квитанции и события не удаляются. Новые события — DELETED/RESTORED в истории плана и PLAN_DELETED/PLAN_RESTORED в tracker timeline, если учёт этапов включён.
-
-`RestorePlan` снимает отметку удаления и увеличивает версию. PLANNED, PAUSED и COMPLETED сохраняются; прежний RUNNING остаётся PAUSED. Интервал и попытка не открываются. Исторические результаты и текущие проверки сохраняют силу, если их ревизия и исходники по-прежнему совпадают. Календарная длительность заморожена на удалённом плане, после восстановления снова учитывает прошедшие паузы; активное время за удалённый период не добавляется.
-
-Обе команды требуют аутентифицированного владельца и текущую `expectedVersion`. MCP выбирает имя инструмента, HTTP использует `POST /api/commands` с `commandType`. Пример HTTP-конверта (подставьте ID плана и его версию):
-
-```json
-{"schemaVersion":1,"commandId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","commandType":"DeletePlan","expectedVersion":1,"payload":{"planId":"11111111-1111-4111-8111-111111111111","reason":"План больше не нужен"}}
-```
-
-Для MCP передайте этот объект без `commandType` в `DeletePlan`; для восстановления выберите `RestorePlan`, новый `commandId` и актуальную версию. `reason` необязателен, до 1000 символов. Успешный результат содержит `planId`, `status`, `deletedAt`, `version`, `serverNow` внутри стандартной квитанции. Один `commandId` с тем же конвертом возвращает сохранённый результат, даже если план впоследствии восстановлен; повтор не применяет действие заново. Изменение конверта с тем же ID даёт IDEMPOTENCY_KEY_REUSED. Квитанции отказов также сохраняются.
-
-`ListPlans({deleted:true,...})` и `GET /api/plans?deleted=true` возвращают только удалённые планы. По умолчанию `deleted:false`; значения статусов, размер и порядок страниц, `nextCursor` не меняются. `GetPlan` и execution snapshot доступны по явному ID владельца и содержат `deletedAt`; изменения удалённого плана запрещены. Обычная аналитика целиком исключает удалённые планы, в том числе completion median и inactivePlans; аналитика этапов такого плана возвращает 404. Восстановление возвращает сохранённые интервалы в отчёты. Экспорт включает удалённые планы для сохранности истории.
-
-Ошибки: PLAN_NOT_FOUND (404, в том числе чужой план), VERSION_CONFLICT (409), PLAN_DELETED (409: повторное удаление с новой командой либо запись в удалённый план), PLAN_NOT_DELETED (409: восстановление обычного плана), VALIDATION_ERROR (400 для некорректного конверта/фильтра). MCP возвращает те же коды в `isError`/`structuredContent`. Не повторяйте конфликтную команду автоматически с новой версией: сначала перечитайте план и получите новое явное намерение. Все записи и конкурентные команды проверяются в одной SQL-операции; частичный отказ откатывает отметку, интервалы, попытки, события и квитанцию вместе.
-
-`GetTrackerCapabilities` сообщает `version: "0.5.0"`, `planDeletion: {softDelete:true, deleteTool:"DeletePlan", restoreTool:"RestorePlan", deletedFilter:"deleted", restoreStartsTimer:false}` и `planList.deletedDefault:false`. MCP initialize также возвращает 0.5.0 в подготовленном Worker. Команды удаления/восстановления требуют отдельного намерения пользователя; они не следуют из окончания этапа или ответа.
-
-Исторический выпуск 3.1.0 добавлял `drizzle/0016_plan_deletion.sql` после 0015; для новой базы того выпуска требовалась цепочка 0001–0016. Для текущего 0.5.0 следуйте [актуальному порядку](../../README.md#миграции): canonical 0020; ATLM в Sites ранее добавлялся отдельной 0004, документы требуют следующей эквивалентной миграции, каждый в собственной истории. Миграция добавляет nullable-поле и триггеры, сохраняя строки и активные интервалы до явного удаления. Это не путь обновления старой single-plan-базы. Не возвращайте старый Worker после появления удалённых планов: он не фильтрует их в чтении. Build сохраняет неизменённые migration sidecars в `dist/.openai/drizzle/` по [официальному контракту упаковки Sites](https://github.com/openai/sites/blob/7eb9d4b9cf93ad7e64aebc8a5ca70e29ec2cfb94/packages/sites-vite-plugin/README.md). Sites применяет hosted-миграции до загрузки Worker; отдельной shell-команды hosted SQL здесь нет. Условия 0001–0015 → 0016 относятся только к описанному историческому обновлению. Не создавайте фиктивный journal и не запускайте старую цепочку заново. Локальные тесты упакованной миграции не подтверждают состояние hosted migration ledger.
-
-## Analytics by plan section
-
-The «Трекер планов» Analytics page preserves the period metrics and day bars. Each plan expands to a section chart in ordinal order. Its read-only web endpoint is `GET /api/analytics/plans/:planId/steps?from=YYYY-MM-DD&to=YYYY-MM-DD&timeZone=...&asOf=...`; section details retain their per-plan semantics; owner-wide totals use the v3 union semantics below. Owner authorization and inclusive local-date boundaries use the existing Worker behavior. `asOf` limits counted time and section membership (`created_at <= asOf`) to the accepted period report; titles and ordinals use their current values, not reconstructed historical metadata. A snapshot before the first start remains unmeasured even if the plan starts later; the exact start timestamp can be measured zero.
-
-Section values are intersections of real `work_intervals` with server-confirmed `STEP_STARTED` execution windows, ending at attempt closure or lease expiry. Claim timestamps are not execution starts. All attempts are considered, pauses excluded, and each active millisecond is counted once. Overlaps between different sections and time with no confirmed section remain unattributed; they are never divided between sections. Each section also exposes `ambiguousMs`: if all its active time overlaps another section, `activeMs` is `null` («—») with an uncertainty explanation; if only part overlaps, `activeMs` contains only the unambiguous portion, marked «*» and described as incomplete in the tooltip and accessible label. Per-section ambiguous values describe uncertainty and must not be summed as allocated time. An absent start or missing plan intervals also returns `null`, while a confirmed window with no active time and no overlap in the period returns measured zero. The chart shows minutes from zero, with exact milliseconds and complete section names available by hover, keyboard and touch. The existing median still uses full active durations of plans completed in the selected period.
-
-## Checks and source identity
-
-Create checkpoints with title, ordinal, expected result and required check keys. Claim/start a fenced attempt, record its result revision, then record actual required checks for that revision. New evidence uses `sourceSnapshot: {kind:"SOURCE_SNAPSHOT",formatVersion:2,digest:"sha256:<64 lowercase hex>"}` and `RecordCheck.testedSnapshotDigest` with actual exit status. See [the complete contract](../../docs/worktree-evidence.md) and [bundled agent instructions](skill/plan-time-tracker/SKILL.md).
-
-Normal finish is guarded by current successful results, closed attempts and the latest server-sequence passed checks. A new result, rework, an added required key or a later failed/not-run check invalidates prior readiness. A result without source cannot satisfy required checks. Empty required-check lists add no source requirement. The explicit owner exception requires a reason and never fabricates passes.
-
-## Parallel plans and analytics contract (3.0.0)
-
-`ListPlans` and `GET /api/plans` return `{plans, nextCursor, serverNow}`. MCP accepts `statuses` (a nonempty unique array of PLANNED/RUNNING/PAUSED/COMPLETED), integer `limit` 1–100 (default 50), and an opaque `cursor` from `nextCursor`. HTTP uses comma-separated `statuses`, `limit` and URL-encoded `cursor`. Results order by registeredAt descending then planId descending. Pagination uses that stable key, not an offset; concurrent inserts ahead of the cursor do not displace later pages. Filters apply on every page; this is a live list, not an immutable snapshot. All reads remain owner-scoped. RUNNING may return any number of plans. The singular active-plan MCP tool and web endpoint are removed. `GetTrackerCapabilities` advertises `parallelPlans`, `planList` and analytics units/semantics. GetPlan and execution snapshots require an explicit planId.
-
-`totalActiveMs` and `activeByDay` count the union of clipped owner intervals, split by inclusive local calendar days at one server `asOf`. `sumPlanActiveMs` separately sums the plan durations in that period, while `activeInPeriodMs`, `fullActiveMs`, checkpoint attribution and the median remain per-plan. Example: A 10:00–11:00 and B 10:30–11:30 each have 60 minutes; sum 120, unique total 90. The UI shows all active cards with independent actions/timers, unique time today, and both period metrics. Server time is aligned to client receipt time for display; a client clock offset never adds work time.
-
-## Fresh installation and retained history
-
-For a fresh 0.5.0 installation apply canonical migrations in order through `0020_plan_documents.sql`. An existing canonical database through `0019_atlm.sql` receives only the additive `0020_plan_documents.sql`. The current Sites database has its own migration ledger; use the equivalent appended migration there rather than replaying GitHub history.
-
-The revised `0001_initial.sql` permits parallel RUNNING plans from creation. One open interval and nonoverlapping intervals per plan remain enforced. This release does not provide a migration from the historical single-plan schema with its different constraint. Do not apply only the Worker to that older schema. Source publication never resets existing data or deploys the Site.
-
-Other historical migrations/tables and historical documents under `docs/` are retained. Existing local historical-schema tests cover those structures on the revised fresh-install chain; they do not attest upgrade support for the old single-plan deployment. Historical evidence semantics and public redaction remain unchanged. Do not deploy an older Worker against v3 data.
-
-## Historical hosted installation (3.0.0)
-
-The fresh private v3 Site is https://plan-time-tracker-v3.seraf-k.chatgpt.site (`appgprj_6ad342fe722481919f98177e1c447931`). Its first published version uses Site source commit `b3f392358e73e3881113ed611aff5c5194dabc74`, built from GitHub `74a86a25d98f5965e9ce7801f06e4d15889c003e` with the new project identity. Deployment `appgdep_6ad3434ca4848191b36fcaf34371485e` succeeded with MCP enabled; database overview confirmed the full schema and empty plans/work intervals. Archive checksum: `sha256:ff5e6f46149c12aadfa542d90d568ce93961c6a97774543687ee3bbeb695a135`.
-
-The new Site plugin `plugin_asdk_app_sites_ae77444ef43481919c2588ef24f70c84` was updated to 3.0.0 with the mandatory tracking skill, fixtures and local helpers. GitHub's retained marketplace package is 3.0.1 because its App binding changed. Installed clients need the new connection. The old Site was not deleted by deployment; deleting an entire Site is unavailable through the current Sites connector and must be done in Sites settings. This report does not claim an authenticated end-to-end execution against the new App.
-
-## Local verification
-
-```sh
-npm test
+npm run build
 npm run validate
-PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs CHROMIUM_EXECUTABLE=/usr/bin/chromium UI_ACCEPTANCE_ARTIFACT_DIR=/tmp/tracker-source-ui npm run test:ui
+npm test
+npm run test:ui
 node --test ../../plugin/plan-time-tracker/test/*.test.mjs
 ```
 
-`npm test` builds the ignored Worker artifact and runs mandatory timer, owner, idempotency, concurrency, migration, evidence and VM UI-contract tests. Browser suites intercept every localhost request and execute the actual Worker with migrated in-memory SQLite. External requests are forbidden. They cover responsive navigation, modal focus, exact replay after lost acknowledgement, source results/checks, completion conditions, cancelled and duplicate finish. These are local tests, not hosted D1/authentication or production-data QA. No dependencies are added by the tests.
+`test/simple-model.test.js` проверяет атомарность, CAS, точные повторы, изоляцию владельцев и перенос заполненной базы. С `SITES_SOURCE_ROOT=/absolute/sites/checkout` тот же тест выполняется на фактическом ledger Sites. `test/fixtures/pre-simple-data.json` — синтетический снимок прежней версии c05844c с открытым интервалом и моделью на 15 примерах; он не содержит пользовательских данных.
 
-Execution snapshots distinguish raw checkpoint state from executor availability through step.execution. A RUNNING checkpoint with a closed/expired attempt needs recovery; it is not actively executing. The owner UI exposes fresh-attempt recovery and pending-attempt Start, using server-aligned lease time and read-only refresh. Recovery leaves plan intervals intact; a paused plan requires an explicit ResumePlan. Historical retired-command receipts expose only safe audit identity/outcome/time and preserve raw stored data.
+## Публикация существующего Sites
+
+GitHub `origin` отличается от исходного репозитория Site. Проверьте проект через get_site и получите source credential. Используйте отдельный checkout выбранного Site, его `.openai/hosting.json` и собственную историю Drizzle 0000–0006. Синхронизируйте raw `worker/index.js`, `worker/fonts.js` и локальные шрифты. Не переносите каноническую начальную цепочку поверх действующего Sites ledger.
+
+В Site checkout выполните `npm ci` при отсутствии зависимостей, `npm run db:check`, штатный build и `npm run package:sites -- /absolute/path/release.tar.gz`. Архив сохраняет `dist/server/index.js`, `dist/.openai/hosting.json`, весь `dist/.openai/drizzle/` и корневую копию `.openai/hosting.json`. Миграции не переносятся в корневую `.openai/drizzle/`.
+
+Отправьте точный источник в ветку Site и передайте полный SHA этой ветки вместе с архивом в native Sites save/deploy. Для подтверждённого owner-only доступа используйте save_version_and_deploy_private. При нетерминальном ответе продолжайте get_deployment_status до succeeded/failed. После успеха проверьте фактический набор таблиц и сохранение планов, текущих состояний, интервалов и данных обучения. Одна только успешная публикация Worker не доказывает применение миграции.
+
+Обновление инструкций установленного App-плагина выполняется отдельно с сохранением его plugin/App IDs и аудитории. Готовой команды `npm run deploy` в этом репозитории нет.

@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { context, call, ok, mcp, result, check, rows, PLAN, DIGEST_A } from "./fixtures/tracker-db.mjs";
 
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const artifactRoot = resolve(projectRoot, "dist");
+const artifactRoot = resolve(process.env.SITE_ARTIFACT_ROOT || resolve(projectRoot, "dist"));
 const workerPath = resolve(artifactRoot, "server/index.js");
 const hostingPath = resolve(artifactRoot, ".openai/hosting.json");
 
@@ -17,7 +17,7 @@ test("built Site artifact imports with its hosting manifest and tracker UI/read 
   const manifest = JSON.parse(manifestSource);
   assert.equal(manifest.d1, "DB");
   assert.match(source, /GetPlanExecutionSnapshot/);
-  assert.match(source, /GetTimeline/);
+  assert.doesNotMatch(source, /GetTimeline/);
   assert.match(source, /UI_TRACKER/);
   const relativeImports = [...source.matchAll(/\bfrom\s+["'](\.{1,2}\/[^"']+)["']/g)].map((match) => match[1]);
   for (const specifier of relativeImports) await access(resolve(artifactRoot, "server", specifier));

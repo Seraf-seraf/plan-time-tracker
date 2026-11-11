@@ -127,7 +127,7 @@ test("owner identity is mandatory and request owner fields cannot select another
       ownerId: OTHER, payload: { planId: PLAN_A, ownerId: OTHER },
     }),
   });
-  assert.equal(spoof.response.status, 200);
+  assert.equal(spoof.response.status, 400);
   const plan = await c.db.prepare("SELECT owner_id FROM plans WHERE plan_id=?").bind(PLAN_A).first();
   assert.equal(plan.owner_id, OWNER);
 });
@@ -137,8 +137,7 @@ test("owner composite foreign keys prevent cross-owner children from attaching t
   await createPlan(c.worker, c.db, PLAN_A);
   assert.throws(() => c.db.sqlite.prepare("INSERT INTO work_intervals(interval_id,owner_id,plan_id,start_ms,opened_by) VALUES('cross-owner',?,?,?,?)")
     .run(OTHER, PLAN_A, c.now(), OTHER), /FOREIGN KEY constraint failed/);
-  assert.throws(() => c.db.sqlite.prepare("INSERT INTO plan_events(event_id,owner_id,plan_id,command_id,actor_id,actor_type,event_type,server_occurred_at,version_before,version_after) VALUES('cross-event',?,?,?,?,'user','X',?,0,0)")
-    .run(OTHER, PLAN_A, commandId(), OTHER, c.now()), /FOREIGN KEY constraint failed/);
+  assert.throws(()=>c.db.sqlite.prepare("INSERT INTO plan_steps(owner_id,step_id,plan_id,ordinal,title,content,created_at,updated_at) VALUES(?,?,?,0,'Title','Content',0,0)").run(OTHER,crypto.randomUUID(),PLAN_A),/FOREIGN KEY constraint failed/);
 });
 
 test("the same client-supplied plan UUID is isolated by owner, including open-interval uniqueness", async () => {
@@ -244,7 +243,7 @@ test("same commandId returns its original receipt before checking newer version"
   assert.equal(replay.body.resultingVersion, first.body.resultingVersion);
   assert.deepEqual(replay.body.snapshot, first.body.snapshot);
   assert.deepEqual(replay.body.result, first.body.result);
-  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM plan_events WHERE owner_id=? AND plan_id=? AND event_type='STARTED'").bind(OWNER, PLAN_A).first()).n, 1);
+  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM command_receipts WHERE owner_id=? AND plan_id=? AND command_type='StartPlan' AND outcome_code='OK'").bind(OWNER, PLAN_A).first()).n, 1);
 });
 
 test("same commandId with changed payload is rejected", async () => {
@@ -284,7 +283,7 @@ test("repeated Pause with the same commandId returns the original receipt once",
   const retry = await transition(c.worker, c.db, "PausePlan", PLAN_A, 1, OWNER, undefined, id);
   assert.equal(first.response.status, 200);
   assert.equal(retry.body.replayed, true);
-  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM plan_events WHERE plan_id=? AND event_type='PAUSED'").bind(PLAN_A).first()).n, 1);
+  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM command_receipts WHERE plan_id=? AND command_type='PausePlan' AND outcome_code='OK'").bind(PLAN_A).first()).n, 1);
   assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM work_intervals WHERE plan_id=?").bind(PLAN_A).first()).n, 1);
 });
 
@@ -295,43 +294,13 @@ test("stale expectedVersion changes nothing; repeated finish can recover the sto
   const stale = await transition(c.worker, c.db, "ResumePlan", PLAN_A, 0);
   assert.equal(stale.response.status, 409);
   assert.equal(stale.body.error.code, "VERSION_CONFLICT");
-  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM plan_events WHERE plan_id=?").bind(PLAN_A).first()).n, 2);
+  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM command_receipts WHERE plan_id=? AND outcome_code='OK'").bind(PLAN_A).first()).n, 2);
   const finishId = commandId();
   const fin = await transition(c.worker, c.db, "FinishPlan", PLAN_A, 1, OWNER, undefined, finishId);
   const retry = await transition(c.worker, c.db, "FinishPlan", PLAN_A, 1, OWNER, undefined, finishId);
   assert.equal(fin.response.status, 200);
   assert.equal(retry.body.replayed, true);
-  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM plan_events WHERE plan_id=? AND event_type='FINISHED'").bind(PLAN_A).first()).n, 1);
-});
-
-test("failed event write rolls back plan, interval, event, and receipt as one SQLite statement", async () => {
-  const c = context();
-  await createPlan(c.worker, c.db, PLAN_A);
-  c.db.sqlite.exec("CREATE TRIGGER fail_start_event BEFORE INSERT ON plan_events WHEN NEW.event_type='STARTED' BEGIN SELECT RAISE(ABORT,'INJECTED_EVENT_FAILURE'); END");
-  const id = commandId();
-  const failed = await transition(c.worker, c.db, "StartPlan", PLAN_A, 0, OWNER, undefined, id);
-  assert.equal(failed.response.status, 500);
-  assert.equal((await c.db.prepare("SELECT status,version FROM plans WHERE plan_id=?").bind(PLAN_A).first()).status, "PLANNED");
-  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM work_intervals WHERE plan_id=?").bind(PLAN_A).first()).n, 0);
-  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM command_receipts WHERE command_id=?").bind(id).first()).n, 0);
-  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM plan_events WHERE plan_id=? AND event_type='STARTED'").bind(PLAN_A).first()).n, 0);
-});
-
-test("Finish while paused adds no time; plan and event history remain queryable", async () => {
-  const c = context();
-  await createPlan(c.worker, c.db, PLAN_A);
-  c.setNow(1000);
-  await transition(c.worker, c.db, "StartPlan", PLAN_A, 0);
-  c.setNow(4000);
-  await transition(c.worker, c.db, "PausePlan", PLAN_A, 1);
-  c.setNow(1_000_000);
-  await transition(c.worker, c.db, "FinishPlan", PLAN_A, 2);
-  const result = await call(c.worker, c.db, "/api/plans/" + PLAN_A);
-  assert.equal(result.body.plan.activeMs, 3000);
-  assert.equal(result.body.plan.calendarMs, 999000);
-  assert.equal(result.body.plan.events.length, 4);
-  assert.throws(() => c.db.sqlite.prepare("UPDATE plan_events SET reason='changed' WHERE plan_id=?").run(PLAN_A), /PLAN_EVENTS_ARE_IMMUTABLE/);
-  assert.throws(() => c.db.sqlite.prepare("DELETE FROM command_receipts WHERE owner_id=?").run(OWNER), /COMMAND_RECEIPTS_ARE_RETAINED/);
+  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM command_receipts WHERE plan_id=? AND command_type='FinishPlan' AND outcome_code='OK'").bind(PLAN_A).first()).n, 1);
 });
 
 test("plan date edits require a reason and explicit confirmation when moved past first start", async () => {
@@ -361,14 +330,14 @@ test("plan date edits require a reason and explicit confirmation when moved past
 test("empty metadata updates are rejected without incrementing plan version or adding an event", async () => {
   const c=context();
   await createPlan(c.worker,c.db,PLAN_A);
-  const eventCountBefore=(await c.db.prepare("SELECT COUNT(*) AS n FROM plan_events WHERE plan_id=?").bind(PLAN_A).first()).n;
+  const eventCountBefore=(await c.db.prepare("SELECT COUNT(*) AS n FROM command_receipts WHERE plan_id=? AND outcome_code='OK'").bind(PLAN_A).first()).n;
   const result=await call(c.worker,c.db,"/api/commands",{method:"POST",body:JSON.stringify({
     schemaVersion:1,commandId:commandId(),commandType:"UpdatePlanMetadata",expectedVersion:0,payload:{planId:PLAN_A,reason:"No fields"},
   })});
   assert.equal(result.response.status,400);
   assert.equal(result.body.error.code,"VALIDATION_ERROR");
   assert.equal((await c.db.prepare("SELECT version FROM plans WHERE plan_id=?").bind(PLAN_A).first()).version,0);
-  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM plan_events WHERE plan_id=?").bind(PLAN_A).first()).n,eventCountBefore);
+  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM command_receipts WHERE plan_id=? AND outcome_code='OK'").bind(PLAN_A).first()).n,eventCountBefore);
 });
 
 
@@ -552,7 +521,7 @@ test("MCP tools call the same command service and data discovery contains no pri
   });
   assert.equal(result.response.status, 200);
   assert.equal(result.body.result.structuredContent.result.status, "RUNNING");
-  assert.equal((await c.db.prepare("SELECT actor_type FROM plan_events WHERE plan_id=? AND event_type='STARTED'").bind(PLAN_A).first()).actor_type, "agent");
+  assert.equal((await c.db.prepare("SELECT actor_type FROM command_receipts WHERE plan_id=? AND command_type='StartPlan' AND outcome_code='OK'").bind(PLAN_A).first()).actor_type, "agent");
 });
 
 
@@ -578,28 +547,6 @@ test("private UI response has no-store and does not interpolate untrusted databa
   assert.ok(scripts.length >= 2);
   scripts.forEach((script) => assert.doesNotThrow(() => new Script(script[1])));
 });
-
-test("owner export includes audit data and never includes another owner's plans", async () => {
-  const c = context();
-  await createPlan(c.worker, c.db, PLAN_A, "<script>not markup</script>");
-  await createPlan(c.worker, c.db, PLAN_B, "Other owner's plan", OTHER);
-  const exported = await call(c.worker, c.db, "/api/export");
-  assert.equal(exported.response.headers.get("content-disposition"), "attachment; filename=plan-time-tracker-export.json");
-  assert.equal(exported.body.plans.length, 1);
-  assert.equal(exported.body.plans[0].title, "<script>not markup</script>");
-  assert.ok(Array.isArray(exported.body.plans[0].timeline));
-  assert.ok(Array.isArray(exported.body.plans[0].intervals));
-  assert.equal(Object.hasOwn(exported.body.plans[0], "commits"), false);
-  assert.equal(Object.hasOwn(exported.body.plans[0], "repositories"), false);
-});
-
-
-
-
-
-
-
-
 
 test("instant dates require an explicit zone and date-only precision never fabricates midnight", () => {
   assert.throws(() => parsePlanCreatedAt({ precision: "instant", value: "2026-10-01T09:00", timeZone: "UTC" }), /UTC offset/);
@@ -652,53 +599,4 @@ test("request payload owner and hostile external origin are not trusted", async 
     headers: { "oai-authenticated-user-id": OWNER, origin: "https://evil.example" },
   }), { DB: c.db });
   assert.equal(bad.status, 403);
-});
-
-
-test("sourceReference changes reject command ID reuse and legacy receipts retain safe replay", async () => {
-  for (const legacy of [false, true]) {
-    const c = context();
-    const envelope = { schemaVersion: 1, commandId: commandId(), commandType: "CreatePlan", sourceReference: "source-A",
-      payload: { planId: PLAN_A, title: "Source reference", planCreatedAt: { precision: "dateOnly", on: "2026-10-08", timeZone: "UTC" } } };
-    const first = await call(c.worker, c.db, "/api/commands", { method: "POST", body: JSON.stringify(envelope) });
-    assert.equal(first.response.status, 200);
-    let savedHash = first.body.payloadHash;
-    if (legacy) {
-      const legacyEnvelope = { ...envelope }; delete legacyEnvelope.sourceReference;
-      savedHash = await payloadHash(legacyEnvelope);
-      await c.db.prepare("UPDATE command_receipts SET payload_hash=? WHERE owner_id=? AND command_id=?")
-        .bind(savedHash, OWNER, envelope.commandId).run();
-    }
-    const replay = await call(c.worker, c.db, "/api/commands", { method: "POST", body: JSON.stringify({ ...envelope, payloadHash: savedHash }) });
-    assert.equal(replay.response.status, 200); assert.equal(replay.body.replayed, true); assert.equal(replay.body.payloadHash, savedHash);
-    for (const sourceReference of ["source-B", undefined]) {
-      const changed = await call(c.worker, c.db, "/api/commands", { method: "POST", body: JSON.stringify({ ...envelope, sourceReference }) });
-      assert.equal(changed.response.status, 409); assert.equal(changed.body.error.code, "IDEMPOTENCY_KEY_REUSED");
-    }
-    assert.equal(c.db.sqlite.prepare("SELECT count(*) AS n FROM plan_events").get().n, 1);
-    assert.equal(c.db.sqlite.prepare("SELECT source_reference FROM plans").get().source_reference, "source-A");
-    c.db.sqlite.close();
-  }
-});
-
-
-
-
-
-test("command guard migration preserves existing plans, events and receipt replay", async () => {
-  const db=new SqliteD1(readFileSync(new URL("0001_initial.sql",migrationsDirectory),"utf8"));
-  const worker=createWorker(()=>1000);
-  const envelope={schemaVersion:1,commandId:commandId(),commandType:"CreatePlan",payload:{planId:PLAN_A,title:"Existing plan",planCreatedAt:{precision:"dateOnly",on:"2026-10-08",timeZone:"Europe/Moscow"}}};
-  const created=await call(worker,db,"/api/commands",{method:"POST",body:JSON.stringify(envelope)});assert.equal(created.response.status,200);
-  const before=["plans","plan_events","command_receipts"].map(table=>db.sqlite.prepare("SELECT * FROM "+table).all());
-  for (const name of readdirSync(migrationsDirectory).filter(name=>name.endsWith(".sql")&&name!=="0001_initial.sql").sort()) {
-    db.sqlite.exec(readFileSync(new URL(name,migrationsDirectory),"utf8"));
-  }
-  const after=["plans","plan_events","command_receipts"].map(table=>db.sqlite.prepare("SELECT * FROM "+table).all());
-  // 0016 adds a nullable tombstone; every pre-existing field remains unchanged.
-  after[0]=after[0].map(row=>{assert.equal(row.deleted_at,null);delete row.deleted_at;return row;});
-  assert.deepEqual(after,before);
-  const replay=await executeCommand(db,{ownerId:OWNER},envelope,"ui",2000);
-  assert.equal(replay.replayed,true);assert.deepEqual(replay.result,created.body.result);
-  db.sqlite.close();
 });

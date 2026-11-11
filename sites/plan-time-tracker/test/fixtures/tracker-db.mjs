@@ -56,16 +56,14 @@ export async function mcp(c, name, args = {}, owner) {
   return call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } }, owner);
 }
 export async function running(c, requiredChecks = ["unit"], planId = PLAN) {
-  await ok(c, "CreatePlan", { planId, title: "Source evidence", planCreatedAt: { precision: "dateOnly", on: "2026-10-01", timeZone: "UTC" } });
-  const step = await ok(c, "CreateStep", { planId, ordinal: 0, title: "Verify source", expectedResult: "Checked source", requiredChecks });
+  await ok(c, "CreatePlan", { planId, title: "Source evidence", planText:"# Source evidence\n\n## Этап 1. Verify source\nChecked source", planCreatedAt: { precision: "dateOnly", on: "2026-10-01", timeZone: "UTC" } });
+  const stepId = c.db.sqlite.prepare("SELECT step_id FROM plan_steps WHERE plan_id=?").get(planId).step_id;
   await ok(c, "StartPlan", { planId }, 0);
-  const claim = await ok(c, "ClaimStepAttempt", { stepId: step.stepId, sessionId: crypto.randomUUID(), sourceId: "fixture" }, 1);
-  const lease = { stepId: step.stepId, attemptId: claim.attemptId, fence: claim.fence };
-  await ok(c, "StartStep", lease, 1);
-  return lease;
+  await ok(c, "SetStepStatus", {stepId,status:"RUNNING"}, 1);
+  return {stepId};
 }
 export async function result(c, lease, digest = DIGEST_A, version = 2) {
-  return ok(c, "RecordStepResult", { ...lease, outcome: "DONE", summary: "Synthetic checked result", ...(digest ? { sourceSnapshot: source(digest) } : {}) }, version);
+  return ok(c, "SetStepStatus", { stepId:lease.stepId,status:"DONE" }, version);
 }
 export const check = (stepId, status = "PASSED", digest = DIGEST_A, revision = 1, key = "unit") => ({ stepId, resultRevision: revision, checkKey: key, status, testedSnapshotDigest: digest, ...(status === "NOT_RUN" ? {} : { exitCode: status === "PASSED" ? 0 : 1 }) });
 export const execution = async c => (await call(c, "/api/tracker/plans/" + PLAN + "/execution")).value;
@@ -91,20 +89,18 @@ export async function atlmAssessment(c, planId = PLAN, task = atlmTask(), overri
     sources: [], approach: { description: "Modify and verify", rationale: "Existing mechanism" }, ...overrides };
 }
 export async function plannedAtlm(c, planId = PLAN, task = atlmTask()) {
-  await ok(c, "CreatePlan", { planId, title: "ATLM synthetic feature", planCreatedAt: { precision: "dateOnly", on: "2027-01-01", timeZone: "UTC" } });
-  const step = await ok(c, "CreateStep", { planId, ordinal: 0, title: "Feature", expectedResult: "Checked change", requiredChecks: ["unit"] });
+  await ok(c, "CreatePlan", { planId, title: "ATLM synthetic feature", planText:"# ATLM synthetic feature\n\n## Этап 1. Feature\nChecked change", planCreatedAt: { precision: "dateOnly", on: "2027-01-01", timeZone: "UTC" } });
+  const step = {stepId:c.db.sqlite.prepare("SELECT step_id FROM plan_steps WHERE plan_id=?").get(planId).step_id};
   const assessment = await atlmAssessment(c, planId, task);
   await ok(c, "RecordAssessment", assessment, 0);
   return { step, assessment, planId };
 }
 export async function completeAtlm(c, planned, elapsed = 1000) {
   await ok(c, "StartPlan", { planId: planned.planId }, 0);
-  const claim = await ok(c, "ClaimStepAttempt", { stepId: planned.step.stepId, sessionId: crypto.randomUUID(), sourceId: "fixture" }, 1);
-  const lease = { stepId: planned.step.stepId, attemptId: claim.attemptId, fence: claim.fence };
-  await ok(c, "StartStep", lease, 1);
+  const lease = {stepId:planned.step.stepId};
+  await ok(c, "SetStepStatus", {...lease,status:"RUNNING"}, 1);
   c.advance(elapsed);
   await result(c, lease);
-  await ok(c, "RecordCheck", check(lease.stepId));
   await ok(c, "FinishPlan", { planId: planned.planId }, 1);
   return lease;
 }

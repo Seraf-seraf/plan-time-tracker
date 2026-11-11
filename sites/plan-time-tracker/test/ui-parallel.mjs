@@ -61,7 +61,7 @@ try {
   assert.equal(await page.locator("#activeCount").innerText(), "1");assert.equal(bState(), beforeB);
   const pauses = posts.filter(p => p.commandType === "PausePlan");assert.equal(pauses.length, 2);assert.deepEqual(pauses[0], pauses[1]);
   await card(B).getByRole("button", { name: "План B", exact: true }).click();
-  const draft = page.getByRole("textbox", { name: "Описание", exact: true });await draft.fill("Несохранённый черновик B");
+  const draft = page.getByRole("textbox", { name: "Название плана", exact: true });await draft.fill("Несохранённый черновик B");
   await page.evaluate(async planId => {
     await new Promise((resolve, reject) => window.dispatchEvent(new CustomEvent("plan-time-tracker:refresh-plan", { detail: { planId, resolve, reject } })));
   }, PLAN);

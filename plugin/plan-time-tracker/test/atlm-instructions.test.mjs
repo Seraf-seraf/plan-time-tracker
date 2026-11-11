@@ -15,7 +15,7 @@ const invoke = async (c, name, args = {}) => {
   return response.value.result.structuredContent;
 };
 
-test('delivered skills give one pre-start ATLM workflow and keep legacy candidates separate', () => {
+test('delivered skills give one pre-start ATLM workflow with current-state steps', () => {
   for (const text of [primary, track, embedded]) {
     assert.match(text, /assessments\.atlm/);assert.match(text, /StartPlan/);
     assert.match(text, /ContinueTraining/);assert.match(text, /serverEstimation/);
@@ -59,8 +59,7 @@ test('instruction names and immutable input fields are available through real MC
 test('an instruction-shaped assessment records unknown cold-start forecast, freezes it on start and exports it', async () => {
   const c = context();
   try {
-    await ok(c, 'CreatePlan', { planId: PLAN, title: 'Make the existing button accessible on mobile', planCreatedAt: { precision: 'dateOnly', on: '2026-11-11', timeZone: 'UTC' } });
-    await ok(c, 'CreateStep', { planId: PLAN, ordinal: 1, title: 'Button layout', expectedResult: 'Button is accessible on mobile', requiredChecks: ['build', 'ui'] });
+    await ok(c, 'CreatePlan', { planId: PLAN, title: 'Make the existing button accessible on mobile', planText:'# Button\n\n## Этап 1. Button layout\nButton is accessible on mobile', planCreatedAt: { precision: 'dateOnly', on: '2026-11-11', timeZone: 'UTC' } });
     const current = await invoke(c, 'GetTaskAssessment', { planId: PLAN });
     const agentTask = {
       schemaVersion: 'agent-task-v1',

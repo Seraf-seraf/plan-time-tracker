@@ -48,7 +48,7 @@ try {
   await page.waitForFunction(() => document.querySelector("#toast").classList.contains("error"));
   confirm();await active(PLAN).getByRole("button", { name: "Удалить", exact: true }).click();await active(PLAN).waitFor({ state: "detached" });
   const deletes = posts.filter(p => p.commandType === "DeletePlan");assert.equal(deletes.length, 2);assert.deepEqual(deletes[0], deletes[1]);
-  assert.equal(bState(), beforeB);assert.equal(c.db.sqlite.prepare("SELECT status FROM step_attempts WHERE attempt_id=?").get(lease.attemptId).status, "ABANDONED");
+  assert.equal(bState(), beforeB);assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name='step_attempts'").get().n,0);
   await page.locator('[data-view="settings"]').click();
   await page.locator("#openDeleted").click();
   await page.locator('#deleted').getByRole("button", { name: "Повторить", exact: true }).click();
@@ -56,12 +56,12 @@ try {
   assert.equal(await page.locator('[data-view="settings"]').getAttribute("aria-current"), "page");
   assert(paths.some(path => path.startsWith("/api/plans?deleted=true&limit=100&cursor=")));
   await page.locator('#deleted [data-plan-id="' + PLAN + '"]').getByRole("button", { name: "План A", exact: true }).click();
-  await page.getByText("План удалён. Этапы и история доступны только для чтения.", { exact: true }).waitFor();
+  await page.getByText("План удалён. Этапы доступны только для чтения.", { exact: true }).waitFor();
   assert.equal(await page.locator("#backPlans").innerText(), "← К удалённым планам");
   assert.equal(await page.locator('[data-view="settings"]').getAttribute("aria-current"), "page");
   await page.locator("#backPlans").click();
   await page.locator('#deleted [data-plan-id="' + PLAN + '"] .plan-open').click();
-  await page.getByText("План удалён. Этапы и история доступны только для чтения.", { exact: true }).waitFor();
+  await page.getByText("План удалён. Этапы доступны только для чтения.", { exact: true }).waitFor();
   assert.equal(await page.locator("#planDetail form").count(), 0);
   assert.equal(await page.locator("#planDetail").getByRole("button", { name: "Восстановить", exact: true }).count(), 1);
   assert.equal(await page.locator("#planDetail").getByRole("button", { name: "Продолжить", exact: true }).count(), 0);
@@ -73,7 +73,7 @@ try {
   confirm();await page.locator("#planDetail").getByRole("button", { name: "Восстановить", exact: true }).click();
   await page.waitForFunction(() => document.querySelector("#toast").classList.contains("error"));
   confirm();await page.locator("#planDetail").getByRole("button", { name: "Восстановить", exact: true }).click();
-  await page.locator("#planDetail").getByRole("button", { name: "Сохранить изменения", exact: true }).waitFor();
+  await page.getByText("Изменить название и дату",{exact:true}).click();await page.locator("#planDetail").getByRole("button", { name: "Сохранить изменения", exact: true }).waitFor();
   const restores = posts.filter(p => p.commandType === "RestorePlan");assert.equal(restores.length, 2);assert.deepEqual(restores[0], restores[1]);
   assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM work_intervals WHERE plan_id=? AND end_ms IS NULL").get(PLAN).n, 0);
   assert.equal(c.db.sqlite.prepare("SELECT status FROM plans WHERE plan_id=?").get(PLAN).status, "PAUSED");
@@ -91,7 +91,7 @@ try {
   holdDelete = true;confirm();await page.locator("#planDetail").getByRole("button", { name: "Удалить", exact: true }).click();
   await page.locator('[data-view="plans"]').click();
   await page.locator('#plans [data-plan-id="' + B + '"]').getByRole("button", { name: "План B", exact: true }).click();
-  const draft = page.locator("#planDetail").getByRole("textbox", { name: "Описание", exact: true });await draft.fill("Черновик B");
+  const draft = page.locator("#planDetail").getByRole("textbox", { name: "Название плана", exact: true });await draft.fill("Черновик B");
   assert(releaseDelete);releaseDelete();
   await page.waitForFunction(() => document.querySelectorAll("#active>.active-plan").length === 1);
   assert.equal(await page.locator("#planDetail").getAttribute("data-plan-id"), B);assert.equal(await draft.inputValue(), "Черновик B");

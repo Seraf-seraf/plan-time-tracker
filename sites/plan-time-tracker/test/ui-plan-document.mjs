@@ -193,7 +193,7 @@ try {
   const source = (await call(c, "/api/plans/" + planId)).value.plan.planText;
   assert.equal(source, planText);
   assert.equal(
-    c.db.sqlite.prepare("SELECT COUNT(*) n FROM step_attempts").get().n,
+    c.db.sqlite.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name='step_attempts'").get().n,
     0,
   );
   // Raw HTML and unsafe URLs in a plan remain text.

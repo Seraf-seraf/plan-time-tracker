@@ -184,7 +184,7 @@ test("source change between snapshot and activation cannot activate contaminated
   try {
     const plans = await experience(c, 15); paused = pauseOnce(c, snapshotWrite); pending = drain(c);
     const original = await paused.reached;
-    await ok(c, "UpdatePlanMetadata", { planId: plans[0].planId, description: "Scope changed after capture" }, 2);
+    await ok(c, "UpdatePlanMetadata", { planId: plans[0].planId, title: "Scope changed after capture" }, 2);
     paused.release(); await pending;
     assert.equal((await status(c)).activeModel, null); assert.equal(models(c).filter(m => m.status === "ACTIVE").length, 0);
     await drain(c); const active = models(c).find(m => m.status === "ACTIVE");
@@ -208,7 +208,7 @@ test("transient refresh failures obey 1/5/15 minute backoff then stop at four at
     }
     restore(); const failed = await drain(c);
     assert.equal(failed.training.status, "FAILED"); assert.equal(failed.training.due, false);
-    await ok(c, "UpdatePlanMetadata", { planId: plan.planId, description: "New source generation" }, 2); await drain(c);
+    await ok(c, "UpdatePlanMetadata", { planId: plan.planId, title: "New source generation" }, 2); await drain(c);
     assert.equal(c.db.sqlite.prepare("SELECT attempts FROM estimation_jobs WHERE plan_id=?").get(plan.planId).attempts, 1);
   } finally { restore?.(); c.close(); }
 });

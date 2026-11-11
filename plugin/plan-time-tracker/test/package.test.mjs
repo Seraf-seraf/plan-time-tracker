@@ -25,7 +25,7 @@ test("portable package has one manifest with the marketplace identity and existi
   assert.equal(apps.apps[manifest.name].id, "asdk_app_sites_ebf8a3fb6b58819181eff586bb18937a");
   assert.ok(existsSync(join(pluginRoot, "skills/track-plan/SKILL.md")));
   assert.ok(existsSync(join(pluginRoot, "skills/assess-task/SKILL.md")));
-  assert.equal(manifest.version, "0.5.0");
+  assert.equal(manifest.version, "0.6.0");
   assert.equal(readJson(join(repositoryRoot, "sites/plan-time-tracker/package.json")).version, manifest.version);
 });
 
@@ -40,14 +40,14 @@ test("runtime package survives a tar roundtrip with one manifest and its App, sk
     return result.stdout;
   };
   try {
-    runTar(["-czf", archive, "-C", pluginRoot, "plugin.json", ".app.json", "skills", "scripts"]);
+    runTar(["-czf", archive, "-C", pluginRoot, "plugin.json", ".app.json", "skills"]);
     const entries = runTar(["-tzf", archive]).trim().split("\n");
     assert.deepEqual(entries.filter(entry => entry.endsWith("plugin.json")), ["plugin.json"]);
     assert.ok(entries.includes(".app.json"));
     assert.ok(entries.includes("skills/track-plan/SKILL.md"));
     assert.ok(entries.includes("skills/assess-task/SKILL.md"));
-    assert.ok(entries.includes("scripts/source-snapshot.mjs"));
-    assert.ok(entries.includes("scripts/observation-queue.mjs"));
+    assert.ok(!entries.includes("scripts/source-snapshot.mjs"));
+    assert.ok(!entries.includes("scripts/observation-queue.mjs"));
     assert.ok(entries.every(entry => !entry.split("/").includes(".codex-plugin")));
     mkdirSync(unpacked);
     runTar(["-xzf", archive, "-C", unpacked]);

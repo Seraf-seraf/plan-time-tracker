@@ -5,25 +5,6 @@ import { readAtlmSampleSource, claimAtlmJob, persistAtlmSample } from "../worker
 const OTHER = "22222222-2222-4222-8222-222222222222";
 const TABLES = ["plan_estimation_inputs", "estimation_samples", "estimation_models", "estimation_jobs", "estimation_owner_state"];
 
-test("populated 0018 upgrade preserves old rows and active timers without backfilling inputs", async () => {
-  const c = context(migrations.indexOf("0019_atlm.sql"));
-  try {
-    const lease = await running(c); await result(c, lease); await ok(c, "RecordCheck", check(lease.stepId));
-    await running(c, ["unit"], OTHER); c.advance(1000);
-    const before = rows(c);
-    c.db.sqlite.exec(migration("0019_atlm.sql"));
-    const after = rows(c); for (const name of TABLES) { assert.deepEqual(after[name], []); delete after[name]; }
-    assert.deepEqual(after, before);
-    assert.deepEqual(c.db.sqlite.prepare("PRAGMA foreign_key_check").all(), []);
-    await ok(c, "PausePlan", { planId: PLAN }, 1); await ok(c, "ResumePlan", { planId: PLAN }, 2);
-    c.advance(1000); await ok(c, "FinishPlan", { planId: PLAN }, 3);
-    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM plan_estimation_inputs").get().n, 0);
-    const source = await readAtlmSampleSource(c.db, OWNER, PLAN, c.now());
-    assert.equal(source.actualMs, 2000); assert.ok(source.reasons.includes("MISSING_FEATURES"));
-    assert.equal(c.db.sqlite.prepare("SELECT status FROM plans WHERE plan_id=?").get(OTHER).status, "RUNNING");
-  } finally { c.close(); }
-});
-
 test("fresh migration supports unassessed lifecycle, owner FK isolation and atomic D1 batch rollback", async () => {
   const c = context();
   try {

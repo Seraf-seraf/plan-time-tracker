@@ -17,8 +17,8 @@ async function assessment(c, stepId, overrides = {}) {
     sources: [], approach: { description: "Extend existing command path", rationale: "Preserve atomic receipts" }, ...overrides };
 }
 async function planned(c) {
-  await ok(c, "CreatePlan", { planId: PLAN, title: "Assessment feature", planCreatedAt: { precision: "dateOnly", on: "2027-01-01", timeZone: "UTC" } });
-  return ok(c, "CreateStep", { planId: PLAN, ordinal: 1, title: "Feature", expectedResult: "Works", requiredChecks: ["unit"] });
+  await ok(c, "CreatePlan", { planId: PLAN, title: "Assessment feature", planText:"# Assessment feature\n\n## Этап 1. Feature\nWorks", planCreatedAt: { precision: "dateOnly", on: "2027-01-01", timeZone: "UTC" } });
+  return {stepId:c.db.sqlite.prepare("SELECT step_id FROM plan_steps WHERE plan_id=?").get(PLAN).step_id};
 }
 const read = async (c, p, revision) => {
   const response = await mcp(c, "GetAssessment", { planId: p.planId, assessmentId: p.assessmentId, ...(revision ? { revision } : {}) });
@@ -45,11 +45,11 @@ test("planning stores independent numeric and multidimensional methods without s
     assert.equal(snapshot.plan.status, "PLANNED");
     assert.equal(snapshot.steps[0].status, "PENDING");
     assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM work_intervals").get().n, 0);
-    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM step_attempts").get().n, 0);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name='step_attempts'").get().n,0);
     const h = await history(c, historyArgs([{ planId: PLAN, stepId: step.stepId }]));
     assert.equal(h.assessments.length, 2);
     assert.equal(h.totalActiveMs, null);
-    assert.equal(h.statistics.find(s => s.metric === "STEP_ATTRIBUTED").status, "INSUFFICIENT_DATA");
+    assert(h.statistics.every(s=>!["STEP_ATTRIBUTED","ATTEMPT","TOOL"].includes(s.metric)));
   } finally { c.close(); }
 });
 
@@ -61,7 +61,7 @@ test("immutable revisions retain baseline; only requirements changes make estima
     const initial = await read(c, p);
     await ok(c, "StartPlan", { planId: PLAN }, 0);
     assert.equal((await read(c, p)).needsRevision, false);
-    await ok(c, "UpdateStep", { stepId: step.stepId, changes: { expectedResult: "Expanded result" }, reason: "Changed requirement" }, 1);
+    await ok(c,"UpdatePlanMetadata",{planId:PLAN,title:"Expanded result"},1);
     assert.equal((await read(c, p)).needsRevision, true);
     await ok(c, "RecordAssessment", { ...p, expectedRequirementsDigest: (await read(c, p)).currentRequirementsDigest, reason: "Expanded result", complexity: { ...p.complexity, value: 8 } }, 1);
     const latest = await read(c, p);
@@ -70,7 +70,7 @@ test("immutable revisions retain baseline; only requirements changes make estima
     assert.equal((await read(c, p, 1)).requirementsDigest, initial.requirementsDigest);
     assert.throws(() => c.db.sqlite.exec("UPDATE assessment_revisions SET revision=99"), /ASSESSMENT_IMMUTABLE/);
     assert.throws(() => c.db.sqlite.exec("DELETE FROM assessment_revisions"), /ASSESSMENT_IMMUTABLE/);
-    await ok(c, "UpdatePlanMetadata", { planId: PLAN, description: "New scope" }, 1);
+    await ok(c,"UpdatePlanMetadata",{planId:PLAN,title:"New scope"},2);
     assert.equal((await read(c, p)).needsRevision, true);
   } finally { c.close(); }
 });
@@ -139,47 +139,6 @@ test("owner isolation covers targets, sources, history, reads and deleted plans"
   } finally { c.close(); }
 });
 
-test("populated 0016 upgrade preserves every previous row and creates no fabricated assessment", async () => {
-  const c = context(migrations.indexOf("0017_assessments.sql"));
-  try {
-    const lease = await running(c); await result(c, lease); await ok(c, "RecordCheck", check(lease.stepId));
-    await running(c, ["unit"], OTHER); c.advance(1000);
-    const before = rows(c); c.db.sqlite.exec(migration("0017_assessments.sql"));
-    const after = rows(c); delete after.assessment_revisions;
-    assert.deepEqual(after, before);
-    assert.deepEqual(c.db.sqlite.prepare("PRAGMA foreign_key_check").all(), []);
-    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM assessment_revisions").get().n, 0);
-    await ok(c, "RecordAssessment", await assessment(c, lease.stepId), 0);
-  } finally { c.close(); }
-});
-
-test("history uses one asOf, unions parent intervals, separates short attempts, pages estimates", async () => {
-  const c = context();
-  try {
-    const lease = await running(c), p = await assessment(c, lease.stepId);
-    await ok(c, "RecordAssessment", p, 0); c.advance(1000);
-    await running(c, ["unit"], OTHER); c.advance(1000);
-    await result(c, lease); c.advance(1000);
-    await ok(c, "RecordAssessment", { ...p, reason: "Measured attempt; work remains", phase: "remaining" }, 1);
-    const args = historyArgs([{ planId: PLAN }, { planId: PLAN, stepId: lease.stepId }, { planId: OTHER }]);
-    const h = await history(c, { ...args, limit: 1 });
-    assert.equal(h.totalActiveMs, 3000);
-    assert.equal(h.facts[0].planActiveMs, 3000);
-    assert.equal(h.facts[1].stepAttributedMs, 2000);
-    assert.equal(h.facts[1].attempts[0].durationMs, 2000);
-    assert.equal(h.facts[1].currentReadiness, false, "DONE without required check must not be treated as successful reference");
-    assert.equal(h.facts[0].unattributedMs, 1000);
-    assert.ok(h.nextAfterSequence);
-    c.advance(1000);
-    const next = await history(c, { ...args, limit: 1, asOf: h.asOf, afterSequence: h.nextAfterSequence });
-    assert.equal(next.assessments[0].revision, 2); assert.equal(next.nextAfterSequence, null);
-    assert.equal(next.totalActiveMs, h.totalActiveMs);
-    const empty = await history(c, { ...historyArgs([{ planId: OTHER }]), from: "2026-01-01", to: "2026-01-02" });
-    assert.equal(empty.facts[0].planActiveMs, 0, "measured plan with no time in window is genuine zero");
-    assert.equal(empty.assessments.length, 0);
-  } finally { c.close(); }
-});
-
 test("MCP discovery and HTTP expose the same strict neutral contract and version", async () => {
   const c = context();
   try {
@@ -192,9 +151,9 @@ test("MCP discovery and HTTP expose the same strict neutral contract and version
       assert.equal((await mcp(c, "GetEstimationHistory", args)).value.result.isError, true);
     }
     const init = await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "initialize" });
-    assert.equal(init.value.result.serverInfo.version, "0.5.0");
+    assert.equal(init.value.result.serverInfo.version, "0.6.0");
     const caps = (await mcp(c, "GetTrackerCapabilities")).value.result.structuredContent;
-    assert.equal(caps.version, "0.5.0"); assert.equal(caps.assessments.methodologyControlsExecution, false);
+    assert.equal(caps.version, "0.6.0"); assert.equal(caps.assessments.methodologyControlsExecution, false);
     const listing = await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const tool = listing.value.result.tools.find(t => t.name === "SaveTaskAssessment");
     assert.ok(tool.inputSchema.required.includes("expectedVersion"));
@@ -210,7 +169,7 @@ test("assessment insertion rejects requirements changed between read and atomic 
     c.db.prepare = sql => {
       if (!changed && sql.startsWith("INSERT OR IGNORE INTO command_receipts")) {
         changed = true;
-        c.db.sqlite.prepare("UPDATE plan_steps SET expected_result='Concurrent requirement' WHERE step_id=?").run(step.stepId);
+        c.db.sqlite.prepare("UPDATE assessment_targets SET requirements_json=json_set(requirements_json,'$.plan.title','Concurrent requirement') WHERE step_id=?").run(step.stepId);
       }
       return originalPrepare(sql);
     };
@@ -223,148 +182,16 @@ test("assessment insertion rejects requirements changed between read and atomic 
   } finally { c.close(); }
 });
 
-test("journal failure rolls assessment, revision sequence and receipt back together", async () => {
+test("assessment write failure rolls revision sequence and receipt back together", async () => {
   const c = context();
   try {
     const step = await planned(c), p = await assessment(c, step.stepId), before = rows(c);
-    c.db.sqlite.exec("CREATE TRIGGER fail_assessment_journal BEFORE INSERT ON tracker_journal WHEN NEW.event_type='ASSESSMENT_RECORDED' BEGIN SELECT RAISE(ABORT,'injected'); END;");
+    c.db.sqlite.exec("CREATE TRIGGER fail_assessment_journal BEFORE INSERT ON assessment_revisions BEGIN SELECT RAISE(ABORT,'injected'); END;");
     const rejected = await command(c, "RecordAssessment", p, 0);
     assert.equal(rejected.status, 500);
     assert.deepEqual(rows(c), before);
     c.db.sqlite.exec("DROP TRIGGER fail_assessment_journal");
     await ok(c, "RecordAssessment", p, 0);
-  } finally { c.close(); }
-});
-
-test("planning handoff to another session, result and remaining forecast preserve the baseline", async () => {
-  const c = context();
-  try {
-    const step = await planned(c), p = await assessment(c, step.stepId);
-    const cold = await history(c, historyArgs([{ planId: PLAN, stepId: step.stepId }]));
-    assert.equal(cold.assessments.length, 0);
-    await ok(c, "RecordAssessment", p, 0);
-    const handoff = { planId: PLAN, stepId: step.stepId, assessmentId: p.assessmentId, revision: 1 };
-    const received = await read(c, handoff, 1);
-    assert.deepEqual(received.assessment.approach, p.approach);
-    await ok(c, "StartPlan", { planId: PLAN }, 0);
-    const claimed = await ok(c, "ClaimStepAttempt", { stepId: handoff.stepId, sessionId: crypto.randomUUID(), sourceId: "executor-two" }, 1);
-    const lease = { stepId: handoff.stepId, attemptId: claimed.attemptId, fence: claimed.fence };
-    await ok(c, "StartStep", lease, 1); c.advance(2000);
-    await result(c, lease); await ok(c, "RecordCheck", check(lease.stepId));
-    const facts = await history(c, historyArgs([{ planId: PLAN, stepId: lease.stepId }]));
-    assert.equal(facts.facts[0].stepAttributedMs, 2000);
-    assert.equal(facts.facts[0].currentReadiness, true);
-    await ok(c, "RecordAssessment", { ...p, phase: "remaining", reason: "Result and checks recorded", forecast: { ...p.forecast, metric: "STEP_ATTRIBUTED", lowerMs: 0, upperMs: 0, confidence: "HIGH", basis: "Measured successful completion", sampleCount: 1 }, sources: [{ planId: PLAN, stepId: step.stepId }] }, 1);
-    assert.equal((await read(c, p, 1)).assessment.forecast.lowerMs, 60000);
-    assert.equal((await read(c, p)).assessment.forecast.lowerMs, 0);
-    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM plans").get().n, 1);
-    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM plan_steps").get().n, 1);
-  } finally { c.close(); }
-});
-
-test("tool facts distinguish client reports, missing starts, duplicates and corrections", async () => {
-  const c = context();
-  try {
-    const lease = await running(c);
-    const session = c.db.sqlite.prepare("SELECT session_id FROM step_attempts WHERE attempt_id=?").get(lease.attemptId).session_id;
-    let seq = 0;
-    const observe = async (eventType, data, correctionOfEventId) => {
-      const eventId = crypto.randomUUID();
-      await ok(c, "AppendObservation", { planId: PLAN, stepId: lease.stepId, sourceId: "fixture", sessionId: session,
-        sourceSequence: ++seq, eventId, occurredAt: c.now(), eventType, data, ...(correctionOfEventId ? { correctionOfEventId } : {}) });
-      return eventId;
-    };
-    const operationId = crypto.randomUUID(), data = { operationId, toolName: "test" };
-    await observe("tool_started", data); c.advance(500);
-    const finishId = await observe("tool_finished", { ...data, status: "OK", durationMs: 500 });
-    let h = await history(c, historyArgs([{ planId: PLAN, stepId: lease.stepId }]));
-    assert.equal(h.facts[0].tools[0].durationMs, 500);
-    await observe("correction", { reason: "Measurement unreliable" }, finishId);
-    h = await history(c, historyArgs([{ planId: PLAN, stepId: lease.stepId }]));
-    assert.equal(h.facts[0].tools[0].durationMs, null);
-    await observe("tool_finished", { ...data, operationId: crypto.randomUUID(), status: "OK", durationMs: 100 });
-    h = await history(c, historyArgs([{ planId: PLAN, stepId: lease.stepId }]));
-    assert.equal(h.facts[0].tools[1].durationMs, null);
-    const duplicate = { ...data, operationId: crypto.randomUUID() };
-    await observe("tool_started", duplicate);
-    await observe("tool_finished", { ...duplicate, status: "OK", durationMs: 100 });
-    await observe("tool_finished", { ...duplicate, status: "OK", durationMs: 100 });
-    h = await history(c, historyArgs([{ planId: PLAN, stepId: lease.stepId }]));
-    assert.deepEqual(h.facts[0].tools.slice(2).map(t => t.durationMs), [null, null]);
-    const correctedStartData = { ...data, operationId: crypto.randomUUID() };
-    const correctedStart = await observe("tool_started", correctedStartData);
-    await observe("correction", { reason: "Start not reliable" }, correctedStart);
-    await observe("tool_finished", { ...correctedStartData, status: "OK", durationMs: 100 });
-    h = await history(c, historyArgs([{ planId: PLAN, stepId: lease.stepId }]));
-    assert.equal(h.facts[0].tools.at(-1).durationMs, null);
-    assert.equal(h.facts[0].planActiveMs, 500);
-  } finally { c.close(); }
-});
-
-test("history matches across period and step boundaries while respecting receipt-time asOf and null steps", async () => {
-  const c = context();
-  try {
-    const lease = await running(c);
-    const extra = await ok(c, "CreateStep", { planId: PLAN, ordinal: 2, title: "Other step", expectedResult: "Independent", requiredChecks: [] });
-    const { session_id: sessionId } = c.db.sqlite.prepare("SELECT session_id FROM step_attempts WHERE attempt_id=?").get(lease.attemptId);
-    let sequence = 0;
-    const observe = async (eventType, operationId, stepId, correctionOfEventId) => {
-      const eventId = crypto.randomUUID();
-      await ok(c, "AppendObservation", { eventId, planId: PLAN, ...(stepId ? { stepId } : {}), sourceId: "fixture", sessionId,
-        sourceSequence: ++sequence, occurredAt: c.now(), eventType,
-        data: eventType === "correction" ? { reason: "Later correction" } : { operationId, toolName: "boundary", ...(eventType === "tool_finished" ? { status: "OK", durationMs: 10 } : {}) },
-        ...(correctionOfEventId ? { correctionOfEventId } : {}) });
-      return eventId;
-    };
-    const duplicateOperation = crypto.randomUUID(), correctedOperation = crypto.randomUUID(), planOperation = crypto.randomUUID();
-    await observe("tool_started", duplicateOperation, lease.stepId);
-    const correctedStart = await observe("tool_started", correctedOperation, lease.stepId);
-    await observe("tool_started", planOperation);
-    c.advance(10);
-    await observe("tool_finished", duplicateOperation, lease.stepId);
-    await observe("tool_finished", correctedOperation, lease.stepId);
-    await observe("tool_finished", planOperation);
-    const asOf = c.now(), day = new Date(asOf).toISOString().slice(0, 10);
-    const args = { targets: [{ planId: PLAN, stepId: lease.stepId }], from: day, to: day, timeZone: "UTC" };
-    const before = await history(c, { ...args, asOf });
-    assert.deepEqual(before.facts[0].tools.map(tool => tool.durationMs), [10, 10]);
-    c.advance(86_400_000);
-    await observe("tool_finished", duplicateOperation, extra.stepId);
-    await observe("correction", null, lease.stepId, correctedStart);
-    const frozen = await history(c, { ...args, asOf });
-    assert.deepEqual(frozen.facts[0].tools, before.facts[0].tools);
-    const later = await history(c, args);
-    assert.equal(later.facts[0].tools.length, 2);
-    assert.deepEqual(later.facts[0].tools.map(tool => tool.durationMs), [null, null]);
-    assert.equal(later.facts[0].tools[0].matchedStart, true);
-    assert.equal(later.facts[0].tools[1].matchedStart, false);
-    const parent = await history(c, { ...args, targets: [{ planId: PLAN }] });
-    const planTool = parent.facts[0].tools.find(tool => tool.stepId === null);
-    assert.equal(planTool.operationId, planOperation);
-    assert.equal(planTool.durationMs, 10);
-  } finally { c.close(); }
-});
-
-test("history preserves ambiguous attribution and expired attempts without gating neutral assessments", async () => {
-  const c = context();
-  try {
-    const first = await running(c);
-    const second = await ok(c, "CreateStep", { planId: PLAN, ordinal: 2, title: "Parallel", expectedResult: "Independent result", requiredChecks: [] });
-    const claim = await ok(c, "ClaimStepAttempt", { stepId: second.stepId, sessionId: crypto.randomUUID(), sourceId: "parallel" }, 1);
-    await ok(c, "StartStep", { stepId: second.stepId, attemptId: claim.attemptId, fence: claim.fence }, 1);
-    c.advance(601000);
-    const h = await history(c, historyArgs([{ planId: PLAN }, { planId: PLAN, stepId: first.stepId }]));
-    assert.equal(h.facts[0].planActiveMs, 601000);
-    assert.equal(h.facts[0].ambiguousMs, 600000);
-    assert.equal(h.facts[1].stepAttributedMs, null);
-    assert.equal(h.facts[1].attempts[0].durationMs, 600000);
-    assert.equal(h.statistics.find(s => s.metric === "STEP_ATTRIBUTED").unknownCount, 1);
-    assert.equal((await command(c, "RecordStepResult", { ...first, outcome: "DONE", summary: "Stale attempt" }, 2)).value.error.code, "LEASE_EXPIRED");
-    const p = await assessment(c, first.stepId); await ok(c, "RecordAssessment", p, 0);
-    assert.equal((await read(c, p)).needsRevision, false);
-    await ok(c, "PausePlan", { planId: PLAN }, 1); c.advance(1000);
-    const paused = await history(c, historyArgs([{ planId: PLAN }]));
-    assert.equal(paused.facts[0].pausedMs, 1000);
   } finally { c.close(); }
 });
 
@@ -391,48 +218,6 @@ async function beginAttempt(c, stepId) {
 }
 const closeAttempt = (c, lease) => ok(c, "CloseStepAttempt", { ...lease, disposition: "CLOSED", reason: "Period fixture completed" });
 
-test("period filtering precedes the attempt sample limit and never adds outside-period zeroes", async () => {
-  const c = context();
-  try {
-    const first = await running(c);
-    c.advance(5000); await closeAttempt(c, first);
-    // More old attempts than the report limit must not hide the selected day's sample.
-    for (let i = 0; i < 101; i++) {
-      const old = await beginAttempt(c, first.stepId); c.advance(1); await closeAttempt(c, old);
-    }
-    c.advance(86400000);
-    const current = await beginAttempt(c, first.stepId); c.advance(5000); await closeAttempt(c, current);
-    const date = new Date(c.now()).toISOString().slice(0, 10);
-    const h = await history(c, { ...historyArgs([{ planId: PLAN }]), from: date, to: date });
-    assert.equal(h.facts[0].attempts.length, 1);
-    assert.equal(h.facts[0].attempts[0].attempt_id, current.attemptId);
-    assert.equal(h.facts[0].truncation.attempts, false);
-    const stat = h.statistics.find(s => s.scope === "plan" && s.metric === "ATTEMPT");
-    assert.equal(stat.sampleCount, 1); assert.equal(stat.medianMs, 5000); assert.equal(stat.minMs, 5000);
-  } finally { c.close(); }
-});
-
-test("attempt windows honor period endpoints and preserve genuine measured zero", async () => {
-  const c = context();
-  try {
-    const step = await planned(c);
-    await ok(c, "StartPlan", { planId: PLAN }, 0);
-    const boundary = Date.parse("2027-01-16T00:00:00Z");
-    c.advance(boundary - c.now() - 1000);
-    const prior = await beginAttempt(c, step.stepId); c.advance(1000); await closeAttempt(c, prior);
-    const zero = await beginAttempt(c, step.stepId); await closeAttempt(c, zero);
-    c.advance(1); // Distinct claim times keep fixture ordering independent of random UUIDs.
-    const current = await beginAttempt(c, step.stepId); c.advance(5000); await closeAttempt(c, current);
-    c.advance(86400000 - 5001);
-    await beginAttempt(c, step.stepId); // Exact end of selected day is excluded.
-    const h = await history(c, { ...historyArgs([{ planId: PLAN }]), from: "2027-01-16", to: "2027-01-16" });
-    assert.deepEqual(h.facts[0].attempts.map(a => a.attempt_id), [zero.attemptId, current.attemptId]);
-    assert.deepEqual(h.facts[0].attempts.map(a => a.durationMs), [0, 5000]);
-    const stat = h.statistics.find(s => s.metric === "ATTEMPT" && s.scope === "plan");
-    assert.equal(stat.sampleCount, 2); assert.equal(stat.medianMs, 2500);
-  } finally { c.close(); }
-});
-
 test("calendar facts remain measured when historical active intervals are missing", async () => {
   const c = context();
   try {
@@ -453,65 +238,13 @@ test("calendar facts remain measured when historical active intervals are missin
   } finally { c.close(); }
 });
 
-test("attempts crossing midnight are clipped and future execution stays unknown at asOf", async () => {
-  const c = context();
-  try {
-    const step = await planned(c);
-    await ok(c, "StartPlan", { planId: PLAN }, 0);
-    const midnight = Date.parse("2027-01-16T00:00:00Z");
-    c.advance(midnight - c.now() - 1000);
-    const crossing = await beginAttempt(c, step.stepId); c.advance(6000); await closeAttempt(c, crossing);
-    const second = await ok(c, "CreateStep", { planId: PLAN, ordinal: 2, title: "Waiting", expectedResult: "Execute later", requiredChecks: [] });
-    const claim = await ok(c, "ClaimStepAttempt", { stepId: second.stepId, sessionId: crypto.randomUUID(), sourceId: "waiting" }, 1);
-    const asOf = c.now(); c.advance(1000);
-    await ok(c, "StartStep", { stepId: second.stepId, attemptId: claim.attemptId, fence: claim.fence }, 1);
-    const h = await history(c, { ...historyArgs([{ planId: PLAN }]), from: "2027-01-16", to: "2027-01-16", asOf });
-    assert.deepEqual(h.facts[0].attempts.map(a => a.durationMs), [5000, null]);
-    assert.equal(h.facts[0].attempts[1].execution_started_at, null);
-    const stat = h.statistics.find(s => s.scope === "plan" && s.metric === "ATTEMPT");
-    assert.equal(stat.sampleCount, 1); assert.equal(stat.unknownCount, 1); assert.equal(stat.medianMs, 5000);
-  } finally { c.close(); }
-});
-
-for (const scope of ["plan", "step"]) test(`client requirements digest protects first and revised ${scope} assessments`, async () => {
-  const c = context();
-  try {
-    const step = await planned(c), targetStep = scope === "step" ? step.stepId : undefined;
-    const p = await assessment(c, targetStep, { context: { expectedResult: "Works" } });
-    await ok(c, "UpdateStep", { stepId: step.stepId, changes: { expectedResult: "Expanded scope" }, reason: "Concurrent change before first write" }, 1);
-    const rejectedId = crypto.randomUUID();
-    const rejected = await command(c, "RecordAssessment", p, 0, rejectedId);
-    assert.equal(rejected.status, 409); assert.equal(rejected.value.error.code, "ASSESSMENT_CONTEXT_CHANGED");
-    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM assessment_revisions").get().n, 0);
-    const receipt = (await mcp(c, "GetCommandReceipt", { commandId: rejectedId })).value.result.structuredContent;
-    assert.equal(receipt.status, "FINAL"); assert.equal(receipt.error.code, "ASSESSMENT_CONTEXT_CHANGED");
-    const reassessed = await assessment(c, targetStep, { assessmentId: p.assessmentId, context: { expectedResult: "Expanded scope" } });
-    assert.notEqual(reassessed.expectedRequirementsDigest, p.expectedRequirementsDigest);
-    await ok(c, "RecordAssessment", reassessed, 0);
-    assert.equal((await read(c, p)).needsRevision, false);
-    // Replaying the rejected envelope must never turn into a successful write.
-    assert.equal((await command(c, "RecordAssessment", p, 0, rejectedId)).value.error.code, "ASSESSMENT_CONTEXT_CHANGED");
-    await ok(c, "UpdateStep", { stepId: step.stepId, changes: { expectedResult: "Expanded again" }, reason: "Concurrent change before revision" }, 2);
-    const stale = await command(c, "RecordAssessment", { ...reassessed, reason: "Old context must be rejected" }, 1);
-    assert.equal(stale.value.error.code, "ASSESSMENT_CONTEXT_CHANGED");
-    const baseline = await read(c, p);
-    assert.equal(baseline.revisionCount, 1); assert.equal(baseline.needsRevision, true);
-    assert.equal(baseline.assessment.context.expectedResult, "Expanded scope");
-    const updated = await assessment(c, targetStep, { assessmentId: p.assessmentId, context: { expectedResult: "Expanded again" }, reason: "Reassessed changed scope" });
-    await ok(c, "RecordAssessment", updated, 1);
-    assert.equal((await read(c, p)).revision, 2); assert.equal((await read(c, p)).needsRevision, false);
-    assert.equal((await read(c, p, 1)).assessment.expectedRequirementsDigest, reassessed.expectedRequirementsDigest);
-    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM work_intervals").get().n, 0);
-  } finally { c.close(); }
-});
-
 test("context-only reads are owner scoped, bounded and available before any assessment", async () => {
   const c = context();
   try {
     const step = await planned(c);
     const response = await call(c, "/api/tracker/assessment", { planId: PLAN, stepId: step.stepId });
     assert.equal(response.status, 200); assert.equal(response.value.contextOnly, true);
-    assert.equal(response.value.requirements.step.expectedResult, "Works");
+    assert.match(response.value.requirements.step.content,/Works/);
     assert.match(response.value.currentRequirementsDigest, /^sha256:[a-f0-9]{64}$/);
     assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM assessment_revisions").get().n, 0);
     for (const args of [{ planId: PLAN, revision: 1 }, { planId: PLAN, stepId: step.stepId, assessmentId: crypto.randomUUID() }]) {

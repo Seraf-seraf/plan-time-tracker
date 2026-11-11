@@ -31,7 +31,7 @@ test("missing or outdated pre-start assessment cannot be repaired by a late revi
   const c = context();
   try {
     await plannedAtlm(c);
-    await ok(c, "UpdatePlanMetadata", { planId: PLAN, description: "Expanded before start" }, 0);
+    await ok(c, "UpdatePlanMetadata", { planId: PLAN, title: "Expanded before start" }, 0);
     await ok(c, "StartPlan", { planId: PLAN }, 1);
     assert.equal(input(c).selection_status, "MISSING_FEATURES");
     await ok(c, "RecordAssessment", await atlmAssessment(c), 0);
@@ -58,27 +58,15 @@ test("verified completion yields exact full plan duration, genuine zero and one 
   } finally { c.close(); }
 });
 
-test("A to B to A requirements are excluded; successful same-value writes remain eligible", async () => {
-  const c = context();
-  try {
-    const p = await plannedAtlm(c);
-    await ok(c, "StartPlan", { planId: PLAN }, 0);
-    const beforeNoop = job(c).generation;
-    await ok(c, "UpdateStep", { stepId: p.step.stepId, changes: { title: "Feature" }, reason: "Same title" }, 1);
-    assert.equal(job(c).generation, beforeNoop);
-    const claimed = await ok(c, "ClaimStepAttempt", { stepId: p.step.stepId, sessionId: crypto.randomUUID(), sourceId: "fixture" }, 2);
-    const lease = { stepId: p.step.stepId, attemptId: claimed.attemptId, fence: claimed.fence };
-    await ok(c, "StartStep", lease, 2); c.advance(2500); await result(c, lease, undefined, 3);
-    await ok(c, "RecordCheck", check(lease.stepId)); await ok(c, "FinishPlan", { planId: PLAN }, 1);
-    const firstGeneration = job(c).generation;
-    await ok(c, "UpdatePlanMetadata", { planId: PLAN, description: "" }, 2);
-    assert.equal(job(c).generation, firstGeneration);
-    assert.equal((await readAtlmSampleSource(c.db, OWNER, PLAN, c.now())).eligibility, "ELIGIBLE");
-    c.advance(1); await ok(c, "UpdatePlanMetadata", { planId: PLAN, description: "Changed temporarily" }, 3);
-    await ok(c, "UpdatePlanMetadata", { planId: PLAN, description: "" }, 4);
-    const source = await readAtlmSampleSource(c.db, OWNER, PLAN, c.now());
-    assert.ok(source.reasons.includes("SCOPE_CHANGED")); assert.equal(source.actualMs, 2500);
-  } finally { c.close(); }
+test("A to B to A requirements are excluded; successful same-value writes remain eligible",async()=>{
+ const c=context();try{
+  const p=await plannedAtlm(c);await ok(c,"StartPlan",{planId:PLAN},0);
+  const before=job(c).generation;await ok(c,"UpdatePlanMetadata",{planId:PLAN,title:"ATLM synthetic feature"},1);assert.equal(job(c).generation,before);
+  await ok(c,"SetStepStatus",{stepId:p.step.stepId,status:"RUNNING"},1);c.advance(2500);await ok(c,"SetStepStatus",{stepId:p.step.stepId,status:"DONE"},2);await ok(c,"FinishPlan",{planId:PLAN},2);
+  assert.equal((await readAtlmSampleSource(c.db,OWNER,PLAN,c.now())).eligibility,"ELIGIBLE");
+  await ok(c,"UpdatePlanMetadata",{planId:PLAN,title:"Temporary scope"},3);await ok(c,"UpdatePlanMetadata",{planId:PLAN,title:"ATLM synthetic feature"},4);
+  const source=await readAtlmSampleSource(c.db,OWNER,PLAN,c.now());assert(source.reasons.includes("SCOPE_CHANGED"));assert.equal(source.actualMs,2500);
+ }finally{c.close();}
 });
 
 test("sample save refuses changed generation, stale fence and expired lease", async () => {
@@ -132,18 +120,6 @@ test("source/outbox write failure rolls the first Start back with its frozen inp
   } finally { c.close(); }
 });
 
-test("step A to B to A scope change remains visible without changing the frozen revision", async () => {
-  const c = context();
-  try {
-    const p = await plannedAtlm(c); await ok(c, "StartPlan", { planId: PLAN }, 0);
-    const original = input(c).assessment_sequence;
-    await ok(c, "UpdateStep", { stepId: p.step.stepId, changes: { expectedResult: "Different outcome" }, reason: "New requirement" }, 1);
-    await ok(c, "UpdateStep", { stepId: p.step.stepId, changes: { expectedResult: "Checked change" }, reason: "Reverted requirement" }, 2);
-    assert.ok((await readAtlmSampleSource(c.db, OWNER, PLAN, c.now())).reasons.includes("SCOPE_CHANGED"));
-    assert.equal(input(c).assessment_sequence, original);
-  } finally { c.close(); }
-});
-
 test("queue bookkeeping cannot move source availability; checkpoint yields do not spend retries", async () => {
   const c = context();
   try {
@@ -164,10 +140,9 @@ test("full measurement supports finishing paused but rejects a missing server in
   const c = context();
   try {
     const p = await plannedAtlm(c); await ok(c, "StartPlan", { planId: PLAN }, 0);
-    const claimed = await ok(c, "ClaimStepAttempt", { stepId: p.step.stepId, sessionId: crypto.randomUUID(), sourceId: "fixture" }, 1);
-    const lease = { stepId: p.step.stepId, attemptId: claimed.attemptId, fence: claimed.fence };
-    await ok(c, "StartStep", lease, 1); c.advance(200); await result(c, lease);
-    await ok(c, "RecordCheck", check(lease.stepId)); await ok(c, "PausePlan", { planId: PLAN }, 1);
+    const lease={stepId:p.step.stepId};
+    await ok(c,"SetStepStatus",{...lease,status:"RUNNING"},1); c.advance(200); await result(c, lease);
+    await ok(c, "PausePlan", { planId: PLAN }, 1);
     c.advance(300); await ok(c, "ResumePlan", { planId: PLAN }, 2);
     c.advance(400); await ok(c, "PausePlan", { planId: PLAN }, 3);
     c.advance(500); await ok(c, "FinishPlan", { planId: PLAN }, 4);
@@ -179,35 +154,13 @@ test("full measurement supports finishing paused but rejects a missing server in
   } finally { c.close(); }
 });
 
-test("a late required check determines availability and yields just one new experience", async () => {
-  const c = context();
-  try {
-    const p = await plannedAtlm(c); await ok(c, "StartPlan", { planId: PLAN }, 0);
-    const claimed = await ok(c, "ClaimStepAttempt", { stepId: p.step.stepId, sessionId: crypto.randomUUID(), sourceId: "fixture" }, 1);
-    const lease = { stepId: p.step.stepId, attemptId: claimed.attemptId, fence: claimed.fence };
-    await ok(c, "StartStep", lease, 1); c.advance(1000); await result(c, lease);
-    await ok(c, "FinishPlan", { planId: PLAN, allowIncomplete: true, reason: "Check runs after completion" }, 1);
-    const excluded = await save(c); assert.ok(excluded.sample.reasons.includes("RESULT_NOT_VERIFIED"));
-    c.db.sqlite.prepare("UPDATE estimation_jobs SET status='IDLE',processed_generation=generation,lease_until=NULL WHERE owner_id=?").run(OWNER);
-    c.advance(2000); await ok(c, "RecordCheck", check(lease.stepId));
-    const verified = await save(c);
-    assert.equal(verified.sample.eligibility, "ELIGIBLE"); assert.equal(verified.sample.actualMs, 1000);
-    assert.equal(verified.sample.sourceAvailableAt, c.now()); assert.equal(verified.sample.firstEligible, true);
-    const page1 = await readAtlmSamples(c.db, OWNER, { latestOnly: false, limit: 1 });
-    const page2 = await readAtlmSamples(c.db, OWNER, { latestOnly: false, limit: 1, afterSequence: Number(page1[0].sampleId) });
-    assert.equal(page1[0].sampleId, excluded.sample.sampleId); assert.equal(page2[0].sampleId, verified.sample.sampleId);
-    assert.deepEqual(await readAtlmSamples(c.db, "other-owner", { latestOnly: false, afterSequence: Number(page1[0].sampleId) }), []);
-  } finally { c.close(); }
-});
-
 test("deleting an active plan closes its interval; restoration and resume preserve full measurement", async () => {
   const c = context();
   try {
     const p = await plannedAtlm(c); await ok(c, "StartPlan", { planId: PLAN }, 0);
-    const claimed = await ok(c, "ClaimStepAttempt", { stepId: p.step.stepId, sessionId: crypto.randomUUID(), sourceId: "fixture" }, 1);
-    const lease = { stepId: p.step.stepId, attemptId: claimed.attemptId, fence: claimed.fence };
-    await ok(c, "StartStep", lease, 1); c.advance(1000); await result(c, lease);
-    await ok(c, "RecordCheck", check(lease.stepId)); await ok(c, "DeletePlan", { planId: PLAN }, 1);
+    const lease={stepId:p.step.stepId};
+    await ok(c,"SetStepStatus",{...lease,status:"RUNNING"},1); c.advance(1000); await result(c, lease);
+    await ok(c, "DeletePlan", { planId: PLAN }, 1);
     c.advance(1000); await ok(c, "RestorePlan", { planId: PLAN }, 2); await ok(c, "ResumePlan", { planId: PLAN }, 3);
     c.advance(1000); await ok(c, "FinishPlan", { planId: PLAN }, 4);
     const measured = await readAtlmSampleSource(c.db, OWNER, PLAN, c.now());

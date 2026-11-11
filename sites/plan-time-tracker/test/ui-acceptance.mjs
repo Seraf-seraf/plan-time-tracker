@@ -69,7 +69,7 @@ try {
   const download = await downloadPromise;
   assert.equal(download.suggestedFilename(), "plan-time-tracker-export.json");
   const downloadedReport = JSON.parse(readFileSync(await download.path(), "utf8"));
-  assert.equal(downloadedReport.formatVersion, 1);
+  assert.equal(downloadedReport.formatVersion, 2);
   assert.equal(downloadedReport.timezone, "Asia/Omsk");
   assert.equal(downloadedReport.summary.planCount, 0);
   assert.deepEqual(downloadedReport.plans, []);
@@ -109,11 +109,10 @@ try {
   await page.waitForFunction(() => !document.querySelector("#toast")?.classList.contains("error"));
   const retried = posts.filter(post => post.commandType === "UpdatePlanMetadata").at(-1);
   assert.deepEqual(retried, original, "unknown outcome retries the exact envelope");
-  assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM plan_events WHERE event_type='METADATA_UPDATED'").get().n, 1);
+  assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM command_receipts WHERE command_type='UpdatePlanMetadata' AND outcome_code='OK'").get().n, 1);
   await page.locator("#planDetail>p").filter({hasText:"Saved before lost acknowledgment"}).waitFor();
   await page.locator('[data-tracker-panel]').waitFor();
   assert.equal(await page.locator('[data-tracker-form="create-step"]').count(),0);
-  await ok(c,"CreateStep",{planId:plan,ordinal:1,title:"Source verification",expectedResult:"Source contents checked",requiredChecks:["unit","build"]});
   assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM work_intervals").get().n, 0);
   assert.equal(await page.getByText("Коммиты и связь с планами", { exact: true }).count(), 0);
   assert.equal(await page.getByLabel("Политика commit", { exact: true }).count(), 0);

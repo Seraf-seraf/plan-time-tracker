@@ -81,7 +81,7 @@ try {
   await page.goto('http://localhost');await page.locator('#plans[data-loaded="true"]').waitFor({ state: 'attached' });
   await open(PLAN);
   assert.match(await forecast().innerText(), /Исходная оценка до запуска не сохранена/);
-  assert.equal(requests.filter(item => item.path.endsWith('/status-history') || item.path.endsWith('/timeline')).length, 0, 'forecast loading preserves lazy status history');
+  assert.equal(requests.filter(item => item.path.endsWith('/status-history') || item.path.endsWith('/timeline')).length, 0, 'the removed status-history UI must not make history requests');
   assert.equal(await page.getByText('История команд', { exact: true }).count(), 0);
   await page.locator('[data-view="settings"]').click();await settings().getByText('Всего пригодных планов: 0. Исключено: 2.', { exact: true }).waitFor();
   const recovered = await call(c, '/api/tracker/estimation-model');assert.equal(recovered.status, 200);

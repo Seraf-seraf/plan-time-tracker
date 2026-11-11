@@ -132,10 +132,10 @@ test("prediction write domain errors are durable receipts across context changes
   try {
     await plannedAtlm(c);
     const stale = await atlmAssessment(c, PLAN, atlmTask(), { predictionRequest: request }), staleId = crypto.randomUUID();
-    await ok(c, "UpdatePlanMetadata", { planId: PLAN, description: "Changed requirements" }, 0);
+    await ok(c, "UpdatePlanMetadata", { planId: PLAN, title: "Changed requirements" }, 0);
     assert.equal((await command(c, "RecordAssessment", stale, 0, staleId)).value.error.code, "ASSESSMENT_CONTEXT_CHANGED");
     assert.equal(value(await mcp(c, "GetCommandResult", { commandId: staleId })).status, "FINAL");
-    await ok(c, "UpdatePlanMetadata", { planId: PLAN, description: "" }, 1);
+    await ok(c, "UpdatePlanMetadata", { planId: PLAN, title: "ATLM synthetic feature" }, 1);
     assert.equal((await command(c, "RecordAssessment", stale, 0, staleId)).value.error.code, "ASSESSMENT_CONTEXT_CHANGED");
     const deleted = await atlmAssessment(c, PLAN, atlmTask(), { predictionRequest: request }), deletedId = crypto.randomUUID();
     await ok(c, "DeletePlan", { planId: PLAN }, 2);
@@ -165,8 +165,8 @@ test("a trained forecast stays frozen, yields prospective error, and becomes sta
     assert.equal(frozen.assessmentId, payload.assessmentId); assert.deepEqual(frozen.serverEstimation, before.serverEstimation);
     const source = await readAtlmSampleSource(c.db, OWNER, PLAN, c.now());
     assert.deepEqual(source.issuedPrediction, { modelId: before.serverEstimation.modelId, pointMs: 1000, actualMs: 1200, errorMs: -200 });
-    await ok(c, "UpdatePlanMetadata", { planId: PLAN, description: "Temporary scope change" }, 2);
-    await ok(c, "UpdatePlanMetadata", { planId: PLAN, description: "" }, 3);
+    await ok(c, "UpdatePlanMetadata", { planId: PLAN, title: "Temporary scope change" }, 2);
+    await ok(c, "UpdatePlanMetadata", { planId: PLAN, title: "ATLM synthetic feature" }, 3);
     assert.ok(value(await mcp(c, "GetSavedEstimate", { planId: PLAN })).staleReasons.includes("SCOPE_CHANGED"));
     await ok(c, "DeletePlan", { planId: trained.plans[0].planId }, 2);
     const stale = value(await mcp(c, "GetSavedEstimate", { planId: PLAN })); assert.equal(stale.isStale, true); assert.ok(stale.staleReasons.includes("MODEL_INVALIDATED"));
@@ -292,7 +292,7 @@ test("MCP exposes one forecasting method, a time report and no BlockStep", async
       assert.equal((await mcp(c, name, {})).value.result.structuredContent.code, "FEATURE_REMOVED");
     }
     const retired = await command(c, "BlockStep", {}, 1);
-    assert.equal(retired.status, 410); assert.equal(retired.value.error.code, "FEATURE_REMOVED");
+    assert.equal(retired.status, 400); assert.equal(retired.value.error.code, "VALIDATION_ERROR");
     const capabilities = value(await mcp(c, "GetTrackerInfo"));
     assert.equal(capabilities.assessments.calculator, undefined);
     const report = value(await mcp(c, "GetTimeReport", { from: "2026-01-01", to: "2026-01-02", timeZone: "UTC" }));
@@ -300,12 +300,12 @@ test("MCP exposes one forecasting method, a time report and no BlockStep", async
   } finally { c.close(); }
 });
 
-test("new public names retain old-client calls and preserve internal command receipts", async () => {
+test("active public names expose the reduced model and preserve command receipts", async () => {
   const c = context();
   try {
     const listing = (await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" })).value.result.tools;
     const names = listing.map(t => t.name);
-    for (const name of ["GetTrackerInfo", "GetTrainingStatus", "EstimatePlanTime", "GetSavedEstimate", "StartTraining", "ContinueTraining", "GetTrainingData", "SaveTaskAssessment", "GetTaskAssessment", "GetTimeReport", "RecordActivityEvent"]) assert.ok(names.includes(name), name);
+    for (const name of ["GetTrackerInfo", "GetTrainingStatus", "EstimatePlanTime", "GetSavedEstimate", "StartTraining", "ContinueTraining", "GetTrainingData", "SaveTaskAssessment", "GetTaskAssessment", "GetTimeReport"]) assert.ok(names.includes(name), name);
     for (const oldName of ["GetTrackerCapabilities", "CalculateAtlmEstimate", "GetAnalytics", "BlockStep", "CalculateEstimate"]) assert.ok(!names.includes(oldName), oldName);
     assert.deepEqual(value(await mcp(c, "GetTrainingStatus")), value(await mcp(c, "GetEstimationModelStatus")));
     const cap = value(await mcp(c, "GetTrackerInfo"));
