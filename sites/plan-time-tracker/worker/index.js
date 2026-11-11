@@ -10,7 +10,7 @@ const isSnapshotDigest = value => typeof value === "string" && value.length === 
 const WRITE_COMMANDS = new Set(["CreatePlan", "StartPlan", "PausePlan", "ResumePlan", "FinishPlan", "UpdatePlanMetadata", "DeletePlan", "RestorePlan"]);
 const TRACKER_COMMANDS = new Set(["CreateStep", "UpdateStep", "ClaimStepAttempt", "RenewStepLease", "CloseStepAttempt", "StartStep", "BlockStep", "RecordStepResult", "RecordCheck", "AppendObservation", "RecordAssessment"]);
 const TRACKER_VERSIONED_COMMANDS = new Set(["UpdateStep", "ClaimStepAttempt", "StartStep", "BlockStep", "RecordStepResult"]);
-const TRACKER_READ_TOOLS = new Set(["GetTrackerCapabilities", "GetPlanExecutionSnapshot", "GetTimeline", "GetCommandReceipt", "GetAssessment", "GetEstimationHistory", "CalculateEstimate", "CalculateAtlmEstimate", "GetPlanEstimate", "GetEstimationModelStatus", "GetAtlmDataset"]);
+const TRACKER_READ_TOOLS = new Set(["GetTrackerCapabilities", "GetPlanExecutionSnapshot", "GetTimeline", "GetCommandReceipt", "GetAssessment", "GetEstimationHistory", "CalculateAtlmEstimate", "GetPlanEstimate", "GetEstimationModelStatus", "GetAtlmDataset"]);
 const OBSERVATION_TYPES = new Set(["turn_started", "turn_finished", "tool_started", "tool_finished", "heartbeat", "gap", "correction"]);
 const UI_TIME_ZONES = [{ value: "Europe/Moscow", label: "Москва (UTC+3)" }, { value: "Asia/Omsk", label: "Омск (UTC+6)" }];
 export function resolveUiTimeZone(value) { return UI_TIME_ZONES.some((option) => option.value === value) ? value : "Asia/Omsk"; }
@@ -2397,9 +2397,7 @@ async function readTrackerCapabilities(db, ownerId) {
         calculateTool: "CalculateAtlmEstimate", planEstimateTool: "GetPlanEstimate", modelStatusTool: "GetEstimationModelStatus",
         processTool: "ProcessEstimationTraining", startTrainingTool: "StartEstimationTraining", datasetTool: "GetAtlmDataset", predictionRequest: { method: "ATLM", methodVersion: 1 },
         limits: { maxTrainingSamples: 5000, datasetDefaultLimit: 50, datasetMaxLimit: 100, maxOutcomes: 20, maxChangedContracts: 20, maxVerificationKinds: 5 } },
-      calculator: { tool: "CalculateEstimate", formatVersion: 1,
-        method: { id: "reference-class-median", version: "1" }, metrics: ["PLAN_ACTIVE"],
-        maxCandidates: 20, readOnly: true, accuracy: "NOT_VALIDATED" } },
+      },
     planDeletion: { softDelete: true, deleteTool: "DeletePlan", restoreTool: "RestorePlan", deletedFilter: "deleted", restoreStartsTimer: false }, enabledPlanCount: row.enabled_plan_count,
     parallelPlans: true, planList: { tool: "ListPlans", statuses: PLAN_STATUSES, defaultLimit: 50, maxLimit: MAX_PLAN_PAGE_SIZE, order: "registeredAt DESC, planId DESC", deletedDefault: false },
     analytics: { totalActiveMs: "union of owner intervals", activeByDay: "union by local day", sumPlanActiveMs: "sum of per-plan intervals" },
@@ -3189,7 +3187,6 @@ const UI_TRACKER = String.raw`(()=> {
     if(plan.status==="RUNNING"&&openAttempt){const renew=make("button","Продлить lease на 10 минут");renew.type="button";renew.addEventListener("click",async()=>{renew.disabled=true;try{await command("RenewStepLease",{stepId:step.step_id,attemptId:openAttempt.attempt_id,fence:openAttempt.fence});clearCardError();setMessage(message,"Lease продлён сервером; таймер плана не менялся.");await reload();}catch(error){reportCardError(error);}finally{renew.disabled=false;}});actions.append(renew);}
     if(plan.status==="RUNNING"&&(!openAttempt||!openAttempt.stepStarted)&&["PENDING","BLOCKED","FAILED","DONE","RUNNING"].includes(step.status)){
       const rework=inputField("Причина доработки от владельца (обязательна для DONE)",{maxLength:1000,value:expiredAttempt&&expiredAttempt.rework_reason||""});rework.wrap.hidden=step.status!=="DONE";if(step.status==="DONE"){draftForm(rework.wrap,"rework:"+step.step_id);body.append(rework.wrap);}const start=make("button",expiredAttempt?"Начать новую попытку после истечения срока":step.status==="RUNNING"&&!openAttempt?"Начать новую попытку":openAttempt&&!openAttempt.stepStarted?"Запустить назначенную попытку":step.status==="DONE"?"Назначить и начать доработку":"Захватить попытку и начать");start.type="button";start.className="primary";start.addEventListener("click",async()=>{start.disabled=true;try{await settleAttemptCommands(step.step_id);const latest=await api("/api/tracker/plans/"+encodeURIComponent(planId)+"/execution"),current=latest.steps.find(item=>item.step_id===step.step_id);if(!current||latest.plan.status!=="RUNNING")throw new Error("Обновите план: работа сейчас не запущена.");const live=current.attempts.find(item=>item.fence===current.current_fence&&item.status==="OPEN"&&item.lease_until>latest.serverNow);if(live?.stepStarted){clearCardError();setMessage(message,"Попытка уже запущена; состояние обновлено.");await reload();return;}let attempt=live;if(!attempt){const payload={stepId:step.step_id,sessionId:getSessionId(),sourceId:"sites-owner-ui",clientType:"UNKNOWN"};if(current.status==="RUNNING")payload.recoveryReason="Владелец явно продолжил этап новой попыткой.";if(step.status==="DONE"){if(!rework.control.value.trim())throw new Error("Для DONE укажите явную причину доработки владельца.");payload.reworkReason=rework.control.value.trim();}const claimed=await command("ClaimStepAttempt",payload,current.version);attempt={attempt_id:claimed.attemptId,fence:claimed.fence,rework_reason:step.status==="DONE"?rework.control.value.trim():null};}const startPayload={stepId:step.step_id,attemptId:attempt.attempt_id,fence:attempt.fence};if(attempt.rework_reason){startPayload.rework=true;startPayload.reason=attempt.rework_reason;}await command("StartStep",startPayload,current.version);clearCardError();setMessage(message,"Checkpoint запущен отдельной явной командой.");await reload();}catch(error){reportCardError(error);}finally{start.disabled=false;}});actions.append(start);}
-    if(plan.status==="RUNNING"&&step.status==="RUNNING"&&openAttempt&&openAttempt.stepStarted){const blockReason=inputField("Причина блокировки",{required:true,maxLength:1000});const block=make("button","Заблокировать");block.type="button";block.addEventListener("click",async()=>{if(!blockReason.control.reportValidity())return;block.disabled=true;try{await command("BlockStep",{stepId:step.step_id,attemptId:openAttempt.attempt_id,fence:openAttempt.fence,reason:blockReason.control.value},step.version);clearCardError();setMessage(message,"Checkpoint заблокирован с указанной причиной.");await reload();}catch(error){reportCardError(error);}finally{block.disabled=false;}});draftForm(blockReason.wrap,"block:"+step.step_id);body.append(blockReason.wrap);actions.append(block);}
     if(plan.status==="RUNNING"&&step.status==="RUNNING"&&openAttempt&&openAttempt.stepStarted){const resultForm=make("form",null,"tracker-form"),outcome=selectField("Результат попытки",["DONE","FAILED"],"DONE"),summary=inputField("Краткий результат",{tag:"textarea",required:true,maxLength:4000,rows:2}),snapshotDigest=inputField("Digest снимка файлов",{maxLength:71,placeholder:"sha256:64 hex символа"}),save=make("button","Записать результат");save.type="submit";draftForm(resultForm,"result:"+step.step_id);resultForm.append(outcome.wrap,summary.wrap,make("p","Обязательные проверки относятся к снимку файлов v2. Получите digest штатным helper до и после каждой проверки.","tracker-meta"),snapshotDigest.wrap,save);resultForm.addEventListener("submit",async(event)=>{event.preventDefault();const submittedDraft=snapshotDraft(resultForm,planId);save.disabled=true;try{const payload={stepId:step.step_id,attemptId:openAttempt.attempt_id,fence:openAttempt.fence,outcome:outcome.control.value,summary:summary.control.value};if(snapshotDigest.control.value)payload.sourceSnapshot={kind:"SOURCE_SNAPSHOT",formatVersion:2,digest:snapshotDigest.control.value};await command("RecordStepResult",payload,step.version);clearCardError();clearDraft(submittedDraft);setMessage(message,"Результат записан. Готовность определяется проверками текущей ревизии и её снимка.");await reload();}catch(error){reportCardError(error);}finally{save.disabled=false;}});body.append(resultForm);}
 
     if(result&&result.snapshot_digest&&!result.protectedRevisionHidden){const currentChecks=step.currentChecks||[];for(const checkKey of step.requiredChecks){const previousCheck=currentChecks.find((check)=>check.check_key===checkKey);const form=make("form",null,"tracker-form"),title=make("strong","Записать check: "+checkKey),statusSelect=selectField("Статус проверки",["PASSED","FAILED","NOT_RUN"],previousCheck?previousCheck.status:"PASSED"),shaField=inputField("Digest проверенного снимка",{required:true,maxLength:71,value:previousCheck?previousCheck.tested_snapshot_digest:result.snapshot_digest}),exit=inputField("Код завершения",{type:"number",value:previousCheck&&previousCheck.exit_code!=null?String(previousCheck.exit_code):"0"}),evidence=inputField("Краткая evidence summary",{tag:"textarea",maxLength:2000,rows:2,value:previousCheck&&previousCheck.evidence_summary||""}),save=make("button",previousCheck?"Записать новую ревизию check":"Сохранить check");save.type="submit";draftForm(form,"check:"+step.step_id+":"+result.revision+":"+checkKey);form.append(title,statusSelect.wrap,shaField.wrap,exit.wrap,evidence.wrap,save);statusSelect.control.addEventListener("change",()=>{exit.control.disabled=statusSelect.control.value==="NOT_RUN";if(statusSelect.control.value==="PASSED")exit.control.value="0";if(statusSelect.control.value==="FAILED"&&Number(exit.control.value)<1)exit.control.value="1";});exit.control.disabled=statusSelect.control.value==="NOT_RUN";form.addEventListener("submit",async(event)=>{event.preventDefault();const submittedDraft=snapshotDraft(form,planId);save.disabled=true;try{const checkStatus=statusSelect.control.value,payload={stepId:step.step_id,resultRevision:result.revision,checkKey:checkKey,status:checkStatus,evidenceSummary:evidence.control.value};payload.testedSnapshotDigest=shaField.control.value;if(checkStatus!=="NOT_RUN")payload.exitCode=Number(exit.control.value);await command("RecordCheck",payload);clearCardError();clearDraft(submittedDraft);setMessage(message,"Результат проверки сохранён для текущей ревизии.");await reload();}catch(error){reportCardError(error);}finally{save.disabled=false;}});body.append(form);}}
@@ -3351,10 +3348,10 @@ function uiHtml() {
   ].join("").replace("</head>", "<style>" + UI_FONT_CSS + UI_ANALYTICS_CSS + UI_PLAN_LISTS_CSS + "</style></head>").replace("</body></html>", "<script>" + UI_ENHANCEMENTS + "</script><script>" + UI_TRACKER + UI_ATLM + "</script><script>" + UI_ACCESSIBILITY + "</script><style>" + UI_CONSOLE_PAPER_CSS + "</style></body></html>");
 }
 
-const RETIRED_COMMANDS = new Set(["SyncRepository","AttachPlanRepository","ReviewCommitLink"]);
+const RETIRED_COMMANDS = new Set(["SyncRepository","AttachPlanRepository","ReviewCommitLink","BlockStep"]);
 const PUBLIC_OBSERVATIONS = [...OBSERVATION_TYPES];
 function validatePublicCommand(envelope) {
-  if (RETIRED_COMMANDS.has(envelope?.commandType)) throw appError("FEATURE_REMOVED","Интеграция контроля версий удалена.",410);
+  if (RETIRED_COMMANDS.has(envelope?.commandType)) throw appError("FEATURE_REMOVED","Команда удалена из текущего контракта.",410);
   const payload=envelope?.payload;
   if(!payload || typeof payload!=="object") return;
   const forbidden=["repositoryId","repositoryIds","repositoryRefs","revisionSha","testedSha","worktreeSnapshot","commitPolicy","pushPolicy"];
@@ -3829,7 +3826,7 @@ async function apiRoute(request, env, url, channel, now, clock = () => now, ctx)
     return json(await listPlans(env.DB, identity.ownerId, now, filter));
   }
 
-  if (request.method === "GET" && url.pathname === "/api/tracker/capabilities") return json(await readTrackerCapabilities(env.DB, identity.ownerId));
+  if (request.method === "GET" && url.pathname === "/api/tracker/capabilities") return json(publicToolReferences(await readTrackerCapabilities(env.DB, identity.ownerId)));
   if (request.method === "POST" && url.pathname === "/api/tracker/assessment") return json(await readAssessment(env.DB, identity.ownerId, await bodyJson(request), now));
   const atlmPaths = { "/api/tracker/atlm-estimate": "CalculateAtlmEstimate", "/api/tracker/atlm-dataset": "GetAtlmDataset", "/api/tracker/estimation-model/process": "ProcessEstimationTraining" };
   if (request.method === "POST" && atlmPaths[url.pathname]) return json(await executeAtlmTool(env.DB, identity.ownerId, atlmPaths[url.pathname], await bodyJson(request), now, clock));
@@ -3888,7 +3885,48 @@ async function apiRoute(request, env, url, channel, now, clock = () => now, ctx)
   throw appError("NOT_FOUND", "Маршрут не найден.", 404);
 }
 
-const TOOL_NAMES = ["CreatePlan", "GetPlan", "ListPlans", "StartPlan", "PausePlan", "ResumePlan", "FinishPlan", "DeletePlan", "RestorePlan", "UpdatePlanMetadata", "GetAnalytics", ...TRACKER_READ_TOOLS, ...TRACKER_COMMANDS, "ProcessEstimationTraining", "StartEstimationTraining"];
+const TOOL_NAMES = ["CreatePlan", "GetPlan", "ListPlans", "StartPlan", "PausePlan", "ResumePlan", "FinishPlan", "DeletePlan", "RestorePlan", "UpdatePlanMetadata", "GetTimeReport", ...TRACKER_READ_TOOLS, ...[...TRACKER_COMMANDS].filter(name => name !== "BlockStep"), "ProcessEstimationTraining", "StartEstimationTraining"];
+// Public MCP names are independent from persisted command types and receipts.
+const MCP_PUBLIC_NAMES = Object.freeze({
+  UpdatePlanMetadata: "UpdatePlan", GetTrackerCapabilities: "GetTrackerInfo",
+  GetPlanExecutionSnapshot: "GetPlanProgress", GetTimeline: "GetPlanHistory",
+  GetCommandReceipt: "GetCommandResult", ClaimStepAttempt: "AssignStepAttempt",
+  RenewStepLease: "ExtendStepAssignment", RecordStepResult: "SaveStepResult",
+  RecordCheck: "SaveCheckResult", AppendObservation: "RecordActivityEvent",
+  CalculateAtlmEstimate: "EstimatePlanTime", GetPlanEstimate: "GetSavedEstimate",
+  GetEstimationModelStatus: "GetTrainingStatus", StartEstimationTraining: "StartTraining",
+  ProcessEstimationTraining: "ContinueTraining", GetAtlmDataset: "GetTrainingData",
+  RecordAssessment: "SaveTaskAssessment", GetAssessment: "GetTaskAssessment",
+  GetEstimationHistory: "GetTimeHistory",
+});
+const MCP_INTERNAL_NAMES = Object.freeze({ ...Object.fromEntries(Object.entries(MCP_PUBLIC_NAMES).map(([oldName, newName]) => [newName, oldName])), GetAnalytics: "GetTimeReport" });
+function publicToolReferences(value) {
+  if (typeof value === "string") return MCP_PUBLIC_NAMES[value] || value;
+  if (Array.isArray(value)) return value.map(publicToolReferences);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, publicToolReferences(item)]));
+  return value;
+}
+const MCP_DESCRIPTIONS = Object.freeze({
+  UpdatePlanMetadata: "Изменить название, описание или критерии плана, проверив текущую версию.",
+  GetTrackerCapabilities: "Показать доступные функции трекера и их ограничения.",
+  GetPlanExecutionSnapshot: "Показать текущее состояние плана, шагов, попыток и проверок.",
+  GetTimeline: "Показать историю событий конкретного плана с пагинацией.",
+  GetCommandReceipt: "Проверить результат ранее отправленной команды по её идентификатору.",
+  ClaimStepAttempt: "Закрепить попытку шага за исполнителем на ограниченное время.",
+  RenewStepLease: "Продлить право исполнителя работать над текущей попыткой шага.",
+  CloseStepAttempt: "Закрыть попытку шага, не завершая сам план.",
+  StartStep: "Начать назначенную попытку шага; таймер плана не изменится.",
+  UpdateStep: "Изменить сведения или условия проверки шага.",
+  RecordStepResult: "Записать фактический результат попытки шага.",
+  RecordCheck: "Записать фактический результат проверки для конкретной версии результата шага.",
+  AppendObservation: "Записать событие работы агента для истории и диагностики; таймер и статус шага не меняются.",
+  CalculateAtlmEstimate: "Получить прогноз полного активного времени плана по ATLM до первого запуска; прогноз не сохраняется.",
+  GetPlanEstimate: "Прочитать сохранённый прогноз плана и узнать, не устарел ли он; новая оценка не рассчитывается.",
+  GetEstimationModelStatus: "Посмотреть количество примеров, состояние обучения и причины исключения данных.",
+  StartEstimationTraining: "По прямой просьбе пользователя запросить новую попытку обучения на доступных данных.",
+  ProcessEstimationTraining: "Продолжить подготовку данных или уже запущенное обучение одним ограниченным проходом.",
+  GetAtlmDataset: "Посмотреть сохранённые примеры обучения и причины исключения, с пагинацией.",
+});
 function mcpTools() {
   const writeNames = new Set([...WRITE_COMMANDS, ...TRACKER_COMMANDS]);
   const assessmentDescriptions = {
@@ -3918,7 +3956,7 @@ function mcpTools() {
     else if (name === "GetPlanExecutionSnapshot") inputSchema = { type: "object", required: ["planId"], properties: { planId: { type: "string", format: "uuid" } }, additionalProperties: false };
     else if (name === "GetTimeline") inputSchema = { type: "object", required: ["planId"], properties: { planId: { type: "string", format: "uuid" }, afterSequence: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 } }, additionalProperties: false };
     else if (name === "GetCommandReceipt") inputSchema = { type: "object", required: ["commandId"], properties: { commandId: { type: "string", format: "uuid" } }, additionalProperties: false };
-    else if (name === "GetAnalytics") inputSchema = { type: "object", required: ["from", "to", "timeZone"], properties: { from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, timeZone: { type: "string" } }, additionalProperties: false };
+    else if (name === "GetTimeReport") inputSchema = { type: "object", required: ["from", "to", "timeZone"], properties: { from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, timeZone: { type: "string" } }, additionalProperties: false };
     else if (name === "GetAssessment") inputSchema = getAssessmentSchema;
     else if (name === "GetEstimationHistory") inputSchema = estimationHistorySchema;
     else if (name === "CalculateEstimate") inputSchema = estimateCalculatorSchema;
@@ -4042,8 +4080,8 @@ function mcpTools() {
     }
     if (assessmentDescriptions[name]) return { name, description: assessmentDescriptions[name], inputSchema,
       ...(name === "CalculateEstimate" ? { annotations: { readOnlyHint: true, destructiveHint: false } } : {}) };
-    return { name: name, description: name === "DeletePlan" ? "Переместить план в удалённые: остановить его таймер и попытки, сохранить историю. Требует явной просьбы пользователя и текущей версии." : name === "RestorePlan" ? "Восстановить удалённый план без запуска таймера. Требует явной просьбы пользователя и текущей версии." : name === "ListPlans" ? "Список планов владельца с фильтрами statuses, deleted (по умолчанию false) и стабильной пагинацией nextCursor; RUNNING возвращает все активные планы. Не выбирает план для исполнителя." : name === "GetAnalytics" ? "Общее totalActiveMs и activeByDay — объединение интервалов; sumPlanActiveMs — сумма времени планов. Все значения времени в миллисекундах." : ["StartPlan", "ResumePlan", "PausePlan", "FinishPlan"].includes(name) ? name + ": меняет только указанный planId; другие планы продолжаются независимо." : name === "CreatePlan" ? "Создать план и дату составления; таймер не запускается." : name === "CreateStep" ? "Создать checkpoint в плане; таймер плана не меняется." : name === "AppendObservation" ? "Добавить bounded metadata observation; не меняет состояние шага или таймер." : name + " через общий командный/API слой Sites.", inputSchema: inputSchema };
-  });
+    return { name: name, description: name === "DeletePlan" ? "Переместить план в удалённые: остановить его таймер и попытки, сохранить историю. Требует явной просьбы пользователя и текущей версии." : name === "RestorePlan" ? "Восстановить удалённый план без запуска таймера. Требует явной просьбы пользователя и текущей версии." : name === "ListPlans" ? "Список планов владельца с фильтрами statuses, deleted (по умолчанию false) и стабильной пагинацией nextCursor; RUNNING возвращает все активные планы. Не выбирает план для исполнителя." : name === "GetTimeReport" ? "Отчёт о фактически затраченном времени за период: totalActiveMs и activeByDay объединяют пересекающиеся интервалы, sumPlanActiveMs суммирует время планов. Это не прогноз. Значения в миллисекундах." : ["StartPlan", "ResumePlan", "PausePlan", "FinishPlan"].includes(name) ? name + ": меняет только указанный planId; другие планы продолжаются независимо." : name === "CreatePlan" ? "Создать план и дату составления; таймер не запускается." : name === "CreateStep" ? "Создать checkpoint в плане; таймер плана не меняется." : name === "AppendObservation" ? "Записать служебное событие хода агента или вызова инструмента для истории и диагностики; не влияет на оценку, статус шага или таймер." : name + " через общий командный/API слой Sites.", inputSchema: inputSchema };
+  }).map(tool => ({ ...tool, name: MCP_PUBLIC_NAMES[tool.name] || tool.name, description: Object.entries(MCP_PUBLIC_NAMES).reduce((text, [oldName, newName]) => text.replaceAll(oldName, newName), MCP_DESCRIPTIONS[tool.name] || tool.description) }));
 }
 
 function unexpectedMcpErrorReason(error) {
@@ -4068,11 +4106,12 @@ async function mcpRoute(request, env, now, ctx, clock = () => now) {
   if (rpc.method !== "tools/call") return json({ jsonrpc: "2.0", id: id, error: { code: -32601, message: "Method not found" } });
   const identity = requireOwner(request);
   if (!env.DB) return json({ jsonrpc: "2.0", id: id, result: { isError: true, content: [{ type: "text", text: "D1 binding DB не настроен." }] } });
-  const name = rpc.params && rpc.params.name;
+  const publicName = rpc.params && rpc.params.name;
+  const name = MCP_INTERNAL_NAMES[publicName] || publicName;
   const args = rpc.params && rpc.params.arguments || {};
   try {
     if(!TOOL_NAMES.includes(name)) throw appError("FEATURE_REMOVED","Инструмент недоступен в текущем контракте.",410);
-    if(name==="GetAnalytics" && Object.hasOwn(args,"repositoryIds")) throw appError("VALIDATION_ERROR","Фильтр удален из текущего контракта.");
+    if(name==="GetTimeReport" && Object.hasOwn(args,"repositoryIds")) throw appError("VALIDATION_ERROR","Фильтр удален из текущего контракта.");
     if(WRITE_COMMANDS.has(name)||TRACKER_COMMANDS.has(name)) validatePublicCommand({...args,commandType:name});
     await ensureOwner(env.DB, identity, now);
     let result;
@@ -4082,8 +4121,8 @@ async function mcpRoute(request, env, now, ctx, clock = () => now) {
     else if (name === "CalculateEstimate") result = await readCalculatedEstimate(env.DB, identity.ownerId, args, now);
     else if (name === "GetEstimationHistory") result = await readEstimationHistory(env.DB, identity.ownerId, args, now);
     else if (name === "ListPlans") result = await listPlans(env.DB, identity.ownerId, now, args);
-    else if (name === "GetAnalytics") result = await buildAnalytics(env.DB, identity.ownerId, args, now);
-    else if (name === "GetTrackerCapabilities") result = await readTrackerCapabilities(env.DB, identity.ownerId);
+    else if (name === "GetTimeReport") result = await buildAnalytics(env.DB, identity.ownerId, args, now);
+    else if (name === "GetTrackerCapabilities") result = publicToolReferences(await readTrackerCapabilities(env.DB, identity.ownerId));
     else if (name === "GetPlanExecutionSnapshot") result = await readPlanExecutionSnapshot(env.DB, identity.ownerId, args.planId, now);
     else if (name === "GetTimeline") result = await readTrackerTimeline(env.DB, identity.ownerId, args.planId, args.afterSequence === undefined ? 0 : args.afterSequence, args.limit === undefined ? 50 : args.limit);
     else if (name === "GetCommandReceipt") result = await readCommandReceipt(env.DB, identity.ownerId, args.commandId);

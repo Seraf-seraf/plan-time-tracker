@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { context, call, command, ok, running, result, check, source, internalCommand, rows, PLAN, OWNER, DIGEST_A } from "./fixtures/tracker-db.mjs";
+import { internalCommand, context, call, command, ok, running, result, check, source, rows, PLAN, OWNER, DIGEST_A } from "./fixtures/tracker-db.mjs";
 
 const report = async c => {
   const response = await call(c, "/api/export");
@@ -127,7 +127,7 @@ test("step time preserves overlap uncertainty, pauses, unstarted and expired att
     assert.equal(plan.steps[0].activeMs, null);assert.equal(plan.steps[0].ambiguousMs, 10000);
     assert.equal(plan.steps[2].activeMs, null);assert.equal(plan.steps[2].attempts[0].startedAt, null);
     assert.equal(plan.unattributedMs, 10000);assert.equal(plan.ambiguousMs, 10000);
-    await ok(c, "BlockStep", { ...first, reason: "Dependency missing" }, 2);
+    await internalCommand(c, "BlockStep", { ...first, reason: "Dependency missing" }, 2);
     await ok(c, "PausePlan", { planId: PLAN }, 1);c.advance(10000);await ok(c, "ResumePlan", { planId: PLAN }, 2);
     c.advance(700000);
     plan = (await report(c)).plans[0];

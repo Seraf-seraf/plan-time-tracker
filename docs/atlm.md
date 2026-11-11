@@ -8,7 +8,7 @@ ATLM прогнозирует полное активное время план�
 
 ## Какие сведения задаёт агент
 
-`RecordAssessment.payload.context.agentTask` содержит следующие обязательные поля. Неизвестность разрешена при сохранении: категория `UNKNOWN`, список `null`, неизвестные метаданные `null`. Известное отсутствие записывается как пустой список `[]`.
+`SaveTaskAssessment.payload.context.agentTask` содержит следующие обязательные поля. Неизвестность разрешена при сохранении: категория `UNKNOWN`, список `null`, неизвестные метаданные `null`. Известное отсутствие записывается как пустой список `[]`.
 
 | Поле | Смысл |
 | --- | --- |
@@ -31,8 +31,8 @@ id/key — 1–128 символов; description/evidence и каждое осн
 ## Сохранение исходной оценки
 
 1. Зарегистрировать PLANNED-план и необходимые шаги обычным track-plan.
-2. Обнаружить `assessments.atlm` через GetTrackerCapabilities. Прочитать `GetAssessment({planId})` без assessmentId и сохранить currentRequirementsDigest до анализа.
-3. Записать обычный RecordAssessment с context.agentTask и `predictionRequest:{method:"ATLM",methodVersion:1}`. Все прежние обязательные поля assessment сохраняются. predictionRequest разрешён только для целого плана до первого запуска.
+2. Обнаружить `assessments.atlm` через GetTrackerInfo. Прочитать `GetTaskAssessment({planId})` без assessmentId и сохранить currentRequirementsDigest до анализа.
+3. Записать обычный SaveTaskAssessment с context.agentTask и `predictionRequest:{method:"ATLM",methodVersion:1}`. Все прежние обязательные поля assessment сохраняются. predictionRequest разрешён только для целого плана до первого запуска.
 4. Сервер сохраняет прогноз в `assessment.serverEstimation`. Это поле нельзя прислать клиентом. Недостаток данных сохраняет признаки и явную причину UNAVAILABLE; ошибка БД остаётся ошибкой протокола.
 5. При первом StartPlan триггер в той же транзакции фиксирует последнюю уже записанную подходящую ревизию с совпадающими текущими требованиями. Отсутствие такой ревизии не блокирует запуск, но план не становится обучающим примером.
 
@@ -46,25 +46,26 @@ id/key — 1–128 символов; description/evidence и каждое осн
 
 | Инструмент | Назначение и HTTP |
 | --- | --- |
-| CalculateAtlmEstimate | Предпросмотр по активной модели: `{planId,expectedRequirementsDigest,agentTask}`. POST `/api/tracker/atlm-estimate` |
-| GetPlanEstimate | Сохранённый прогноз `{planId}`; после запуска возвращается исходный снимок, без создания прогноза задним числом. GET `/api/tracker/plans/:planId/estimate` |
-| GetEstimationModelStatus | `{}`: накопление опыта, действующая модель, очередь и причины недоступности. GET `/api/tracker/estimation-model` |
-| ProcessEstimationTraining | `{}`: один ограниченный идемпотентный проход очереди владельца. POST `/api/tracker/estimation-model/process` |
-| GetAtlmDataset | Приватная выгрузка frozen sample-версий `{limit?,cursor?}`, default 50, max 100. POST `/api/tracker/atlm-dataset` |
+| EstimatePlanTime | Предпросмотр по активной модели: `{planId,expectedRequirementsDigest,agentTask}`. POST `/api/tracker/atlm-estimate` |
+| GetSavedEstimate | Сохранённый прогноз `{planId}`; после запуска возвращается исходный снимок, без создания прогноза задним числом. GET `/api/tracker/plans/:planId/estimate` |
+| GetTrainingStatus | `{}`: накопление опыта, действующая модель, очередь и причины недоступности. GET `/api/tracker/estimation-model` |
+| StartTraining | `{}`: по просьбе пользователя запросить попытку обучения, не дожидаясь пяти новых планов. |
+| ContinueTraining | `{}`: один ограниченный идемпотентный проход очереди владельца. POST `/api/tracker/estimation-model/process` |
+| GetTrainingData | Приватная выгрузка frozen sample-версий `{limit?,cursor?}`, default 50, max 100. POST `/api/tracker/atlm-dataset` |
 
-Только ProcessEstimationTraining является мутацией среди этих пяти инструментов. Чтение не обучает модель. Все пути используют аутентифицированного владельца, не принимают чужие owner/model/sample IDs, заданные клиентом веса, длительности или список предпочитаемых аналогов.
+ContinueTraining и StartTraining изменяют состояние очереди; StartTraining вызывается только по прямой просьбе пользователя. Чтение не обучает модель. Все пути используют аутентифицированного владельца, не принимают чужие owner/model/sample IDs, заданные клиентом веса, длительности или список предпочитаемых аналогов.
 
 serverEstimation содержит formatVersion=1, metric/forecastScope, status AVAILABLE/UNAVAILABLE, nullable pointMs, method, nullable modelId/modelVersion, серверные requirementsDigest/featureDigest/calculatedAt, sampleCount, evaluation либо null, accuracy HISTORICALLY_EVALUATED/NOT_VALIDATED, interval=null и confidence=UNKNOWN. Точка не обозначается P50/P80. evaluation включает caseCount, coverage, maeMs, medianBaselineMaeMs, cutoff и protocolVersion.
 
-GetPlanEstimate возвращает `{formatVersion:1,planId,assessmentId,assessmentRevision,source,serverEstimation,isStale,staleReasons,serverNow}`. source — FROZEN_INPUT после старта, LATEST_ASSESSMENT до старта либо NONE; отсутствующая оценка явно равна null. Состояние обучения отдельно от сохранённого прогноза: отклонение нового кандидата не скрывает доступную прежнюю оценку. Неполные признаки и отсутствие модели различаются с ошибками авторизации, устаревшим digest, БД и ресурсными отказами; у последних остаётся обычный ошибочный ответ с requestId/retryable.
+GetSavedEstimate возвращает `{formatVersion:1,planId,assessmentId,assessmentRevision,source,serverEstimation,isStale,staleReasons,serverNow}`. source — FROZEN_INPUT после старта, LATEST_ASSESSMENT до старта либо NONE; отсутствующая оценка явно равна null. Состояние обучения отдельно от сохранённого прогноза: отклонение нового кандидата не скрывает доступную прежнюю оценку. Неполные признаки и отсутствие модели различаются с ошибками авторизации, устаревшим digest, БД и ресурсными отказами; у последних остаётся обычный ошибочный ответ с requestId/retryable.
 
-GetEstimationModelStatus возвращает datasetRevision, eligibleSampleCount, excludedSampleCount, newPlansSinceTraining, retrainEveryNewPlans, причины исключений, activeModel или null, lastReason/lastError и training. В training находятся status, generation, due, attempts, nextAttemptAt, pendingRefreshCount, progressRevision и progress. Статусы: IDLE, QUEUED, RUNNING, RETRY_WAIT, COLLECTING_DATA, REJECTED, FAILED. `due` означает возможность ограниченного прохода сейчас, включая восстановление примеров; ожидание nextAttemptAt не считается due.
+GetTrainingStatus возвращает datasetRevision, eligibleSampleCount, excludedSampleCount, newPlansSinceTraining, retrainEveryNewPlans, причины исключений, activeModel или null, lastReason/lastError и training. В training находятся status, generation, due, attempts, nextAttemptAt, pendingRefreshCount, progressRevision и progress. Статусы: IDLE, QUEUED, RUNNING, RETRY_WAIT, COLLECTING_DATA, REJECTED, FAILED. `due` означает возможность ограниченного прохода сейчас, включая восстановление примеров; ожидание nextAttemptAt не считается due.
 
-GetAtlmDataset возвращает formatVersion=1, datasetRevision, asOf, rows, hasMore, nextCursor и serverNow. rows содержат неизменяемые версии примеров в порядке sequence. sampleId — строковое представление числового sequence; eligibility — ELIGIBLE либо EXCLUDED, reasons — список причин. features содержит шесть вычисленных признаков; actualMs, capturedAt, sourceAvailableAt и observedAt находятся на верхнем уровне строки. Также возвращаются inputAssessmentSequence, sourceDigest/sourceGeneration, issuedPrediction и firstEligible. Каждая ревизия не считается новым опытом. Первая страница фиксирует datasetRevision/asOf. Изменение набора между страницами возвращает DATASET_CHANGED; выгрузку нужно начать заново. Данные владельца не должны попадать в Git или постоянные синтетические фикстуры. Аналитический [JSON-отчёт](json-report.md) сохраняет context.agentTask и serverEstimation в истории assessment, но не является архивом очереди и всех моделей.
+GetTrainingData возвращает formatVersion=1, datasetRevision, asOf, rows, hasMore, nextCursor и serverNow. rows содержат неизменяемые версии примеров в порядке sequence. sampleId — строковое представление числового sequence; eligibility — ELIGIBLE либо EXCLUDED, reasons — список причин. features содержит шесть вычисленных признаков; actualMs, capturedAt, sourceAvailableAt и observedAt находятся на верхнем уровне строки. Также возвращаются inputAssessmentSequence, sourceDigest/sourceGeneration, issuedPrediction и firstEligible. Каждая ревизия не считается новым опытом. Первая страница фиксирует datasetRevision/asOf. Изменение набора между страницами возвращает DATASET_CHANGED; выгрузку нужно начать заново. Данные владельца не должны попадать в Git или постоянные синтетические фикстуры. Аналитический [JSON-отчёт](json-report.md) сохраняет context.agentTask и serverEstimation в истории assessment, но не является архивом очереди и всех моделей.
 
 ## Локальная проверка выгрузки
 
-CLI `scripts/evaluate-atlm.mjs` — отдельный инструмент разработчика; для обычной работы MCP он не нужен. Он принимает нормализованный JSON, а не сырой ответ GetAtlmDataset. Сначала запросите все страницы, каждый раз передавая nextCursor предыдущей страницы; datasetRevision и asOf должны совпадать. При DATASET_CHANGED начните выгрузку заново. Затем выберите последнюю числовую sampleId **среди всех версий** каждого planId и только после этого разделите ELIGIBLE и EXCLUDED. Если сначала убрать EXCLUDED, можно ошибочно вернуть удалённый или изменённый источник в обучение.
+CLI `scripts/evaluate-atlm.mjs` — отдельный инструмент разработчика; для обычной работы MCP он не нужен. Он принимает нормализованный JSON, а не сырой ответ GetTrainingData. Сначала запросите все страницы, каждый раз передавая nextCursor предыдущей страницы; datasetRevision и asOf должны совпадать. При DATASET_CHANGED начните выгрузку заново. Затем выберите последнюю числовую sampleId **среди всех версий** каждого planId и только после этого разделите ELIGIBLE и EXCLUDED. Если сначала убрать EXCLUDED, можно ошибочно вернуть удалённый или изменённый источник в обучение.
 
 Пример преобразования массива `pages` из полных ответов одной выгрузки:
 
@@ -122,4 +123,4 @@ Worker запускает обработку после успешной ком�
 
 Целевые проверки: `node --test test/atlm-*.test.js`, `node test/ui-atlm.mjs` из sites/plan-time-tracker, `node --test test/atlm-instructions.test.mjs` из plugin/plan-time-tracker. CLI проверки истории: `node scripts/evaluate-atlm.mjs <dataset.json>`. Общая проверка сайта — `npm test`, `npm run validate`, `npm run test:ui`. Синтетические примеры проверяют реализацию; реальная точность требует отдельной накопленной выборки. Результаты конкретного выпуска фиксируются в release readiness, а не выводятся из наличия этих команд.
 
-Новая GitHub-миграция — `0019_atlm.sql`. Для существующего Sites источника сохраняется отдельный ledger и добавляется эквивалентная `0004_atlm.sql`; старые миграции не переписываются. Обновление GitHub само по себе не подтверждает публикацию Sites или установку нового пакета навыков. Старые CalculateEstimate, GetEstimationHistory и схемы оценки сохраняют свой смысл; ATLM не принимает candidates.
+Новая GitHub-миграция — `0019_atlm.sql`. Для существующего Sites источника сохраняется отдельный ledger и добавляется эквивалентная `0004_atlm.sql`; старые миграции не переписываются. Обновление GitHub само по себе не подтверждает публикацию Sites или установку нового пакета навыков. Исторические оценки и данные сохранены. Старый инструмент CalculateEstimate удалён; для нового прогноза используется ATLM.

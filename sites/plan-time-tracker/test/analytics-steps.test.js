@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildAnalytics, buildStepAnalytics } from "../worker/index.js";
-import { context, OWNER, PLAN, call, ok, running, result, rows } from "./fixtures/tracker-db.mjs";
+import { internalCommand, context, OWNER, PLAN, call, ok, running, result, rows } from "./fixtures/tracker-db.mjs";
 
 const period = { from: "2026-10-14", to: "2026-10-15", timeZone: "UTC" };
 function fixture() {
@@ -21,7 +21,7 @@ test("step analytics intersects work intervals, all attempts and inclusive perio
     const first = await running(c, []);
     c.advance(90000);await ok(c, "PausePlan", { planId: PLAN }, 1);
     c.advance(120000);await ok(c, "ResumePlan", { planId: PLAN }, 2);
-    c.advance(30000);await ok(c, "BlockStep", { ...first, reason: "Synthetic retry" }, 2);
+    c.advance(30000);await internalCommand(c, "BlockStep", { ...first, reason: "Synthetic retry" }, 2);
     c.advance(10000); // Active plan time without an executing step remains unattributed.
     const second = await claimStart(c, first.stepId, 3);
     c.advance(61234);await ok(c, "RecordStepResult", { ...second, outcome: "FAILED", summary: "Synthetic failed attempt" }, 4);

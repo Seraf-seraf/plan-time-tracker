@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createWorker } from "../worker/index.js";
+import { createWorker, executeCommand } from "../worker/index.js";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const migrationDirectory = resolve(root, "drizzle");
@@ -47,6 +47,8 @@ function createContext() {
 async function request(context, commandType, payload, expectedVersion, channel = "ui") {
   const envelope = { schemaVersion: 1, commandId: commandId(), commandType, payload };
   if (expectedVersion !== undefined) envelope.expectedVersion = expectedVersion;
+  // Create a historical blocked record to verify that old evidence remains readable.
+  if (commandType === "BlockStep") return { status: 200, value: await executeCommand(context.db, { ownerId: OWNER }, envelope, channel, context.now()) };
   const path = channel === "mcp" ? "/mcp" : "/api/commands";
   const body = channel === "mcp"
     ? { jsonrpc: "2.0", id: number, method: "tools/call", params: { name: commandType, arguments: envelope } }

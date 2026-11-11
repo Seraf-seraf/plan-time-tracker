@@ -15,7 +15,7 @@ test("MCP failures retain the public contract and one safe diagnostic correlated
     const prepare = c.db.prepare.bind(c.db);
     let fault;
     c.db.prepare = sql => {
-      if (sql.startsWith("WITH owner_scope")) throw fault;
+      if (sql.startsWith("SELECT * FROM estimation_owner_state WHERE owner_id=")) throw fault;
       return prepare(sql);
     };
     const secret = "sk-sensitive-test-credential-do-not-log";
@@ -25,20 +25,20 @@ test("MCP failures retain the public contract and one safe diagnostic correlated
       [new Error(`Unexpected sensitive input ${secret}`), "UNEXPECTED_ERROR"],
     ]) {
       fault = error;
-      const before = entries.length, response = (await mcp(c, "CalculateEstimate", args)).value.result;
+      const before = entries.length, response = (await mcp(c, "GetTrainingStatus", {})).value.result;
       assert.equal(response.isError, true);
       const value = response.structuredContent;
       assert.deepEqual({ ...value, requestId: null }, { code: "INTERNAL_ERROR", message: "Внутренняя ошибка.",
         details: null, requestId: null, retryable: true, retryAfter: null });
       assert.equal(entries.length, before + 1);
-      assert.deepEqual(entries.at(-1), { event: "mcp_unexpected_error", tool: "CalculateEstimate", requestId: value.requestId, reason });
+      assert.deepEqual(entries.at(-1), { event: "mcp_unexpected_error", tool: "GetEstimationModelStatus", requestId: value.requestId, reason });
       assert.equal(JSON.stringify(response).includes(secret), false);
       assert.equal(JSON.stringify(entries).includes(secret), false);
     }
     c.db.prepare = prepare;
     const count = entries.length;
-    const missing = (await mcp(c, "CalculateEstimate", args)).value.result;
-    assert.equal(missing.structuredContent.code, "PLAN_NOT_FOUND");
+    const missing = (await mcp(c, "GetTrainingStatus", {})).value.result;
+    assert.equal(missing.isError, undefined);
     assert.equal((await mcp(c, "GetTrackerCapabilities")).value.result.isError, undefined);
     assert.equal(entries.length, count);
   } finally { console.error = originalError; c.close(); }

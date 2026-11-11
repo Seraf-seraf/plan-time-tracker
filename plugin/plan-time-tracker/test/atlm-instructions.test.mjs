@@ -8,7 +8,7 @@ const assess = read('../skills/assess-task/SKILL.md');
 const primary = assess.split('## Совместимость с исторической медианой')[0];
 const track = read('../skills/track-plan/SKILL.md');
 const embedded = read('../../../sites/plan-time-tracker/skill/plan-time-tracker/SKILL.md');
-const tools = ['CalculateAtlmEstimate', 'GetPlanEstimate', 'GetEstimationModelStatus', 'ProcessEstimationTraining', 'GetAtlmDataset'];
+const tools = ['EstimatePlanTime', 'GetSavedEstimate', 'GetTrainingStatus', 'ContinueTraining', 'GetTrainingData'];
 const invoke = async (c, name, args = {}) => {
   const response = await mcp(c, name, args);assert.equal(response.status, 200);
   assert.notEqual(response.value.result?.isError, true, JSON.stringify(response.value));
@@ -18,37 +18,38 @@ const invoke = async (c, name, args = {}) => {
 test('delivered skills give one pre-start ATLM workflow and keep legacy candidates separate', () => {
   for (const text of [primary, track, embedded]) {
     assert.match(text, /assessments\.atlm/);assert.match(text, /StartPlan/);
-    assert.match(text, /ProcessEstimationTraining/);assert.match(text, /serverEstimation/);
+    assert.match(text, /ContinueTraining/);assert.match(text, /serverEstimation/);
   }
-  for (const field of ['schemaVersion', 'agent-task-v1', 'profileEvidence', 'runtimeContext', 'plannedParallelAgents', 'CLIENT_REPORTED', 'changedContracts', 'verificationKinds', 'predictionRequest', 'expectedRequirementsDigest', 'GetCommandReceipt']) assert(primary.includes(field), field);
+  for (const field of ['schemaVersion', 'agent-task-v1', 'profileEvidence', 'runtimeContext', 'plannedParallelAgents', 'CLIENT_REPORTED', 'changedContracts', 'verificationKinds', 'predictionRequest', 'expectedRequirementsDigest', 'GetCommandResult']) assert(primary.includes(field), field);
   assert.match(primary, /UNKNOWN\/null/);assert.match(primary, /не передавай эти счётчики самостоятельно/);
   assert.match(primary, /Не угадывай модель агента или reasoning effort/);
   assert.match(primary, /lowerMs\/upperMs=null/);assert.match(primary, /не называй точку P50\/P80/);
   assert.match(primary, /Поздняя оценка не становится исходным/);
   assert.match(primary, /не вычитай затраченное время/);
   assert.doesNotMatch(primary, /candidates/);
-  assert.match(assess, /не является обязательным предварительным шагом ATLM/);
+  assert.doesNotMatch(assess, /CalculateEstimate/);
+  assert.match(assess, /Для получения прогноза используй только ATLM/);
 });
 
 test('instruction names and immutable input fields are available through real MCP discovery', async () => {
   const c = context();
   try {
-    const capability = (await invoke(c, 'GetTrackerCapabilities')).assessments.atlm;
+    const capability = (await invoke(c, 'GetTrackerInfo')).assessments.atlm;
     assert(capability);assert.equal(capability.retrainEveryNewPlans, 5);
     const declared = JSON.stringify(capability);assert.match(declared, /agent-task-v1/);assert.match(declared, /PLAN_ACTIVE/);assert.match(declared, /FULL_FROM_FIRST_START/);
     const listing = (await call(c, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' })).value.result.tools;
     for (const name of tools) {
       assert(declared.includes(name), 'capability must name ' + name);
       const tool = listing.find(item => item.name === name);assert(tool, name);
-      assert.equal(tool.annotations.readOnlyHint, name !== 'ProcessEstimationTraining', name);
+      assert.equal(tool.annotations.readOnlyHint, name !== 'ContinueTraining', name);
       assert.equal(tool.inputSchema.additionalProperties, false, name);
     }
-    const calculate = listing.find(item => item.name === 'CalculateAtlmEstimate').inputSchema;
+    const calculate = listing.find(item => item.name === 'EstimatePlanTime').inputSchema;
     assert.deepEqual([...calculate.required].sort(), ['agentTask', 'expectedRequirementsDigest', 'planId']);
     assert.equal(calculate.properties.candidates, undefined);
     assert.equal(calculate.properties.weights, undefined);
     assert.equal(calculate.properties.durationMs, undefined);
-    const record = listing.find(item => item.name === 'RecordAssessment').inputSchema;
+    const record = listing.find(item => item.name === 'SaveTaskAssessment').inputSchema;
     assert(record.required.includes('expectedVersion'));
     assert(record.properties.payload.properties.predictionRequest);
     assert.equal(record.properties.payload.properties.serverEstimation, undefined, 'server forecast is not agent input');
@@ -60,7 +61,7 @@ test('an instruction-shaped assessment records unknown cold-start forecast, free
   try {
     await ok(c, 'CreatePlan', { planId: PLAN, title: 'Make the existing button accessible on mobile', planCreatedAt: { precision: 'dateOnly', on: '2026-11-11', timeZone: 'UTC' } });
     await ok(c, 'CreateStep', { planId: PLAN, ordinal: 1, title: 'Button layout', expectedResult: 'Button is accessible on mobile', requiredChecks: ['build', 'ui'] });
-    const current = await invoke(c, 'GetAssessment', { planId: PLAN });
+    const current = await invoke(c, 'GetTaskAssessment', { planId: PLAN });
     const agentTask = {
       schemaVersion: 'agent-task-v1',
       profile: { workKind: 'MODIFY_MECHANISM', reuseState: 'PARTIAL', doneBoundary: 'LOCAL_VERIFIED' },
@@ -69,7 +70,7 @@ test('an instruction-shaped assessment records unknown cold-start forecast, free
       profileEvidence: { workKind: 'Existing button behavior must be changed.', reuseState: 'An existing button needs layout corrections.', doneBoundary: 'Only locally checked delivery was requested.' },
       runtimeContext: { modelId: null, reasoningEffort: null, environmentId: null, plannedParallelAgents: 1, provenance: 'CLIENT_REPORTED' },
     };
-    const preview = await invoke(c, 'CalculateAtlmEstimate', { planId: PLAN, expectedRequirementsDigest: current.currentRequirementsDigest, agentTask });
+    const preview = await invoke(c, 'EstimatePlanTime', { planId: PLAN, expectedRequirementsDigest: current.currentRequirementsDigest, agentTask });
     assert.equal(preview.status, 'UNAVAILABLE');assert.equal(preview.pointMs, null);
     const assessmentId = crypto.randomUUID(), commandId = crypto.randomUUID();
     const payload = {
@@ -81,16 +82,16 @@ test('an instruction-shaped assessment records unknown cold-start forecast, free
       sources: [], approach: { description: 'Adjust the existing layout and verify build and browser behavior.', rationale: 'The existing mechanism covers the required scope.' },
       predictionRequest: { method: 'ATLM', methodVersion: 1 },
     };
-    await invoke(c, 'RecordAssessment', { schemaVersion: 1, commandId, expectedVersion: 0, payload });
-    const saved = await invoke(c, 'GetAssessment', { planId: PLAN, assessmentId });
+    await invoke(c, 'SaveTaskAssessment', { schemaVersion: 1, commandId, expectedVersion: 0, payload });
+    const saved = await invoke(c, 'GetTaskAssessment', { planId: PLAN, assessmentId });
     assert.deepEqual(saved.assessment.context.agentTask, agentTask);
     assert.equal(saved.assessment.forecast.status, 'UNKNOWN');assert.equal(saved.assessment.forecast.lowerMs, null);
     const serverEstimation = saved.assessment.serverEstimation;
     assert.equal(serverEstimation.status, 'UNAVAILABLE');assert.equal(serverEstimation.unavailableReason, 'COLLECTING_DATA');assert.equal(serverEstimation.pointMs, null);
-    const beforeStart = await invoke(c, 'GetPlanEstimate', { planId: PLAN });assert.deepEqual(beforeStart.serverEstimation, serverEstimation);
+    const beforeStart = await invoke(c, 'GetSavedEstimate', { planId: PLAN });assert.deepEqual(beforeStart.serverEstimation, serverEstimation);
     assert.equal((await invoke(c, 'GetPlanExecutionSnapshot', { planId: PLAN })).plan.status, 'PLANNED');
     await ok(c, 'StartPlan', { planId: PLAN }, 0);
-    assert.deepEqual((await invoke(c, 'GetPlanEstimate', { planId: PLAN })).serverEstimation, serverEstimation);
+    assert.deepEqual((await invoke(c, 'GetSavedEstimate', { planId: PLAN })).serverEstimation, serverEstimation);
     const report = await call(c, '/api/export');assert.equal(report.status, 200);
     const exported = report.value.plans.find(plan => plan.planId === PLAN).assessments.find(row => row.assessmentId === assessmentId);
     assert.deepEqual(exported.assessment.context.agentTask, agentTask);

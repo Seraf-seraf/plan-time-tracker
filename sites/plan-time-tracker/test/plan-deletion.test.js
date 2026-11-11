@@ -164,7 +164,6 @@ test("deleted plans reject every mutation atomically while preserving their evid
       ["ClaimStepAttempt", { stepId: lease.stepId, sessionId: crypto.randomUUID(), sourceId: "fixture" }, current.version],
       ["StartStep", lease, current.version], ["RenewStepLease", lease],
       ["CloseStepAttempt", { ...lease, disposition: "CLOSED", reason: "Тест" }],
-      ["BlockStep", { ...lease, reason: "Тест" }, current.version],
       ["RecordStepResult", { ...lease, outcome: "DONE", summary: "Нельзя" }, current.version],
       ["RecordCheck", { stepId: lease.stepId, resultRevision: 1, checkKey: "unit", status: "NOT_RUN", testedSnapshotDigest: "sha256:" + "a".repeat(64) }],
       ["AppendObservation", { eventId: crypto.randomUUID(), planId: PLAN, sourceId: "fixture", sessionId: crypto.randomUUID(), sourceSequence: 1, occurredAt: c.now(), eventType: "heartbeat", data: {} }],

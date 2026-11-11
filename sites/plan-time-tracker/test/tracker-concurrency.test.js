@@ -333,10 +333,10 @@ test("owner-authenticated MCP exposes the tracker read contract and owner-scoped
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
   }), { DB: context.db });
   const tools = (await listed.json()).result.tools;
-  for (const name of ["GetTrackerCapabilities", "GetPlanExecutionSnapshot", "GetTimeline", "GetCommandReceipt"]) {
+  for (const name of ["GetTrackerInfo", "GetPlanProgress", "GetPlanHistory", "GetCommandResult"]) {
     assert.ok(tools.some((tool) => tool.name === name), name);
   }
-  assert.equal(JSON.stringify(tools.filter((tool) => tool.name.startsWith("GetTracker") || tool.name.startsWith("GetPlanExecution") || tool.name === "GetTimeline" || tool.name === "GetCommandReceipt")).includes("ownerId"), false);
+  assert.equal(JSON.stringify(tools.filter((tool) => tool.name === "GetTrackerInfo" || tool.name === "GetPlanProgress" || tool.name === "GetPlanHistory" || tool.name === "GetCommandResult")).includes("ownerId"), false);
 
   const capabilities = await mcp(context, "GetTrackerCapabilities", {});
   assert.equal(capabilities.status, 200);

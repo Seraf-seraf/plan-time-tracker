@@ -6,7 +6,7 @@ test("public MCP discovery and capabilities expose source snapshots without Git 
   const c = context(); try {
     const list = await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const tools = list.value.result.tools;
-    assert(tools.some(tool => tool.name === "RecordCheck"));
+    assert(tools.some(tool => tool.name === "SaveCheckResult"));
     assert(!/SyncRepository|AttachPlanRepository|ReviewCommitLink|repositoryId|revisionSha|testedSha|commitPolicy|pushPolicy|worktreeSnapshot|commit_created|commit_pushed|push_failed/.test(JSON.stringify(tools)));
     const caps = (await mcp(c, "GetTrackerCapabilities")).value.result.structuredContent;
     assert.deepEqual(caps.resultSourceKinds, ["SOURCE_SNAPSHOT", "NONE"]);
