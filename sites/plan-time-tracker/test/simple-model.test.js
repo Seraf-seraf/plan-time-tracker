@@ -117,7 +117,10 @@ for(const [name,paths] of chains)test(`${name} populated migration deletes the o
   for(const table of preserved)assert.deepEqual(c.db.sqlite.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all(),before[table],table);
   assert.deepEqual(c.db.sqlite.prepare('SELECT * FROM assessment_targets ORDER BY owner_id,plan_id,step_id').all(),requirements);
   assert.deepEqual(c.db.sqlite.prepare('SELECT owner_id,step_id,plan_id,ordinal,title,status,version FROM plan_steps ORDER BY step_id').all(),steps);
-  const status=await getEstimationModelStatus(c.db,fixture.owner,c.now());assert.equal(status.activeModel.sampleCount,15);assert.equal(status.eligibleSampleCount,15);
+  const status=await getEstimationModelStatus(c.db,fixture.owner,c.now());assert.equal(status.activeModel,null);assert.equal(status.eligibleSampleCount,15);
+  assert.equal((await predictWithActiveModel(c.db,fixture.owner,normalizeAgentTaskV1(atlmTask()).features,c.now())).unavailableReason,'MODEL_INVALIDATED');
+  const retrained=await mcp(c,'StartTraining',{},fixture.owner);assert.equal(retrained.value.result.isError,undefined,JSON.stringify(retrained.value));
+  assert.equal(retrained.value.result.structuredContent.activeModel.sampleCount,15);
   assert.equal((await predictWithActiveModel(c.db,fixture.owner,normalizeAgentTaskV1(atlmTask()).features,c.now())).pointMs,1000);
   const completed=before.plans.find(p=>p.status==='COMPLETED'),source=await readAtlmSampleSource(c.db,fixture.owner,completed.plan_id,c.now());assert.equal(source.eligibility,'ELIGIBLE');assert.equal(source.actualMs,1000);
   const current=(await call(c,`/api/tracker/plans/${fixture.runningPlanId}/execution`)).value;assert.equal(current.plan.status,'RUNNING');assert.equal(current.steps[0].status,'RUNNING');assert.equal(current.steps[0].content,'Original expected result');

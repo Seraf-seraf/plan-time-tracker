@@ -40,7 +40,7 @@ test("even-prefix half-millisecond medians use the integer-ms contract and remai
   const report = await evaluateAtlmChronologically(input, options);
   assert.equal(report.status, "AVAILABLE");
   assert.equal(report.caseCount, 12);
-  assert.equal(report.paired.caseCount, 6);
+  assert.equal(report.paired.caseCount, 11);
   // The exact arithmetic median is 1000.5; public forecasts round to integer ms.
   for (const i of [2, 4, 6, 8, 10]) assert.equal(report.cases[i].median.pointMs, 1001);
   for (const item of report.cases) {
@@ -78,7 +78,10 @@ test("cutoff/exclusions, empty data and tiny validation are explicitly reported"
   assert.equal(report.excluded.length, 2);
   assert.ok(report.excluded.some(r => r.reason === "INCOMPLETE_FEATURES"));
   assert.ok(report.excluded.some(r => r.reason === "AFTER_CUTOFF"));
-  assert.equal(report.candidateReady, false);
+  assert.equal(report.paired.caseCount, 5);
+  assert.equal(report.candidateReady, true);
+  const tiny=await evaluateAtlmChronologically(rows(4),options);
+  assert.equal(tiny.paired.caseCount,3);assert.equal(tiny.candidateReady,false);
   const empty = await evaluateAtlmChronologically([], options);
   assert.equal(empty.caseCount, 0);
   assert.equal(empty.metrics.atlm.maeMs, null);
