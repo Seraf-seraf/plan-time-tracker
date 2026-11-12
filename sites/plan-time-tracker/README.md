@@ -1,6 +1,6 @@
 # Трекер планов: Worker 0.6.0
 
-Приложение использует Cloudflare Worker ESM, привязку D1 `DB` и аутентифицированного владельца. Project ID рабочего Sites находится в `.openai/hosting.json`. Его идентичность и аудитория сохраняются при обновлении.
+Приложение использует Cloudflare Worker ESM, привязку D1 `DB` и аутентифицированного владельца.
 
 ## Контракт
 
@@ -31,13 +31,3 @@ node --test ../../plugin/plan-time-tracker/test/*.test.mjs
 ```
 
 `test/simple-model.test.js` проверяет атомарность, CAS, точные повторы, изоляцию владельцев и перенос заполненной базы. С `SITES_SOURCE_ROOT=/absolute/sites/checkout` тот же тест выполняется на фактическом ledger Sites. `test/fixtures/pre-simple-data.json` — синтетический снимок прежней версии c05844c с открытым интервалом и моделью на 15 примерах; он не содержит пользовательских данных.
-
-## Публикация существующего Sites
-
-GitHub `origin` отличается от исходного репозитория Site. Проверьте проект через get_site и получите source credential. Используйте отдельный checkout выбранного Site, его `.openai/hosting.json` и собственную историю Drizzle 0000–0006. Синхронизируйте raw `worker/index.js`, `worker/fonts.js` и локальные шрифты. Не переносите каноническую начальную цепочку поверх действующего Sites ledger.
-
-В Site checkout выполните `npm ci` при отсутствии зависимостей, `npm run db:check`, штатный build и `npm run package:sites -- /absolute/path/release.tar.gz`. Архив сохраняет `dist/server/index.js`, `dist/.openai/hosting.json`, весь `dist/.openai/drizzle/` и корневую копию `.openai/hosting.json`. Миграции не переносятся в корневую `.openai/drizzle/`.
-
-Отправьте точный источник в ветку Site и передайте полный SHA этой ветки вместе с архивом в native Sites save/deploy. Для подтверждённого owner-only доступа используйте save_version_and_deploy_private. При нетерминальном ответе продолжайте get_deployment_status до succeeded/failed. После успеха проверьте фактический набор таблиц и сохранение планов, текущих состояний, интервалов и данных обучения. Одна только успешная публикация Worker не доказывает применение миграции.
-
-Обновление инструкций установленного App-плагина выполняется отдельно с сохранением его plugin/App IDs и аудитории. Готовой команды `npm run deploy` в этом репозитории нет.

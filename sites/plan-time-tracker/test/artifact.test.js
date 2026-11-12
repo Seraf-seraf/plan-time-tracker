@@ -9,13 +9,10 @@ import { context, call, ok, mcp, result, check, rows, PLAN, DIGEST_A } from "./f
 const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const artifactRoot = resolve(process.env.SITE_ARTIFACT_ROOT || resolve(projectRoot, "dist"));
 const workerPath = resolve(artifactRoot, "server/index.js");
-const hostingPath = resolve(artifactRoot, ".openai/hosting.json");
 
-test("built Site artifact imports with its hosting manifest and tracker UI/read routes", async () => {
-  await Promise.all([access(workerPath), access(hostingPath)]);
-  const [source, manifestSource] = await Promise.all([readFile(workerPath, "utf8"), readFile(hostingPath, "utf8")]);
-  const manifest = JSON.parse(manifestSource);
-  assert.equal(manifest.d1, "DB");
+test("built Site artifact imports with tracker UI/read routes", async () => {
+  await access(workerPath);
+  const source = await readFile(workerPath, "utf8");
   assert.match(source, /GetPlanExecutionSnapshot/);
   assert.doesNotMatch(source, /GetTimeline/);
   assert.match(source, /UI_TRACKER/);

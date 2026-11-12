@@ -6,8 +6,6 @@ Date: 2026-10-12. Repository: private `Seraf-seraf/plan-time-tracker`. The compl
 
 ## Published Site
 
-- Existing project: `appgprj_6acca329a8e881918fed6f2224538505`, version 1.
-- Live URL: https://plan-time-tracker.seraf-k.chatgpt.site
 - Access policy confirmed by `sites_get_site`: `custom` with the owner as the only allowed user; zero external visitors and zero groups.
 - Site source commit: `8d0639abf461cd9abc9145fd68fad923220d6d63`.
 - Deployment: succeeded; MCP capability reported available.

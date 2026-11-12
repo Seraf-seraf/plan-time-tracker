@@ -6,11 +6,10 @@
 
 - Канонический репозиторий: `Seraf-seraf/plan-time-tracker`, ветка `main`; исходная база `24e2c28`.
 - Версия Worker и GitHub-пакета навыков: `0.5.0`. У существующего hosted-плагина отдельная версия и имя; его App-привязка и представление сохраняются при обновлении.
-- Существующий Site: [Трекер планов](https://plan-time-tracker.s-e-r-a-f.chatgpt.site), project `appgprj_6ad6419711cc81918e8b6677b1daad52`.
-- Исходник Sites до обновления: `2a07674ad7b211074b2603605d9b88d63ce4c8cb`, опубликованная версия **28**. Сохранённая версия для отката кода: `appgprj_6ad6419711cc81918e8b6677b1daad52~appgver_a955485d391c819193514f66db8d27e1`.
+- Исходник Sites до обновления: `2a07674ad7b211074b2603605d9b88d63ce4c8cb`, опубликованная версия **28**.
 - Реализация отправлена прямо в GitHub `main`: `7276800dcedff688f0ca0772f60c0536661220a3`; PR не создавался. Последующие изменения этого отчёта и инструкции упаковки не меняют проверенный Worker.
-- Опубликована Site-версия **30**, источник `64306928395d7fec6b57054b91b087755e22069a`. Saved version: `appgprj_6ad6419711cc81918e8b6677b1daad52~appgver_84a104192fd88191a04ae75aca557f4c`; deployment: `appgdep_6af4287503b081919c1ea3fd871db08d`, статус **succeeded**, `has_mcp=true`.
-- Обновлён [существующий hosted-плагин](https://chatgpt.com/plugins/plugin_asdk_app_sites_ebf8a3fb6b58819181eff586bb18937a) до **1.1.0**, release `pluginrel_6af428ff89688191b89e374918a67fab`. Это отдельная версия от GitHub/runtime 0.5.0. Readback подтвердил побайтовое совпадение обоих SKILL.md с main, неизменность App, имени, автора и представления, согласованные portable/legacy manifests.
+- Опубликована Site-версия **30**, источник `64306928395d7fec6b57054b91b087755e22069a`. Статус **succeeded**, `has_mcp=true`.
+- Обновлён hosted-плагин до **1.1.0**. Это отдельная версия от GitHub/runtime 0.5.0. Readback подтвердил побайтовое совпадение обоих SKILL.md с main, неизменность App, имени, автора и представления, согласованные portable/legacy manifests.
 
 ## Проверка опубликованной системы
 
