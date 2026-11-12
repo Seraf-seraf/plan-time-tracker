@@ -31,8 +31,8 @@ let status = structuredClone(initial.value), estimate, holdPlan = null, heldStar
 let processCount = 0, statusCount = 0, advancingQueue = false, startCount = 0, startError = false, holdStart = false, releaseStart;
 page.on('pageerror', error => errors.push(error.message));
 const json = (route, value, code = 200) => route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify(value) });
-const estimateFor = id => ({ planId: id, isStale: false, serverEstimation: { formatVersion: 1, status: 'AVAILABLE', pointMs: id === PLAN ? 120000 : 420000, metric: 'PLAN_ACTIVE', forecastScope: 'FULL_FROM_FIRST_START', method: { id: 'atlm', version: 'agent-v1' }, modelVersion: 'agent-v1/model-7', modelId: 'model-7', evaluation: { caseCount: 6, maeMs: 30000 }, interval: null, confidence: 'UNKNOWN' } });
-const modelState = (trainingStatus, due = false) => ({ ...structuredClone(initial.value), datasetRevision: 7, newPlansSinceTraining: 3, eligibleSampleCount: 23, excludedSampleCount: 2, retrainEveryNewPlans: 2, exclusionReasons: [{ reason: 'MISSING_FEATURES', count: 2 }], activeModel: { modelId: 'model-7', modelVersion: 'agent-v1/model-7', sampleCount: 23 }, training: { status: trainingStatus, due, generation: 4, progressRevision: 0, pendingRefreshCount: 0, nextAttemptAt: null, progress: null }, lastError: null, lastReason: null });
+const estimateFor = id => ({ planId: id, isStale: false, serverEstimation: { formatVersion: 1, status: 'AVAILABLE', pointMs: id === PLAN ? 120000 : 420000, metric: 'PLAN_ACTIVE', forecastScope: 'FULL_FROM_FIRST_START', method: { id: 'atlm', version: 'agent-v2' }, sampleCount: 23, accuracy:'HISTORICALLY_EVALUATED', modelVersion: 'agent-v2/model-7', modelId: 'model-7', evaluation: { qualityConfirmed:true, caseCount: 6, maeMs: 30000 }, interval: null, confidence: 'UNKNOWN' } });
+const modelState = (trainingStatus, due = false) => ({ ...structuredClone(initial.value), datasetRevision: 7, newPlansSinceTraining: 3, eligibleSampleCount: 23, excludedSampleCount: 2, retrainEveryNewPlans: 2, exclusionReasons: [{ reason: 'MISSING_FEATURES', count: 2 }], activeModel: { modelId: 'model-7', modelVersion: 'agent-v2/model-7', sampleCount: 23, accuracy:'HISTORICALLY_EVALUATED', evaluation:{qualityConfirmed:true,caseCount:6,maeMs:30000} }, training: { status: trainingStatus, due, generation: 4, progressRevision: 0, pendingRefreshCount: 0, nextAttemptAt: null, progress: null }, lastError: null, lastReason: null });
 await page.route('**/*', async route => {
   const request = route.request(), url = new URL(request.url());assert.equal(url.origin, 'http://localhost', 'production traffic is forbidden');
   requests.push({ path: url.pathname, method: request.method(), body: request.postData() });
@@ -100,7 +100,7 @@ try {
   await refreshStatus();assert.equal(await settings().locator('.atlm-exclusions').evaluate(node => node.open), true, 'status reads preserve the open explanation');
   const manual = () => settings().getByRole('button', { name: 'Начать обучение', exact: true });
   await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
-  assert.equal(startCount, 1);assert.match(await settings().innerText(), /Нужно не менее пяти случаев с прогнозами/);
+  assert.equal(startCount, 1);assert.match(await settings().innerText(), /Пока недостаточно пригодных данных/);
   assert.equal((await call(c, '/api/tracker/estimation-model')).value.training.generation, 1, 'real browser request reaches Worker training below two plans');
   await page.screenshot({ path: resolve(artifacts, 'atlm-cold-start.png'), fullPage: true });
 
@@ -114,6 +114,18 @@ try {
   const keyboardRequest = page.waitForRequest(request => new URL(request.url()).pathname.endsWith('/' + PLAN + '/estimate'));
   await page.keyboard.press('Enter');await keyboardRequest;
   await page.waitForFunction(() => !document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy'));
+
+  for(const k of [0,1,4]) {
+    estimate=estimateFor(PLAN);estimate.serverEstimation.accuracy='EXPERIMENTAL';estimate.serverEstimation.sampleCount=k+1;
+    estimate.serverEstimation.evaluation={qualityConfirmed:false,caseCount:k,maeMs:k?0:null};
+    await refreshPlan();const text=await forecast().innerText();
+    assert.match(text,/Качество не подтверждено/);assert(text.includes('В обучении использовано планов: '+(k+1)+'.'));
+    assert(text.includes('Проверено прогнозов: '+k+'.'));
+    if(k===0){assert.match(text,/Ошибка пока не оценена/);assert.doesNotMatch(text,/Средняя ошибка/);}
+    if(k===0){await page.setViewportSize({width:320,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.screenshot({path:resolve(artifacts,'atlm-experimental-320.png'),fullPage:true});await page.setViewportSize({width:1440,height:1000});}
+    else assert.match(text,/Средняя ошибка прошлых проверок: 0 мин/);
+  }
+  estimate=estimateFor(PLAN);await refreshPlan();assert.doesNotMatch(await forecast().innerText(),/Качество не подтверждено/);
 
   estimate = { planId: PLAN, isStale: false, serverEstimation: { status: 'UNAVAILABLE', unavailableReason: 'INCOMPLETE_FEATURES', pointMs: null } };
   await refreshPlan();assert.match(await forecast().innerText(), /не хватает исходных сведений/);assert.equal(await forecast().locator('.atlm-point').count(), 0);
@@ -136,6 +148,8 @@ try {
   assert.match(await settings().innerText(), /Новых пригодных планов: 3/);
   assert.match(await settings().innerText(), /Начать обучение можно в любое время/);
   assert.equal(await settings().getByRole('button', { name: 'Начать обучение', exact: true }).isEnabled(), true);
+  status=modelState('IDLE');status.activeModel.sampleCount=2;status.activeModel.accuracy='EXPERIMENTAL';status.activeModel.evaluation={qualityConfirmed:false,caseCount:0,maeMs:null};await refreshStatus();
+  assert.match(await settings().innerText(),/В обучении использовано планов: 2\./);assert.match(await settings().innerText(),/Всего пригодных планов: 23/);assert.match(await settings().innerText(),/Проверено прогнозов: 0/);assert.match(await settings().innerText(),/Ошибка пока не оценена/);
   status = modelState('RUNNING');status.training.progress = { phase: 'EVALUATION', completedCases: 2, totalCases: 7 };await refreshStatus();
   assert.match(await settings().innerText(), /Модель обучается/);assert.match(await settings().innerText(), /Обработано примеров: 2 из 7/);
   status = modelState('REJECTED');status.lastReason = 'CANDIDATE_MAE_WORSE';await refreshStatus();
