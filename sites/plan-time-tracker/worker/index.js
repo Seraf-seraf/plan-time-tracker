@@ -1123,15 +1123,15 @@ function canUseHistoricalMedian(prediction){
   return prediction.status==="UNAVAILABLE" && allowed.has(diagnostic?.code||prediction.unavailableReason)
     && (!diagnostic?.cause || allowed.has(diagnostic.cause.code));
 }
-async function historicalMedianForecast(db,ownerId,planId,nowMs,throughSequence=null){
+async function historicalMedianForecast(db,ownerId,planId,nowMs){
   const snapshot=await dbFirst(db,`WITH selected AS(
     SELECT s.sequence,s.actual_ms FROM estimation_samples s
     WHERE s.owner_id=? AND s.plan_id<>? AND s.eligibility='ELIGIBLE' AND ${ATLM_LATEST_SAMPLE_SQL}
-      AND s.source_available_at<=? AND (? IS NULL OR s.sequence<=?) ORDER BY s.sequence LIMIT ?
+      AND s.source_available_at<=? ORDER BY s.sequence LIMIT ?
   ) SELECT COALESCE((SELECT dataset_revision FROM estimation_owner_state WHERE owner_id=?),0) AS revision,
     EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND kind='REFRESH_SAMPLE' AND generation>processed_generation) AS dirty,
     (SELECT json_group_array(json_object('sequence',sequence,'actualMs',actual_ms)) FROM selected) AS rows_json`,
-    ownerId,planId,nowMs,throughSequence,throughSequence,ATLM_MAX_ROWS+1,ownerId,ownerId);
+    ownerId,planId,nowMs,ATLM_MAX_ROWS+1,ownerId,ownerId);
   if(snapshot.dirty)return null;
   const rows=JSON.parse(snapshot.rows_json||"[]");
   if(!rows.length||rows.length>ATLM_MAX_ROWS)return null;
@@ -1140,7 +1140,7 @@ async function historicalMedianForecast(db,ownerId,planId,nowMs,throughSequence=
   if(!isNonnegativeSafeInteger(pointMs))throw appError("SOURCE_UNAVAILABLE","Не удалось рассчитать медиану истории.",503);
   return {status:"AVAILABLE",pointMs,method:{...HISTORICAL_MEDIAN_METHOD},modelId:null,modelVersion:null,sampleCount:rows.length,
     accuracy:"HISTORICAL_BASELINE",evaluation:null,unavailableReason:null,diagnostics:null,
-    fallback:{kind:"HISTORICAL_MEDIAN",datasetRevision:snapshot.revision,throughSequence:throughSequence??rows.at(-1).sequence,
+    fallback:{kind:"HISTORICAL_MEDIAN",datasetRevision:snapshot.revision,throughSequence:rows.at(-1).sequence,
       sourceDigest:"sha256:"+await hashCommandInput(rows),sampleCount:rows.length}};
 }
 async function earlyForecast(db,ownerId,planId,prediction,nowMs){
@@ -1187,7 +1187,7 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
     if (digest !== row.requirements_digest) staleReasons.push("SCOPE_CHANGED");
     else if (row.first_started_at !== null && (await readAtlmSampleSource(db, ownerId, args.planId, nowMs)).reasons.includes("SCOPE_CHANGED")) staleReasons.push("SCOPE_CHANGED");
     if(serverEstimation.fallback?.kind==="HISTORICAL_MEDIAN"){
-      const current=await historicalMedianForecast(db,ownerId,args.planId,nowMs,serverEstimation.fallback.throughSequence);
+      const current=await historicalMedianForecast(db,ownerId,args.planId,nowMs);
       if(!current||current.fallback.sourceDigest!==serverEstimation.fallback.sourceDigest)staleReasons.push("BASELINE_SOURCE_CHANGED");
     }
     if (serverEstimation.modelId) {

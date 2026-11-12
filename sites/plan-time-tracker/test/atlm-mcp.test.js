@@ -448,7 +448,9 @@ test("early historical median returns real odd/even durations, persists honestly
   const t=atlmTask();t.profile.workKind="MIXED";t.profile.reuseState="READY";
   await completeAtlm(c,await plannedAtlm(c,crypto.randomUUID(),t),13000);await process(c);
   const even=value(await mcp(c,"EstimatePlanTime",args));assert.equal(even.pointMs,7000);
-  assert.equal(value(await mcp(c,"GetSavedEstimate",{planId:PLAN})).serverEstimation.pointMs,5000);
+  const previous=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+  assert.equal(previous.serverEstimation.pointMs,5000);
+  assert.ok(previous.staleReasons.includes("BASELINE_SOURCE_CHANGED"),"new eligible history must mark the old median stale");
   await ok(c,"DeletePlan",{planId:sources[0].planId},2);
   const stale=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
   assert.ok(stale.staleReasons.includes("BASELINE_SOURCE_CHANGED"));assert.equal(stale.serverEstimation.pointMs,5000);
