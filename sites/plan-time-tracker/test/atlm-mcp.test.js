@@ -389,3 +389,33 @@ test("completed and deleted plans keep history but reject new forecasts",async()
   assert.equal(refusal.value.result.structuredContent.code,"PLAN_NOT_FOUND");
  }finally{c.close();}
 });
+
+test("saved availability checks actual model categories and successful training has a success message",async()=>{
+ const c=context();try{
+  const training=await train(c);
+  const s=value(await mcp(c,"GetTrainingStatus"));
+  assert.equal(s.lastAttempt.code,"AVAILABLE");
+  assert.match(s.lastAttempt.message,/успешно/i);
+  assert.doesNotMatch(s.lastAttempt.message,/недоступен/i);
+  const task=atlmTask();task.profile.workKind="CREATE_MECHANISM";
+  const p=await plannedAtlm(c,crypto.randomUUID(),task);
+  await ok(c,"RecordAssessment",await atlmAssessment(c,p.planId,task,{predictionRequest:request}),0);
+  const before=rows(c), saved=value(await mcp(c,"GetSavedEstimate",{planId:p.planId}));
+  assert.equal(saved.forecastAvailability.canCalculate,false);
+  assert.equal(saved.diagnostics.code,"UNSUPPORTED_CATEGORY");
+  assert.match(saved.diagnostics.message,/workKind/);
+  assert.deepEqual(rows(c),before);
+  assert.equal(saved.forecastAvailability.planStatus,"PLANNED");
+  await ok(c,"DeletePlan",{planId:p.planId},0);
+  const removed=value(await mcp(c,"GetSavedEstimate",{planId:p.planId}));
+  assert.equal(removed.forecastAvailability.deleted,true);
+  await ok(c,"DeletePlan",{planId:training.plans[0].planId},2);
+  const invalidated=value(await mcp(c,"GetTrainingStatus"));
+  assert.equal(invalidated.activeModelInvalidated,true);
+  const known=await plannedAtlm(c,crypto.randomUUID());
+  await ok(c,"RecordAssessment",await atlmAssessment(c,known.planId,atlmTask(),{predictionRequest:request}),0);
+  const invalid=value(await mcp(c,"GetSavedEstimate",{planId:known.planId}));
+  assert.equal(invalid.diagnostics.code,"MODEL_INVALIDATED");
+  assert.equal(invalid.forecastAvailability.canCalculate,false);
+ }finally{c.close();}
+});

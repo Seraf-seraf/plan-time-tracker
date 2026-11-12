@@ -140,6 +140,13 @@ try {
 
   estimate = { planId: PLAN, isStale: false };await refreshPlan();assert.match(await forecast().innerText(), /Сервер вернул неполную оценку/);assert.doesNotMatch(await forecast().innerText(), /Исходная оценка до запуска не сохранена/);estimate = null;
 
+  // The authoritative response can be newer than the plan card rendered in this tab.
+  for(const availability of [{planStatus:'COMPLETED',deleted:false},{planStatus:'PLANNED',deleted:true}]){
+    estimate={...estimateFor(PLAN),forecastAvailability:{...availability,canRefreshSaved:false,canCalculate:false}};
+    await refreshPlan();assert.equal(await forecast().count(),0);
+    estimate=null;await open(PLAN);
+  }
+
   // Release the old response only after a different plan has rendered its own forecast.
   const started = new Promise(resolve => { heldStarted = resolve; });
   const finished = new Promise(resolve => { heldFinished = resolve; });holdPlan = PLAN;

@@ -699,7 +699,8 @@ export function predictAtlm(artifact, features) {
   if (!atlmArtifactValid(artifact)) return atlmUnavailable("INVALID_ARTIFACT");
   const problem = atlmFeatureProblem(features);
   if (problem) return problem;
-  if (ESTIMATE_PROFILE_FIELDS.some(field => !artifact.levels[field].includes(features[field]))) return atlmUnavailable("UNSUPPORTED_CATEGORY");
+  const unsupportedFields=ESTIMATE_PROFILE_FIELDS.filter(field => !artifact.levels[field].includes(features[field]));
+  if (unsupportedFields.length) return atlmUnavailable("UNSUPPORTED_CATEGORY",{unsupportedFields});
   const design = atlmDesignRow(features, artifact.columns, artifact.transforms, artifact.runtime);
   if (!design.every(Number.isFinite)) return atlmUnavailable("INVALID_PREDICTION");
   const transformed = atlmSum(design.map((value, i) => value * artifact.coefficients[i]));
@@ -1172,11 +1173,20 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
     if(assessment.context?.agentTask){
       const normalized = normalizeAgentTaskV1(assessment.context.agentTask);
       if(normalized.missingFields.length) diagnostics = atlmDiagnostics("INCOMPLETE_FEATURES",{missingFields:normalized.missingFields});
-    }
+      else {
+        const model=await atlmReadActiveModel(db,ownerId);
+        if(model){
+          const artifact=atlmTrainingJson(model.artifact_json);
+          if(!atlmArtifactValid(artifact))throw appError("SOURCE_UNAVAILABLE","Сохранённая модель ATLM повреждена.",503,{reason:"INVALID_ARTIFACT"});
+          const unsupportedFields=ESTIMATE_PROFILE_FIELDS.filter(field=>!artifact.levels[field].includes(normalized.features[field]));
+          if(unsupportedFields.length)diagnostics=atlmDiagnostics("UNSUPPORTED_CATEGORY",{unsupportedFields});
+        }
+      }
+    }else diagnostics=atlmDiagnostics("MISSING_FEATURES");
     if(!diagnostics) diagnostics = atlmStatusDiagnostics(await getEstimationModelStatus(db,ownerId,nowMs));
   }
   const availabilityDiagnostics = scopeDiagnostics || diagnostics;
-  const forecastAvailability = {canCalculate:canRefreshSaved && !diagnostics,canRefreshSaved,
+  const forecastAvailability = {planStatus:row.status,deleted:row.deleted_at!==null,canCalculate:canRefreshSaved && !diagnostics,canRefreshSaved,
     reason:availabilityDiagnostics?.code ?? null,diagnostics:availabilityDiagnostics};
   return { formatVersion: 1, planId: args.planId, assessmentId: row.assessment_id ?? null, assessmentRevision: row.revision ?? null,
     source: row.first_started_at !== null ? "FROZEN_INPUT" : row.assessment_id ? "LATEST_ASSESSMENT" : "NONE",
@@ -2518,7 +2528,7 @@ const UI_ATLM = String.raw`(()=>{
       statusBody.append(make("p","Снимок попытки: datasetRevision="+String(facts.datasetRevision)+", generation="+String(facts.generation)+". Текущие пригодные планы показаны отдельно выше.","atlm-note"));
     }
     if(reason&&(!data.lastAttempt||data.lastAttempt.code!==reason))
-      statusBody.append(make("p",reasonText(reason)+(data.lastAttempt?"":" Подробные параметры последней попытки не сохранены."),data.lastError?"error":"atlm-note"));
+      statusBody.append(make("p",reasonText(reason)+" Подробные параметры этой причины не сохранены.",data.lastError?"error":"atlm-note"));
     if(lastProcessFailure)statusBody.append(make("p",lastProcessFailure,"error atlm-process-feedback"));
     const method=make("details",null,"atlm-method");method.open=methodOpen;method.append(make("summary","Кто рассчитывает прогноз"),make("p","Агент передаёт исходные сведения о задаче. Сервер трекера обучает модель ATLM и рассчитывает полное активное время плана. Интерфейс показывает сохранённую оценку. Ранний прогноз доступен до пяти проверочных сравнений с пометкой «Качество не подтверждено». Размер обучения и число проверок показаны отдельно. Модель хранится на сервере; новый прогноз использует готовые коэффициенты без повторного обучения.","atlm-note"));statusBody.append(method);updateControls();
   }
@@ -2559,6 +2569,7 @@ const UI_ATLM = String.raw`(()=>{
       if(data.planId!==planId)throw new Error("Ответ относится к другому плану. Повторите загрузку.");
       if(!Object.hasOwn(data,"serverEstimation")||typeof data.isStale!=="boolean")throw new Error("Сервер вернул неполную оценку. Повторите загрузку.");
       body.replaceChildren();const estimate=data.serverEstimation;
+      if(data.forecastAvailability?.deleted===true||data.forecastAvailability?.planStatus==="COMPLETED"){panel.remove();return;}
       if(data.forecastAvailability?.canRefreshSaved===false)refresh.remove();
       if(data.forecastAvailability?.canRefreshSaved===true&&planRoot.dataset.planStatus==="PLANNED"&&!refresh.isConnected)toolbar.append(refresh);
       body.append(make("p","Время рассчитывает сервер трекера по модели ATLM. Агент передаёт исходные сведения о задаче.","atlm-note"));
@@ -2692,7 +2703,9 @@ function atlmDiagnostics(code, facts = {}) {
   for (const key of ["sampleCount","p","residualDegreesOfFreedom","rank","limit","status","firstStartedAt"])
     if (facts[key] !== undefined && facts[key] !== null && (typeof facts[key] === "string" || Number.isFinite(facts[key]))) parameters[key] = facts[key];
   if (Array.isArray(facts.missingFields)) parameters.missingFields = facts.missingFields.filter(x => typeof x === "string").slice(0, 20);
+  if(Array.isArray(facts.unsupportedFields))parameters.unsupportedFields=facts.unsupportedFields.filter(field=>ESTIMATE_PROFILE_FIELDS.includes(field));
   const messages = {
+    AVAILABLE:"Модель успешно обучена.",
     MISSING_FEATURES:"До первого запуска не сохранены исходные признаки задачи.",
     INCOMPLETE_FEATURES:"Не заполнены обязательные параметры: " + (parameters.missingFields?.join(", ") || "missingFields не сохранён") + ".",
     TRAINING_NOT_STARTED:"Обучение модели ещё не выполнялось. Активной модели нет.",
@@ -2705,7 +2718,7 @@ function atlmDiagnostics(code, facts = {}) {
     TRAINING_IN_PROGRESS:"Обучение или обновление исходных данных ещё не завершено.",
     COLLECTING_DATA:"Активной модели нет. Подробные параметры последней попытки не сохранены.",
     MODEL_INVALIDATED:"Исходные данные сохранённой модели изменились. Требуется повторное обучение.",
-    UNSUPPORTED_CATEGORY:"В обученной модели отсутствует категория обязательного признака этой задачи.",
+    UNSUPPORTED_CATEGORY:"В обученной модели отсутствует категория обязательного признака этой задачи. Параметры: "+(parameters.unsupportedFields?.join(", ")||"не сохранены")+".",
     INVALID_FEATURES:"Исходные параметры не соответствуют схеме задачи.",
     INVALID_PREDICTION:"Модель не смогла получить конечное неотрицательное время.",
     INVALID_ARTIFACT:"Сохранённая модель повреждена или не соответствует текущей версии.",
@@ -2720,7 +2733,7 @@ function atlmDiagnostics(code, facts = {}) {
     SNAPSHOT_INVALIDATED:"Исходные данные изменились во время обучения. Требуется новая попытка."
   };
   let message = messages[code] || "Расчёт недоступен. Причина: " + String(code) + ".";
-  const values = Object.entries(parameters).filter(([key]) => key !== "missingFields").map(([key,value]) => key+"="+String(value));
+  const values = Object.entries(parameters).filter(([key]) => key !== "missingFields" && key !== "unsupportedFields").map(([key,value]) => key+"="+String(value));
   if(values.length) message += " " + values.join(", ") + ".";
   if(code === "INSUFFICIENT_DATA" && parameters.p !== undefined) message += " Требуется sampleCount >= p и независимость признаков.";
   return {code,message,parameters};
@@ -2732,6 +2745,11 @@ function atlmAttemptDiagnostics(result, snapshot, job, nowMs) {
 }
 function atlmStatusDiagnostics(status) {
   if(status.activeModel) return null;
+  if(status.activeModelInvalidated){
+    const diagnostic=atlmDiagnostics("MODEL_INVALIDATED");
+    if(status.lastAttempt?.code===status.lastReason&&status.lastReason){diagnostic.cause=status.lastAttempt;diagnostic.message+=" Последняя попытка: "+status.lastAttempt.message;}
+    return diagnostic;
+  }
   if(status.training?.pendingRefreshCount || ["QUEUED","RUNNING","RETRY_WAIT"].includes(status.training?.status))
     return atlmDiagnostics("TRAINING_IN_PROGRESS",{status:status.training.status});
   if(status.lastAttempt?.code && status.lastAttempt.code === status.lastReason && status.lastAttempt.code !== "AVAILABLE") return status.lastAttempt;
@@ -2774,7 +2792,7 @@ export async function predictWithActiveModel(db, ownerId, features, nowMs) {
   if (!model) {
     const state = await dbFirst(db, "SELECT active_model_id FROM estimation_owner_state WHERE owner_id=?", ownerId);
     const reason=state?.active_model_id ? "MODEL_INVALIDATED" : "COLLECTING_DATA";
-    return {...unavailable(reason),diagnostics:reason==="MODEL_INVALIDATED"?atlmDiagnostics(reason):atlmStatusDiagnostics(await getEstimationModelStatus(db,ownerId,nowMs))};
+    return {...unavailable(reason),diagnostics:atlmStatusDiagnostics(await getEstimationModelStatus(db,ownerId,nowMs))};
   }
   let prediction;
   try { prediction = predictAtlm(atlmTrainingJson(model.artifact_json), features); }
@@ -2819,7 +2837,7 @@ export async function getEstimationModelStatus(db, ownerId, nowMs) {
     forecastScope: "FULL_FROM_FIRST_START", retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
     datasetRevision: state?.dataset_revision ?? 0, eligibleSampleCount: counts?.eligible ?? 0,
     excludedSampleCount: (counts?.total ?? 0) - (counts?.eligible ?? 0), newPlansSinceTraining: newPlans,
-    exclusionReasons: exclusions, activeModel: atlmPublicModel(active),
+    exclusionReasons: exclusions, activeModel: atlmPublicModel(active), activeModelInvalidated:Boolean(state?.active_model_id&&!active),
     training: { status, generation: train?.generation ?? state?.training_generation ?? 0, due,
       attempts: trainPending ? train.attempts : 0, nextAttemptAt: Number.isFinite(nextAttemptAt) ? nextAttemptAt : null,
       pendingRefreshCount: pending.length, progressRevision: checkpoint.progressRevision ?? 0,
