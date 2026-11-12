@@ -10,13 +10,14 @@ const c = context(); c.advance(Date.now() - c.now());
 const artifacts = resolve(process.env.UI_ACCEPTANCE_ARTIFACT_DIR || "/tmp/tracker-source-ui");mkdirSync(artifacts, { recursive: true });
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE || "/usr/bin/chromium", headless: true, args: ["--no-sandbox"] });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-const posts = [], requests = [], errors = [];let lostAck = true, externalRequests = 0;
+const posts = [], requests = [], errors = [];let lostAck = true, externalRequests = 0, exportFails = false;
 page.setDefaultTimeout(5000);page.on("pageerror", error => errors.push(error.message));
 await page.addInitScript(() => { window.confirm = () => true; });
 await page.route("**/*", async route => {
   const request = route.request(), url = new URL(request.url());
   if (url.origin !== "http://localhost") { externalRequests++;return route.abort(); }
   requests.push(url.pathname + url.search);
+  if (url.pathname === '/api/export' && exportFails) return route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({error:{code:'INTERNAL_ERROR'}})});
   const body = request.postDataJSON();if (body) posts.push(body);
   const response = await c.worker.fetch(new Request(request.url(), { method: request.method(), headers: { "content-type": "application/json", "oai-authenticated-user-id": OWNER }, ...(request.postData() ? { body: request.postData() } : {}) }), { DB: c.db });
   if (body?.commandType === "UpdatePlanMetadata" && lostAck) { lostAck = false;return route.abort("failed"); }
@@ -126,6 +127,23 @@ try {
   await row.getByRole("button", { name: "Пауза", exact: true }).waitFor();
   const intervals = c.db.sqlite.prepare("SELECT start_ms,end_ms FROM work_intervals ORDER BY start_ms").all();
   assert.equal(intervals.length, 2);assert.equal(intervals[0].end_ms - intervals[0].start_ms, 2000);assert.equal(intervals[1].end_ms, null);
+  await page.locator('[data-view="settings"]').click();
+  exportFails = true;
+  await page.locator('.settings-export').click();
+  await page.getByRole('alert').filter({hasText:'Не удалось подготовить экспорт'}).waitFor();
+  assert.equal(await page.locator('.settings-export').textContent(), 'Повторить скачивание');
+  exportFails = false;
+  const populatedDownloadPromise = page.waitForEvent('download');
+  await page.locator('.settings-export').click();
+  const populatedDownload = await populatedDownloadPromise;
+  const populatedReport = JSON.parse(readFileSync(await populatedDownload.path(), 'utf8'));
+  assert.equal(populatedDownload.suggestedFilename(), 'plan-time-tracker-export.json');
+  assert.equal(populatedReport.formatVersion, 2);
+  const exportedPlan = populatedReport.plans.find(item => item.planId === plan);
+  assert(exportedPlan, 'download includes the plan created through the UI');
+  assert.equal(exportedPlan.intervals.length, 2);
+  assert.equal(exportedPlan.intervals[0].endMs - exportedPlan.intervals[0].startMs, 2000);
+  assert.equal(await page.getByRole('alert').filter({hasText:'Не удалось подготовить экспорт'}).count(), 0);
   assert(!requests.some(url => /repositories|commit-conflicts|repositoryId/.test(url)));
   assert(!posts.some(body => /repositoryId|revisionSha|testedSha|commitPolicy|pushPolicy/.test(JSON.stringify(body))));
   assert.equal(externalRequests, 0);assert.deepEqual(errors, []);
