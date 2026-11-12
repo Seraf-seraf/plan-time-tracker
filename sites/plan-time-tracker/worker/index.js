@@ -2502,7 +2502,7 @@ const UI_EXPORT = String.raw`(()=>{
    const download=document.createElement('a');download.href=url;download.download='plan-time-tracker-export.json';document.body.append(download);
    try{download.click();}finally{download.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);}
    status.textContent='Экспорт подготовлен.';link.textContent='Скачать JSON отчет';
-  }catch(failure){error.textContent=failure.message||'Не удалось скачать экспорт. Попробуйте ещё раз.';link.textContent='Повторить скачивание';}
+  }catch(failure){error.textContent=failure instanceof TypeError?'Не удалось скачать экспорт. Проверьте подключение к сети и повторите попытку.':failure instanceof SyntaxError?'Сервер вернул некорректный отчёт. Попробуйте ещё раз.':failure.message||'Не удалось скачать экспорт. Попробуйте ещё раз.';link.textContent='Повторить скачивание';}
   finally{pending=false;link.removeAttribute('aria-disabled');}
  });
 })();`;

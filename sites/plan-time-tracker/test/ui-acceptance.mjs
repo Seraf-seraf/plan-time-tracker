@@ -17,6 +17,7 @@ await page.route("**/*", async route => {
   const request = route.request(), url = new URL(request.url());
   if (url.origin !== "http://localhost") { externalRequests++;return route.abort(); }
   requests.push(url.pathname + url.search);
+  if (url.pathname === '/api/export' && exportFails === 'network') return route.abort('internetdisconnected');
   if (url.pathname === '/api/export' && exportFails) return route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({error:{code:'INTERNAL_ERROR'}})});
   const body = request.postDataJSON();if (body) posts.push(body);
   const response = await c.worker.fetch(new Request(request.url(), { method: request.method(), headers: { "content-type": "application/json", "oai-authenticated-user-id": OWNER }, ...(request.postData() ? { body: request.postData() } : {}) }), { DB: c.db });
@@ -132,6 +133,9 @@ try {
   await page.locator('.settings-export').click();
   await page.getByRole('alert').filter({hasText:'Не удалось подготовить экспорт'}).waitFor();
   assert.equal(await page.locator('.settings-export').textContent(), 'Повторить скачивание');
+  exportFails = 'network';
+  await page.locator('.settings-export').click();
+  await page.getByRole('alert').filter({hasText:'Проверьте подключение к сети и повторите попытку'}).waitFor();
   exportFails = false;
   const populatedDownloadPromise = page.waitForEvent('download');
   await page.locator('.settings-export').click();
