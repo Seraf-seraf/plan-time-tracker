@@ -168,6 +168,14 @@ try {
     estimate=null;await open(PLAN);
   }
 
+  estimate={planId:PLAN,source:'FROZEN_INPUT',isStale:false,
+    serverEstimation:{status:'UNAVAILABLE',pointMs:null,unavailableReason:'MISSING_FEATURES'},
+    forecastAvailability:{planStatus:'RUNNING',deleted:false,canRefreshSaved:false,canCalculate:false}};
+  await refreshPlan();assert.equal(await forecast().getByRole('button',{name:'Обновить прогноз',exact:true}).count(),0);
+  assert.match(await forecast().innerText(),/Исходная оценка зафиксирована при первом запуске/);
+  assert.doesNotMatch(await forecast().innerText(),/Агент может дополнить исходные сведения до первого запуска/);
+  estimate=null;await open(PLAN);
+
   // Release the old response only after a different plan has rendered its own forecast.
   const started = new Promise(resolve => { heldStarted = resolve; });
   const finished = new Promise(resolve => { heldFinished = resolve; });holdPlan = PLAN;

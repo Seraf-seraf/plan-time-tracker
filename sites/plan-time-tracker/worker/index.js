@@ -1170,6 +1170,7 @@ async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
 
 // Read inputs and source generation together; optimistic retries keep a multi-read
 // calculation from being returned as current after its inputs or plan status changed.
+const CURRENT_FORECAST_MAX_READ_ATTEMPTS = 3;
 const CURRENT_FORECAST_INPUT_SQL = `SELECT input.*,json_array(status,first_started_at,deleted_at,requirements_json,
   sequence,dataset_revision,active_model_id,model_status,last_training_diagnostics_json,training_generation,jobs_json) AS snapshot_key
   FROM (SELECT p.status,p.first_started_at,p.deleted_at,t.requirements_json,
@@ -1188,7 +1189,7 @@ async function currentForecastInput(db, ownerId, planId) {
   return dbFirst(db,CURRENT_FORECAST_INPUT_SQL,ownerId,planId);
 }
 async function currentPlanForecast(db, ownerId, planId, nowMs) {
-  for(let attempt=0;attempt<3;attempt++){
+  for(let attempt=0;attempt<CURRENT_FORECAST_MAX_READ_ATTEMPTS;attempt++){
     const input=await currentForecastInput(db,ownerId,planId);
     if(!input)throw appError("PLAN_NOT_FOUND",messageFor("PLAN_NOT_FOUND"),404);
     if(input.status!=="PLANNED"||input.first_started_at!==null||input.deleted_at!==null)return null;
@@ -2709,6 +2710,7 @@ const UI_ATLM = String.raw`(()=>{
       if(data.planId!==planId)throw new Error("Ответ относится к другому плану. Повторите загрузку.");
       if(!Object.hasOwn(data,"serverEstimation")||typeof data.isStale!=="boolean")throw new Error("Сервер вернул неполную оценку. Повторите загрузку.");
       body.replaceChildren();const estimate=data.serverEstimation;
+      const forecastPlanStatus=data.forecastAvailability?.planStatus||planRoot.dataset.planStatus;
       if(data.forecastAvailability?.deleted===true||data.forecastAvailability?.planStatus==="COMPLETED"){panel.remove();return;}
       if(data.forecastAvailability?.canRefreshSaved===false)refresh.remove();
       if(data.forecastAvailability?.canRefreshSaved===true&&planRoot.dataset.planStatus==="PLANNED"&&!refresh.isConnected)toolbar.append(refresh);
@@ -2727,7 +2729,7 @@ const UI_ATLM = String.raw`(()=>{
         }else appendQuality(body,estimate);
       }else if(estimate.status==="UNAVAILABLE"){
         body.append(make("p",diagnosticText(data.diagnostics)||diagnosticText(estimate.diagnostics)||reasonText(estimate.unavailableReason||"COLLECTING_DATA"),"atlm-note"));
-        body.append(make("p",planRoot.dataset.planStatus==="PLANNED"?"Агент может дополнить исходные сведения до первого запуска плана.":"Исходная оценка зафиксирована при первом запуске плана. Отсутствие прогноза не блокирует работу.","atlm-note"));
+        body.append(make("p",forecastPlanStatus==="PLANNED"?"Агент может дополнить исходные сведения до первого запуска плана.":"Исходная оценка зафиксирована при первом запуске плана. Отсутствие прогноза не блокирует работу.","atlm-note"));
       }else throw new Error("Сервер вернул некорректную оценку.");
       if(estimate==null&&data.diagnostics)body.append(make("p",diagnosticText(data.diagnostics)||reasonText(data.diagnostics.code),"atlm-note"));
       if(data.forecastAvailability?.reason==="UNSUPPORTED_FORECAST_SCOPE")body.append(make("p",diagnosticText(data.forecastAvailability.diagnostics),"atlm-note"));
