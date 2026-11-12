@@ -47,8 +47,8 @@ test("real zero and constant target/predictors are supported without invented po
   assert.equal(zero.artifact.transforms.target, "identity");
   assert.equal(predictAtlm(zero.artifact, features()).pointMs, 0);
   const short = await fitAtlm(rows(5));
-  assert.equal(short.reason, "INSUFFICIENT_DATA");
-  assert.equal(short.residualDegreesOfFreedom, 4);
+  assert.equal(short.status, "AVAILABLE");
+  assert.equal(short.artifact.residualDegreesOfFreedom, 4);
 });
 
 test("rank deficiency is explicit; no hidden ridge or selection removes correlated predictors", async () => {

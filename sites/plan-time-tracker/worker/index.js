@@ -419,8 +419,10 @@ export function scoreEstimateCases(cases) {
 // ATLM agent-v1: automatic identity/log/sqrt transformations and ordinary least
 // squares. Runtime has no ML service or random state. All preprocessing belongs
 // to the training prefix; callers supply server-validated frozen observations.
-const ATLM_METHOD = Object.freeze({ id: "atlm", version: "agent-v1" });
-const ATLM_FEATURE_VERSION = "agent-task-v1";
+const ATLM_METHOD = Object.freeze({ id: "atlm", version: "agent-v2" });
+const ATLM_FEATURE_VERSION = "agent-task-v2";
+const ATLM_MAX_COLUMNS = 64;
+const ATLM_RUNTIME_CATEGORIES = Object.freeze(["modelId", "reasoningEffort"]);
 const ATLM_NUMERIC_FIELDS = Object.freeze(["outcomeCount", "contractCount", "verificationKindCount"]);
 const ATLM_CATEGORY_LEVELS = Object.freeze({
   workKind: Object.freeze([...ESTIMATE_WORK_KINDS].filter(value => value !== "UNKNOWN")),
@@ -499,10 +501,63 @@ function atlmChooseTransform(values) {
   }
   return best;
 }
-function atlmDesignRow(features, columns, transforms) {
-  return columns.map(column => column.kind === "intercept" ? 1
-    : column.kind === "category" ? Number(features[column.field] === column.level)
-      : atlmTransform(transforms[column.field], features[column.field]));
+function atlmRuntimeLevels(values) {
+  return [...new Set(values)].sort((a,b)=>a===b?0:a===null?-1:b===null?1:atlmCompareId(a,b));
+}
+function atlmFitRuntime(rows) {
+  const categories = {};
+  for (const field of ATLM_RUNTIME_CATEGORIES) {
+    const counts = new Map();
+    for (const row of rows) { const value=row.features[field]??null;counts.set(value,(counts.get(value)||0)+1); }
+    const levels=atlmRuntimeLevels([...counts.keys()]);
+    categories[field]={levels,weights:levels.map(level=>counts.get(level)/rows.length)};
+  }
+  const known=rows.map(row=>row.features.plannedParallelAgents).filter(value=>value!=null);
+  const transform=known.length?atlmChooseTransform(known):"identity";
+  const mean=known.length?atlmSum(known.map(value=>atlmTransform(transform,value)))/known.length:0;
+  return {categories,parallel:{transform,mean,knownCount:known.length,
+    varying:known.some(value=>value!==known[0]),missingVarying:known.length>0&&known.length<rows.length}};
+}
+function atlmRuntimeColumns(runtime) {
+  const columns=[];
+  for(const field of ATLM_RUNTIME_CATEGORIES)for(const level of runtime.categories[field].levels.slice(1))columns.push({kind:"runtimeCategory",field,level});
+  if(runtime.parallel.varying)columns.push({kind:"runtimeNumeric",field:"plannedParallelAgents"});
+  if(runtime.parallel.missingVarying)columns.push({kind:"runtimeMissing",field:"plannedParallelAgents"});
+  return columns;
+}
+function atlmRuntimeValid(runtime,n) {
+  if(!atlmExactKeys(runtime,["categories","parallel"])||!atlmExactKeys(runtime.categories,ATLM_RUNTIME_CATEGORIES))return false;
+  for(const field of ATLM_RUNTIME_CATEGORIES){
+    const entry=runtime.categories[field];
+    if(!atlmExactKeys(entry,["levels","weights"])||!Array.isArray(entry.levels)||!entry.levels.length||entry.levels.length>Math.min(n,ATLM_MAX_COLUMNS)
+      ||entry.levels.some(value=>value!==null&&(typeof value!=="string"||!value.trim()||value.length>128))
+      ||canonical(entry.levels)!==canonical(atlmRuntimeLevels(entry.levels))||!Array.isArray(entry.weights)||entry.weights.length!==entry.levels.length
+      ||entry.weights.some(value=>!Number.isFinite(value)||value<=0||value>1||Math.abs(value*n-Math.round(value*n))>1e-8)
+      ||Math.abs(atlmSum(entry.weights)-1)>1e-9)return false;
+  }
+  const r=runtime.parallel;
+  return atlmExactKeys(r,["transform","mean","knownCount","varying","missingVarying"])&&ATLM_TRANSFORMS.includes(r.transform)
+    &&Number.isFinite(r.mean)&&r.mean>=0&&Number.isSafeInteger(r.knownCount)&&r.knownCount>=0&&r.knownCount<=n
+    &&typeof r.varying==="boolean"&&typeof r.missingVarying==="boolean"&&r.missingVarying===(r.knownCount>0&&r.knownCount<n)
+    &&(!r.varying||r.knownCount>=2)&&(r.varying||r.transform==="identity")&&(r.knownCount>0||r.mean===0)
+    &&(!r.knownCount||r.transform==="log"||r.mean>=1);
+}
+function atlmDesignRow(features, columns, transforms, runtime) {
+  return columns.map(column => {
+    if(column.kind==="intercept")return 1;
+    if(column.kind==="category")return Number(features[column.field]===column.level);
+    if(column.kind==="numeric")return atlmTransform(transforms[column.field],features[column.field]);
+    if(column.kind==="runtimeCategory"){
+      const entry=runtime.categories[column.field];let value=features[column.field]??null;
+      if(!entry.levels.includes(value)){
+        if(entry.levels.includes(null))value=null;
+        else return entry.weights[entry.levels.indexOf(column.level)];
+      }
+      return Number(value===column.level);
+    }
+    if(column.kind==="runtimeMissing")return Number(features.plannedParallelAgents==null);
+    return features.plannedParallelAgents==null?0:atlmTransform(runtime.parallel.transform,features.plannedParallelAgents)-runtime.parallel.mean;
+  });
 }
 
 // Column-equilibrated Householder QR with deterministic column pivoting. Rank
@@ -583,17 +638,19 @@ export async function fitAtlm(rows) {
     if (values.every(value => value === values[0])) constantPredictors.push(field);
     else columns.push({ kind: "numeric", field });
   }
+  const runtime=atlmFitRuntime(sorted);columns.push(...atlmRuntimeColumns(runtime));
   const p = columns.length, residualDegreesOfFreedom = n - p;
-  if (residualDegreesOfFreedom < 5) return atlmUnavailable("INSUFFICIENT_DATA", { sampleCount: n, p, residualDegreesOfFreedom });
+  if(p>ATLM_MAX_COLUMNS)return atlmUnavailable("MODEL_CAPACITY_LIMIT",{sampleCount:n,p,limit:ATLM_MAX_COLUMNS});
+  if (residualDegreesOfFreedom < 0) return atlmUnavailable("INSUFFICIENT_DATA", { sampleCount: n, p, residualDegreesOfFreedom });
   const target = sorted.map(row => row.actualMs / 60000);
   transforms.target = atlmChooseTransform(target);
-  const matrix = sorted.map(row => atlmDesignRow(row.features, columns, transforms));
+  const matrix = sorted.map(row => atlmDesignRow(row.features, columns, transforms, runtime));
   const solved = atlmQr(matrix, target.map(value => atlmTransform(transforms.target, value)));
   if (solved.rank !== p) return atlmUnavailable("RANK_DEFICIENT", { sampleCount: n, p, rank: solved.rank });
   if (!solved.coefficients.every(Number.isFinite)) return atlmUnavailable("NUMERICAL_FAILURE", { sampleCount: n });
   const artifact = atlmFreeze({
     formatVersion: 1, method: { ...ATLM_METHOD }, featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
-    n, p, rank: solved.rank, residualDegreesOfFreedom, levels, transforms, columns, coefficients: solved.coefficients,
+    n, p, rank: solved.rank, residualDegreesOfFreedom, levels, transforms, runtime, columns, coefficients: solved.coefficients,
     constantPredictors, manifest: sorted.map(({ sampleId, planId }) => ({ sampleId, planId })),
     datasetDigest: "sha256:" + await hashCommandInput(sorted),
     engine: { id: "ECMAScript-binary64", version: "householder-qr-pivot-v1", rankTolerance: solved.rankTolerance },
@@ -605,8 +662,9 @@ function atlmArtifactValid(artifact) {
   if (!isPlainRecord(artifact) || artifact.formatVersion !== 1 || artifact.method?.id !== ATLM_METHOD.id
     || artifact.method?.version !== ATLM_METHOD.version || artifact.featureSchemaVersion !== ATLM_FEATURE_VERSION
     || artifact.metric !== "PLAN_ACTIVE" || !isNonnegativeSafeInteger(artifact.n) || artifact.n > ATLM_MAX_ROWS
-    || !Number.isInteger(artifact.p) || artifact.p < 1 || artifact.n - artifact.p < 5 || artifact.rank !== artifact.p
+    || !Number.isInteger(artifact.p) || artifact.p < 1 || artifact.p > ATLM_MAX_COLUMNS || artifact.n - artifact.p < 0 || artifact.rank !== artifact.p
     || artifact.residualDegreesOfFreedom !== artifact.n - artifact.p || !isSnapshotDigest(artifact.datasetDigest)
+    || !atlmRuntimeValid(artifact.runtime,artifact.n)
     || !atlmExactKeys(artifact.levels, ESTIMATE_PROFILE_FIELDS)
     || !atlmExactKeys(artifact.transforms, [...ATLM_NUMERIC_FIELDS, "target"])
     || !Object.values(artifact.transforms).every(value => ATLM_TRANSFORMS.includes(value))
@@ -624,6 +682,7 @@ function atlmArtifactValid(artifact) {
     if (artifact.constantPredictors.includes(field)) { if (artifact.transforms[field] !== "identity") return false; }
     else columns.push({ kind: "numeric", field });
   }
+  columns.push(...atlmRuntimeColumns(artifact.runtime));
   if (!Array.isArray(artifact.columns) || canonical(columns) !== canonical(artifact.columns)
     || artifact.p !== columns.length || !Array.isArray(artifact.coefficients) || artifact.coefficients.length !== columns.length
     || !artifact.coefficients.every(Number.isFinite) || !Array.isArray(artifact.manifest) || artifact.manifest.length !== artifact.n) return false;
@@ -641,7 +700,7 @@ export function predictAtlm(artifact, features) {
   const problem = atlmFeatureProblem(features);
   if (problem) return problem;
   if (ESTIMATE_PROFILE_FIELDS.some(field => !artifact.levels[field].includes(features[field]))) return atlmUnavailable("UNSUPPORTED_CATEGORY");
-  const design = atlmDesignRow(features, artifact.columns, artifact.transforms);
+  const design = atlmDesignRow(features, artifact.columns, artifact.transforms, artifact.runtime);
   if (!design.every(Number.isFinite)) return atlmUnavailable("INVALID_PREDICTION");
   const transformed = atlmSum(design.map((value, i) => value * artifact.coefficients[i]));
   const minutes = artifact.transforms.target === "identity" ? transformed
@@ -857,7 +916,7 @@ export const AGENT_TASK_SCHEMA = {
     profileEvidence: { type: "object", additionalProperties: false, required: [...ESTIMATE_PROFILE_FIELDS], properties: Object.fromEntries(ESTIMATE_PROFILE_FIELDS.map(key => [key, { type: "string", minLength: 1, maxLength: 400 }])) },
     runtimeContext: { type: ["object", "null"], additionalProperties: false, properties: {
       ...Object.fromEntries(["modelId", "reasoningEffort", "environmentId"].map(key => [key, { type: ["string", "null"], minLength: 0, maxLength: 128 }])),
-      plannedParallelAgents: { type: ["integer", "null"], minimum: 1 }, provenance: { enum: ["CLIENT_REPORTED", "UNKNOWN"] },
+      plannedParallelAgents: { type: ["integer", "null"], minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, provenance: { enum: ["CLIENT_REPORTED", "UNKNOWN"] },
     } },
   },
 };
