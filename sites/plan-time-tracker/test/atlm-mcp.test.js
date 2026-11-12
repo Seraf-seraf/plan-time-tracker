@@ -51,7 +51,7 @@ test("all ATLM tools share strict discovery/runtime schemas and declare read-onl
     assert.deepEqual(schema.properties.predictionRequest.properties.method.enum, ["ATLM"]); assert.equal(schema.properties.serverEstimation, undefined);
     const atlm = value(await mcp(c, "GetTrackerInfo")).assessments.atlm;
     assert.equal(atlm.featureSchemaVersion, "agent-task-v1"); assert.equal(atlm.metric, "PLAN_ACTIVE");
-    assert.equal(atlm.predictionScope, "FULL_FROM_FIRST_START"); assert.equal(atlm.retrainEveryNewPlans, 5);
+    assert.equal(atlm.predictionScope, "FULL_FROM_FIRST_START"); assert.equal(atlm.retrainEveryNewPlans, 2);
     assert.equal(atlm.limits.datasetMaxLimit, 100);
   } finally { c.close(); }
 });
@@ -268,11 +268,11 @@ test("manual training starts below the automatic threshold and reports insuffici
     const manual = tools.find(t => t.name === "StartTraining");
     assert.ok(manual); assert.equal(manual.annotations.readOnlyHint, false); assert.equal(manual.annotations.idempotentHint, false);
     assert.equal(value(await mcp(c, "GetTrackerInfo")).assessments.atlm.startTrainingTool, "StartTraining");
-    for (let i = 0; i < 2; i++) { const p = await plannedAtlm(c, crypto.randomUUID()); await completeAtlm(c, p); }
+    for (let i = 0; i < 1; i++) { const p = await plannedAtlm(c, crypto.randomUUID()); await completeAtlm(c, p); }
     await process(c);
     assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM estimation_models WHERE owner_id=?").get(OWNER).n, 0);
     const result = value(await mcp(c, "StartTraining"));
-    assert.equal(result.eligibleSampleCount, 2);
+    assert.equal(result.eligibleSampleCount, 1);
     assert.equal(result.activeModel, null);
     assert.equal(result.training.generation, 1);
     assert.ok(result.lastReason);
@@ -283,7 +283,7 @@ test("manual training starts below the automatic threshold and reports insuffici
 test("web manual training shares the MCP path below threshold and enforces request boundaries", async () => {
   const c = context();
   try {
-    for (let i = 0; i < 2; i++) { const p = await plannedAtlm(c, crypto.randomUUID()); await completeAtlm(c, p); }
+    for (let i = 0; i < 1; i++) { const p = await plannedAtlm(c, crypto.randomUUID()); await completeAtlm(c, p); }
     await process(c);
     const path = "/api/tracker/estimation-model/start", before = rows(c);
     assert.equal((await call(c, path, {}, null)).status, 401);
@@ -291,7 +291,7 @@ test("web manual training shares the MCP path below threshold and enforces reque
     const forbidden = await c.worker.fetch(new Request("http://localhost" + path, { method: "POST", headers: { "content-type": "application/json", "oai-authenticated-user-id": OWNER, origin: "https://elsewhere.example" }, body: "{}" }), { DB: c.db });
     assert.equal(forbidden.status, 403);assert.deepEqual(rows(c), before);
     const first = await call(c, path, {});
-    assert.equal(first.status, 200);assert.equal(first.value.eligibleSampleCount, 2);
+    assert.equal(first.status, 200);assert.equal(first.value.eligibleSampleCount, 1);
     assert.equal(first.value.training.generation, 1);assert.equal(first.value.activeModel, null);assert.ok(first.value.lastReason);
     const second = await call(c, path, {});
     assert.equal(second.status, 200);assert.equal(second.value.training.generation, 2);

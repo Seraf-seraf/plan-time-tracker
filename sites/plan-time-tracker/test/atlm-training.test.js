@@ -57,38 +57,38 @@ test("model status is read-only, owner scoped and does not invent a cold model",
   } finally { c.close(); }
 });
 
-test("four to five eligible plans triggers once; receipt replay and excluded plans add no experience", async () => {
+test("one to two eligible plans triggers once; receipt replay and excluded plans add no experience", async () => {
   const c = context();
   try {
-    await experience(c, 4, { processEach: true });
-    assert.equal((await status(c)).newPlansSinceTraining, 4); assert.equal(trainJob(c), undefined);
+    await experience(c, 1, { processEach: true });
+    assert.equal((await status(c)).newPlansSinceTraining, 1); assert.equal(trainJob(c), undefined);
     const incomplete = atlmTask(); incomplete.outcomes = null;
     await completed(c, 1000, incomplete); await drain(c);
     assert.equal((await status(c)).excludedSampleCount, 1); assert.equal(trainJob(c), undefined);
-    const fifth = await completed(c);
-    const receipt = c.db.sqlite.prepare("SELECT command_id FROM command_receipts WHERE owner_id=? AND plan_id=? AND command_type='FinishPlan'").get(OWNER, fifth.planId);
+    const second = await completed(c);
+    const receipt = c.db.sqlite.prepare("SELECT command_id FROM command_receipts WHERE owner_id=? AND plan_id=? AND command_type='FinishPlan'").get(OWNER, second.planId);
     assert.equal((await status(c)).training.due, true);
     const tasks = []; scheduleAtlmTraining(c.db, OWNER, c.now(), { waitUntil(task) { tasks.push(task); } }, c.now);
     await Promise.all(tasks);
     const after = await status(c);
-    assert.equal(after.eligibleSampleCount, 5); assert.equal(after.newPlansSinceTraining, 0);
+    assert.equal(after.eligibleSampleCount, 2); assert.equal(after.newPlansSinceTraining, 0);
     assert.equal(after.training.generation, 1); assert.equal(after.training.due, false);
     assert.equal(after.training.status, "COLLECTING_DATA"); assert.equal(after.lastReason, "INSUFFICIENT_EVALUATION_CASES");
-    assert.equal((await command(c, "FinishPlan", { planId: fifth.planId }, 1, receipt.command_id)).status, 200);
+    assert.equal((await command(c, "FinishPlan", { planId: second.planId }, 1, receipt.command_id)).status, 200);
     await drain(c); assert.deepEqual(await status(c), after);
-    assert.equal(models(c).length, 1); assert.equal(JSON.parse(models(c)[0].manifest_json).length, 5);
+    assert.equal(models(c).length, 1); assert.equal(JSON.parse(models(c)[0].manifest_json).length, 2);
   } finally { c.close(); }
 });
 
 test("initial and subsequent models use accumulated history and preserve immutable artifacts", async () => {
   const c = context();
   try {
-    await experience(c, 15, { processEach: true });
+    await experience(c, 15); await drain(c);
     const first = await status(c), artifact = models(c).at(-1);
     assert.equal(first.activeModel.sampleCount, 15); assert.equal(first.activeModel.evaluation.caseCount, 9);
     assert.equal((await predictWithActiveModel(c.db, OWNER, features, c.now())).pointMs, 1000);
     assert.throws(() => c.db.sqlite.prepare("UPDATE estimation_models SET manifest_json='[]' WHERE owner_id=? AND model_id=?").run(OWNER, artifact.model_id), /ATLM_MODEL_IMMUTABLE/);
-    await experience(c, 5, { processEach: true });
+    await experience(c, 5); await drain(c);
     const second = await status(c), history = models(c);
     assert.notEqual(second.activeModel.modelId, first.activeModel.modelId); assert.equal(second.activeModel.sampleCount, 20);
     assert.equal(history.find(m => m.model_id === artifact.model_id).status, "RETIRED");
@@ -102,14 +102,14 @@ test("initial and subsequent models use accumulated history and preserve immutab
 test("a worse candidate is rejected without changing the active prediction or retrying its same five plans", async () => {
   const c = context();
   try {
-    await experience(c, 15, { processEach: true });
+    await experience(c, 15); await drain(c);
     const before = await predictWithActiveModel(c.db, OWNER, features, c.now());
-    await completed(c, 100000); await drain(c); await experience(c, 4, { processEach: true });
+    await completed(c, 100000); await experience(c, 4); await drain(c);
     const s = await status(c);
     assert.equal(s.training.status, "REJECTED"); assert.equal(s.lastReason, "MEDIAN_BASELINE_BETTER");
     assert.equal(s.training.due, false); assert.equal(s.newPlansSinceTraining, 0); assert.equal(models(c).at(-1).status, "REJECTED");
     assert.deepEqual(await predictWithActiveModel(c.db, OWNER, features, c.now()), before);
-    await drain(c); assert.equal(models(c).length, 4);
+    await drain(c); assert.equal(models(c).length, 2);
   } finally { c.close(); }
 });
 
@@ -167,7 +167,7 @@ test("checkpoint survives a database reopen and queued continuation does not con
 test("source deletion immediately invalidates predictions and retrains without counting an old plan twice", async () => {
   const c = context();
   try {
-    const plans = await experience(c, 15, { processEach: true }), old = (await status(c)).activeModel;
+    const plans = await experience(c, 15); await drain(c); const old = (await status(c)).activeModel;
     await ok(c, "DeletePlan", { planId: plans[0].planId }, 2);
     assert.equal((await predictWithActiveModel(c.db, OWNER, features, c.now())).unavailableReason, "MODEL_INVALIDATED");
     assert.equal((await status(c)).training.due, true); await drain(c);
@@ -315,7 +315,7 @@ function cloneStoredExperience(c, sourcePlanId, count) {
 test("5001 accumulated eligible samples are retained with an explicit resource failure and old model preserved", async () => {
   const c = context();
   try {
-    const plans = await experience(c, 15, { processEach: true }), before = await predictWithActiveModel(c.db, OWNER, features, c.now());
+    const plans = await experience(c, 15); await drain(c); const before = await predictWithActiveModel(c.db, OWNER, features, c.now());
     cloneStoredExperience(c, plans[0].planId, 5001 - plans.length);
     const s = await drain(c);
     assert.equal(s.eligibleSampleCount, 5001); assert.equal(s.training.status, "FAILED");
@@ -327,13 +327,13 @@ test("5001 accumulated eligible samples are retained with an explicit resource f
   } finally { c.close(); }
 });
 
-test("concurrent fifth and sixth completions and drains allocate a single training generation", async () => {
+test("concurrent second and third completions and drains allocate a single training generation", async () => {
   const c = context();
   try {
-    await experience(c, 4, { processEach: true }); await experience(c, 2);
+    await experience(c, 1, { processEach: true }); await experience(c, 2);
     await Promise.all([drain(c), drain(c)]);
-    assert.equal((await status(c)).eligibleSampleCount, 6); assert.equal(models(c).length, 1);
-    assert.equal(trainJob(c).generation, 1); assert.equal(models(c)[0].sample_count, 6);
+    assert.equal((await status(c)).eligibleSampleCount, 3); assert.equal(models(c).length, 1);
+    assert.equal(trainJob(c).generation, 1); assert.equal(models(c)[0].sample_count, 3);
   } finally { c.close(); }
 });
 

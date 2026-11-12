@@ -35,7 +35,7 @@ test('instruction names and immutable input fields are available through real MC
   const c = context();
   try {
     const capability = (await invoke(c, 'GetTrackerInfo')).assessments.atlm;
-    assert(capability);assert.equal(capability.retrainEveryNewPlans, 5);
+    assert(capability);assert.equal(capability.retrainEveryNewPlans, 2);
     const declared = JSON.stringify(capability);assert.match(declared, /agent-task-v1/);assert.match(declared, /PLAN_ACTIVE/);assert.match(declared, /FULL_FROM_FIRST_START/);
     const listing = (await call(c, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' })).value.result.tools;
     for (const name of tools) {

@@ -41,7 +41,7 @@ test("packaged Worker learns automatically from completed plans and freezes the 
     assert.equal(before.eligibleSampleCount, 0);
 
     let firstId;
-    for (let i = 0; i < 15; i++) {
+    for (let i = 0; i < 12; i++) {
       const planId = i === 0 ? PLAN : crypto.randomUUID();
       firstId ??= planId;
       const planned = await plannedAtlm(c, planId);
@@ -50,17 +50,17 @@ test("packaged Worker learns automatically from completed plans and freezes the 
       }), 0);
       await completeAtlm(c, planned, 1000);
       c.advance(1); // Every new assessment follows the prior known outcome.
-      if (i === 3 || i === 4) {
+      if (i === 0 || i === 1) {
         const status = await readTool("GetEstimationModelStatus");
         assert.equal(status.eligibleSampleCount, i + 1);
-        assert.equal(status.activeModel, null, "five plans trigger an attempt, not an unsupported model");
+        assert.equal(status.activeModel, null, "two plans trigger an attempt, not an unsupported model");
       }
     }
 
     const learned = await readTool("GetEstimationModelStatus");
-    assert.equal(learned.eligibleSampleCount, 15);
+    assert.equal(learned.eligibleSampleCount, 12);
     assert.ok(learned.activeModel, JSON.stringify(learned));
-    assert.equal(learned.activeModel.sampleCount, 15, "fit uses accumulated history, not the latest five");
+    assert.equal(learned.activeModel.sampleCount, 12, "fit uses accumulated history, not the latest pair");
     assert.ok(learned.activeModel.evaluation.caseCount >= 5);
     assert.ok(scheduled > 0, "normal tracker commands actually schedule background processing");
 
@@ -89,7 +89,7 @@ test("packaged Worker learns automatically from completed plans and freezes the 
     const after = await readTool("GetPlanEstimate", { planId: targetId });
     assert.deepEqual(after.serverEstimation, issued.serverEstimation, "execution retains the pre-start prediction exactly");
     const status = await readTool("GetEstimationModelStatus");
-    assert.equal(status.eligibleSampleCount, 16);
+    assert.equal(status.eligibleSampleCount, 13);
     assert.equal(status.newPlansSinceTraining, 1);
 
     const http = await call(c, "/api/tracker/plans/" + targetId + "/estimate");

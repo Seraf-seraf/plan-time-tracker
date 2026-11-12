@@ -1821,7 +1821,7 @@ async function readTrackerCapabilities(db,ownerId){return {
       contextRead: { tool: "GetAssessment", omitAssessmentId: true }, expectedRequirementsDigestRequired: true,
       historyMaxTargets: 20, historyMaxLimit: 100, methodologyControlsExecution: false,
       atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, featureSchemaVersion: "agent-task-v1", metric: "PLAN_ACTIVE",
-        predictionScope: "FULL_FROM_FIRST_START", retrainEveryNewPlans: 5,
+        predictionScope: "FULL_FROM_FIRST_START", retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
         calculateTool: "CalculateAtlmEstimate", planEstimateTool: "GetPlanEstimate", modelStatusTool: "GetEstimationModelStatus",
         processTool: "ProcessEstimationTraining", startTrainingTool: "StartEstimationTraining", datasetTool: "GetAtlmDataset", predictionRequest: { method: "ATLM", methodVersion: 1 },
         limits: { maxTrainingSamples: 5000, datasetDefaultLimit: 50, datasetMaxLimit: 100, maxOutcomes: 20, maxChangedContracts: 20, maxVerificationKinds: 5 } },
@@ -2519,7 +2519,7 @@ function validatePublicCommand(envelope){
  if(fields)assertExactKeys(payload,new Set(fields),"payload");
 }
 // ATLM training state is durable in D1. A background promise only drains that state.
-export const ATLM_RETRAIN_EVERY_NEW_PLANS = 5;
+export const ATLM_RETRAIN_EVERY_NEW_PLANS = 2;
 const ATLM_TRAINING_LEASE_MS = 60000;
 const ATLM_TRAINING_BUDGET_MS = 10000;
 const ATLM_TRAINING_LIMIT = 5000;
@@ -3072,7 +3072,7 @@ function mcpTools() {
       GetPlanEstimate: "Сохранённый прогноз плана; после первого запуска только исходная frozen-оценка. isStale отмечает изменение требований или исходных данных модели.",
       GetEstimationModelStatus: "Состояние модели, накопление пригодных планов и очередь обучения владельца. Только чтение.",
       ProcessEstimationTraining: "Один ограниченный проход долговечной очереди владельца. Идемпотентная мутация без planId, с lease и fence; может потребоваться повторный проход.",
-      StartEstimationTraining: "По явной просьбе пользователя запросить обучение на доступных данных независимо от порога пяти планов. Возвращает состояние очереди; качество и достаточность данных проверяются сервером.",
+      StartEstimationTraining: "По явной просьбе пользователя запросить обучение на доступных данных независимо от порога двух планов. Возвращает состояние очереди; качество и достаточность данных проверяются сервером.",
       GetAtlmDataset: "Приватная постраничная выгрузка неизменяемых sample-версий. Сохраняйте nextCursor; DATASET_CHANGED требует начать заново. Используется последняя версия каждого плана, только если она пригодна.",
     })[name], inputSchema: ATLM_TOOL_SCHEMAS[name], annotations: { readOnlyHint: !["ProcessEstimationTraining", "StartEstimationTraining"].includes(name), destructiveHint: false, idempotentHint: name !== "StartEstimationTraining", openWorldHint: false } };
     if (name === "GetPlan") inputSchema = { type: "object", required: ["planId"], properties: { planId: { type: "string", format: "uuid" } }, additionalProperties: false };

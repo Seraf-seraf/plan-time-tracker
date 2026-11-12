@@ -32,7 +32,7 @@ let processCount = 0, statusCount = 0, advancingQueue = false, startCount = 0, s
 page.on('pageerror', error => errors.push(error.message));
 const json = (route, value, code = 200) => route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify(value) });
 const estimateFor = id => ({ planId: id, isStale: false, serverEstimation: { formatVersion: 1, status: 'AVAILABLE', pointMs: id === PLAN ? 120000 : 420000, metric: 'PLAN_ACTIVE', forecastScope: 'FULL_FROM_FIRST_START', method: { id: 'atlm', version: 'agent-v1' }, modelVersion: 'agent-v1/model-7', modelId: 'model-7', evaluation: { caseCount: 6, maeMs: 30000 }, interval: null, confidence: 'UNKNOWN' } });
-const modelState = (trainingStatus, due = false) => ({ ...structuredClone(initial.value), datasetRevision: 7, newPlansSinceTraining: 3, eligibleSampleCount: 23, excludedSampleCount: 2, retrainEveryNewPlans: 5, exclusionReasons: [{ reason: 'MISSING_FEATURES', count: 2 }], activeModel: { modelId: 'model-7', modelVersion: 'agent-v1/model-7', sampleCount: 23 }, training: { status: trainingStatus, due, generation: 4, progressRevision: 0, pendingRefreshCount: 0, nextAttemptAt: null, progress: null }, lastError: null, lastReason: null });
+const modelState = (trainingStatus, due = false) => ({ ...structuredClone(initial.value), datasetRevision: 7, newPlansSinceTraining: 3, eligibleSampleCount: 23, excludedSampleCount: 2, retrainEveryNewPlans: 2, exclusionReasons: [{ reason: 'MISSING_FEATURES', count: 2 }], activeModel: { modelId: 'model-7', modelVersion: 'agent-v1/model-7', sampleCount: 23 }, training: { status: trainingStatus, due, generation: 4, progressRevision: 0, pendingRefreshCount: 0, nextAttemptAt: null, progress: null }, lastError: null, lastReason: null });
 await page.route('**/*', async route => {
   const request = route.request(), url = new URL(request.url());assert.equal(url.origin, 'http://localhost', 'production traffic is forbidden');
   requests.push({ path: url.pathname, method: request.method(), body: request.postData() });
@@ -101,7 +101,7 @@ try {
   const manual = () => settings().getByRole('button', { name: 'Начать обучение', exact: true });
   await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
   assert.equal(startCount, 1);assert.match(await settings().innerText(), /Нужно не менее пяти случаев с прогнозами/);
-  assert.equal((await call(c, '/api/tracker/estimation-model')).value.training.generation, 1, 'real browser request reaches Worker training below five plans');
+  assert.equal((await call(c, '/api/tracker/estimation-model')).value.training.generation, 1, 'real browser request reaches Worker training below two plans');
   await page.screenshot({ path: resolve(artifacts, 'atlm-cold-start.png'), fullPage: true });
 
   controlled = true;status = modelState('COLLECTING_DATA');await open(PLAN);
