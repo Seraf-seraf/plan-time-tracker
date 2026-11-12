@@ -1264,7 +1264,8 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
   const scopeDiagnostics = row.deleted_at !== null ? atlmDiagnostics("PLAN_DELETED") : !canRefreshSaved
     ? atlmDiagnostics("UNSUPPORTED_FORECAST_SCOPE",{status:row.status,firstStartedAt:row.first_started_at}) : null;
   let diagnostics = null;
-  if(!row.assessment_json) diagnostics = atlmDiagnostics("MISSING_FEATURES");
+  if(row.forecast_json!==null)diagnostics=serverEstimation.fallback?.atlmDiagnostics??serverEstimation.diagnostics??null;
+  else if(!row.assessment_json) diagnostics = atlmDiagnostics("MISSING_FEATURES");
   else {
     const assessment = JSON.parse(row.assessment_json);
     if(assessment.context?.agentTask){
@@ -1282,7 +1283,6 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
     }else diagnostics=atlmDiagnostics("MISSING_FEATURES");
     if(!diagnostics) diagnostics = atlmStatusDiagnostics(await getEstimationModelStatus(db,ownerId,nowMs));
   }
-  if(row.forecast_json!==null)diagnostics=serverEstimation.fallback?.atlmDiagnostics??serverEstimation.diagnostics??null;
   let calculationMethod=!diagnostics?{...ATLM_METHOD}:null;
   if(canRefreshSaved&&diagnostics&&canUseHistoricalMedian({status:"UNAVAILABLE",diagnostics})){
     const baseline=await historicalMedianForecast(db,ownerId,args.planId,nowMs);

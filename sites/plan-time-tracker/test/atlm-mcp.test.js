@@ -601,3 +601,19 @@ test("current getter retries a newer assessment and returns authoritative frozen
   }finally{restore?.();c.close();}
  }
 });
+
+test("a technical model failure is explicit on current read and cannot hide a frozen first-start snapshot",async()=>{
+ const c=context();try{
+  await plannedAtlm(c);
+  c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at,method_version,feature_version) VALUES(?,'corrupt-model',1,'ACTIVE','{}','[]','invalid',?,0,?,'agent-v2','agent-task-v2')").run(OWNER,c.now(),c.now());
+  c.db.sqlite.prepare("INSERT INTO estimation_owner_state(owner_id,active_model_id) VALUES(?,'corrupt-model')").run(OWNER);
+  const before=rows(c),failure=await mcp(c,"GetSavedEstimate",{planId:PLAN});
+  assert.equal(failure.value.result.structuredContent.code,"SOURCE_UNAVAILABLE");assert.deepEqual(rows(c),before);
+  await ok(c,"StartPlan",{planId:PLAN},0);
+  const frozen=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+  assert.equal(frozen.source,"FROZEN_INPUT");assert.equal(frozen.serverEstimation.status,"UNAVAILABLE");
+  assert.equal(frozen.serverEstimation.pointMs,null);assert.equal(frozen.diagnostics.code,"SOURCE_UNAVAILABLE");
+  await ok(c,"PausePlan",{planId:PLAN},1);
+  assert.deepEqual(value(await mcp(c,"GetSavedEstimate",{planId:PLAN})).serverEstimation,frozen.serverEstimation);
+ }finally{c.close();}
+});
