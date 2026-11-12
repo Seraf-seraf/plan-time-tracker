@@ -567,3 +567,37 @@ test("first Start rejects changed historical source before timer begins",async()
   assert.equal(c.db.sqlite.prepare("SELECT first_started_at FROM plans WHERE plan_id=?").get(PLAN).first_started_at,null);
  }finally{restore?.();c.close();}
 });
+
+function afterCurrentInputRead(c,effect){
+ const prepare=c.db.prepare;let used=false;
+ c.db.prepare=function(sql){
+  const statement=prepare.call(this,sql),bind=statement.bind.bind(statement);
+  statement.bind=(...args)=>{
+   const bound=bind(...args);
+   if(!used&&sql.startsWith("SELECT input.*,json_array")){
+    const first=bound.first.bind(bound);
+    bound.first=async()=>{const row=await first();if(!used){used=true;await effect();}return row;};
+   }
+   return bound;
+  };return statement;
+ };return()=>{c.db.prepare=prepare;};
+}
+test("current getter retries a newer assessment and returns authoritative frozen snapshot after concurrent Start",async()=>{
+ for(const action of ["assessment","start"]){
+  const c=context();let restore;try{
+   await baselineHistory(c,[1000,5000,9000]);await plannedAtlm(c);
+   restore=afterCurrentInputRead(c,async()=>{
+    if(action==="start")await ok(c,"StartPlan",{planId:PLAN},0);
+    else{const t=atlmTask();t.outcomes=null;await ok(c,"RecordAssessment",await atlmAssessment(c,PLAN,t),0);}
+   });
+   const r=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+   if(action==="start"){
+    assert.equal(r.source,"FROZEN_INPUT");assert.equal(r.forecastAvailability.planStatus,"RUNNING");
+    assert.equal(r.forecastAvailability.canRefreshSaved,false);assert.equal(r.serverEstimation.pointMs,5000);
+   }else{
+    assert.equal(r.source,"CURRENT_INPUT");assert.equal(r.serverEstimation.unavailableReason,"INCOMPLETE_FEATURES");
+    assert.equal(r.serverEstimation.pointMs,null);
+   }
+  }finally{restore?.();c.close();}
+ }
+});
