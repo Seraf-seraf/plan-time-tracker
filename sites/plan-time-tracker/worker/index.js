@@ -1995,7 +1995,7 @@ function renderPlanList(){
 }
 function renderRecentList(){
   const otherPlans=plans.filter(plan=>plan.status!=="RUNNING");
-  renderPagedList(q("#recent"),otherPlans,RECENT_PAGE_SIZE,recentPage,"recent",plans.length?"Остальные планы появятся здесь.":"Планов пока нет.");
+  renderPagedList(q("#recent"),otherPlans,RECENT_PAGE_SIZE,recentPage,"recent","");
 }
 window.addEventListener("plan-time-tracker:period-plans",event=>{
   periodPlans=new Map(event.detail.rows.map(plan=>[plan.planId,plan]));
@@ -2279,7 +2279,7 @@ const UI_ATLM = String.raw`(()=>{
       disclosure.append(list,make("p","У одного плана может быть несколько причин.","atlm-note"));statusBody.append(disclosure);
     }
     if(data.activeModel)statusBody.append(make("p","Действующая модель: "+String(data.activeModel.modelVersion||data.activeModel.modelId)+". В обучении использовано планов: "+count(data.activeModel.sampleCount)+".","atlm-note"));
-    else statusBody.append(make("p","Первой модели может понадобиться больше пяти планов: нужны данные для обучения и отдельной проверки.","atlm-note"));
+    else statusBody.append(make("p","Для первой модели нужны пригодные данные для обучения и отдельной проверки.","atlm-note"));
     if(data.training.status==="REJECTED"&&data.activeModel)statusBody.append(make("p","Предыдущая пригодная модель продолжает давать прогнозы.","atlm-note"));
     if(data.training.progress&&Number.isSafeInteger(data.training.progress.totalCases)&&data.training.progress.totalCases>0)statusBody.append(make("p","Проверено случаев: "+count(data.training.progress.completedCases)+" из "+data.training.progress.totalCases+".","atlm-note"));
     if(data.training.status==="RETRY_WAIT"&&Number.isFinite(data.training.nextAttemptAt))statusBody.append(make("p","Повторная попытка не раньше "+new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short",timeZone:document.querySelector("#tz")?.value||"UTC"}).format(new Date(data.training.nextAttemptAt))+".","atlm-note"));
