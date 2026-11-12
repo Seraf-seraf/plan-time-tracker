@@ -32,7 +32,7 @@ description: Описать задачу до начала работы, сох�
 
 ### Какие исходные признаки передавать
 
-`context.agentTask` содержит обязательные поля:
+`context.agentTask` содержит поля ниже; runtimeContext и его отдельные поля необязательны:
 
 - `schemaVersion:"agent-task-v1"`;
 - `profile:{workKind,reuseState,doneBoundary}` — категории определены ниже;
@@ -40,7 +40,7 @@ description: Описать задачу до начала работы, сох�
 - `changedContracts:null|[{kind,key,description,evidence}]` — не более 20 изменяемых контрактов, kind: API/MCP/EVENT/STORAGE/OTHER;
 - `verificationKinds:null|[BUILD_STATIC,UNIT,INTEGRATION,UI_E2E,DEPLOY_SMOKE]` — только выбранные уникальные категории;
 - `profileEvidence:{workKind,reuseState,doneBoundary}` — короткие основания каждого выбора;
-- `runtimeContext:{modelId,reasoningEffort,environmentId,plannedParallelAgents,provenance}` — неизвестные значения null, provenance CLIENT_REPORTED или UNKNOWN, число исполнителей положительное целое либо null.
+- `runtimeContext:{modelId,reasoningEffort,environmentId,plannedParallelAgents,provenance}` — необязательные параметры: отсутствие блока/поля, null и пустые строки modelId/effort означают неизвестно; provenance CLIENT_REPORTED или UNKNOWN, число одновременно работающих исполнителей (включая основного) положительное целое либо null. Неизвестные runtime-параметры не запрещают прогноз.
 
 id/key — 1–128 символов; description/evidence и основания — 1–400; строки runtimeContext — до 128. Сервер объединяет точные дубли и считает outcomeCount/contractCount/verificationKindCount: не передавай эти счётчики самостоятельно. Разные описания одного ключа — ошибка. UNKNOWN/null не равны нулю или подтверждённому отсутствию. Максимум assessment — 24000 UTF-8 байт, глубина JSON 10, включая серверный прогноз. Не отправляй секреты, исходники и полные журналы.
 

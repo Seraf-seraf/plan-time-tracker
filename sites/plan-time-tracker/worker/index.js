@@ -439,7 +439,10 @@ function atlmExactKeys(value, keys) {
 }
 function atlmFeatureProblem(features) {
   const fields = [...ESTIMATE_PROFILE_FIELDS, ...ATLM_NUMERIC_FIELDS];
-  if (!atlmExactKeys(features, fields)) return atlmUnavailable("INVALID_FEATURES");
+  const optional = ["modelId", "reasoningEffort", "plannedParallelAgents"];
+  if (!isPlainRecord(features) || fields.some(field => !Object.hasOwn(features, field)) || Object.keys(features).some(field => !fields.includes(field) && !optional.includes(field))) return atlmUnavailable("INVALID_FEATURES");
+  for (const field of ["modelId", "reasoningEffort"]) if (features[field] != null && (typeof features[field] !== "string" || !features[field].trim() || features[field].length > 128)) return atlmUnavailable("INVALID_FEATURES");
+  if (features.plannedParallelAgents != null && (!Number.isSafeInteger(features.plannedParallelAgents) || features.plannedParallelAgents < 1)) return atlmUnavailable("INVALID_FEATURES");
   const missingFields = [];
   for (const field of ESTIMATE_PROFILE_FIELDS) {
     if (features[field] === "UNKNOWN" || features[field] === null) missingFields.push(field);
@@ -835,7 +838,7 @@ function assertSafeMetadataText(value, label) {
 
 export const AGENT_TASK_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["schemaVersion", "profile", "outcomes", "changedContracts", "verificationKinds", "profileEvidence", "runtimeContext"],
+  required: ["schemaVersion", "profile", "outcomes", "changedContracts", "verificationKinds", "profileEvidence"],
   properties: {
     schemaVersion: { enum: ["agent-task-v1"] },
     profile: { type: "object", additionalProperties: false, required: [...ESTIMATE_PROFILE_FIELDS], properties: {
@@ -852,8 +855,8 @@ export const AGENT_TASK_SCHEMA = {
       } } },
     verificationKinds: { type: ["array", "null"], maxItems: 20, items: { enum: ["BUILD_STATIC", "UNIT", "INTEGRATION", "UI_E2E", "DEPLOY_SMOKE"] } },
     profileEvidence: { type: "object", additionalProperties: false, required: [...ESTIMATE_PROFILE_FIELDS], properties: Object.fromEntries(ESTIMATE_PROFILE_FIELDS.map(key => [key, { type: "string", minLength: 1, maxLength: 400 }])) },
-    runtimeContext: { type: "object", additionalProperties: false, required: ["modelId", "reasoningEffort", "environmentId", "plannedParallelAgents", "provenance"], properties: {
-      ...Object.fromEntries(["modelId", "reasoningEffort", "environmentId"].map(key => [key, { type: ["string", "null"], minLength: 1, maxLength: 128 }])),
+    runtimeContext: { type: ["object", "null"], additionalProperties: false, properties: {
+      ...Object.fromEntries(["modelId", "reasoningEffort", "environmentId"].map(key => [key, { type: ["string", "null"], minLength: 0, maxLength: 128 }])),
       plannedParallelAgents: { type: ["integer", "null"], minimum: 1 }, provenance: { enum: ["CLIENT_REPORTED", "UNKNOWN"] },
     } },
   },
@@ -861,6 +864,10 @@ export const AGENT_TASK_SCHEMA = {
 export function normalizeAgentTaskV1(input) {
   validateAssessmentValue(input, AGENT_TASK_SCHEMA, "agentTask");
   const agentTask = JSON.parse(JSON.stringify(input));
+  const runtime = { modelId: null, reasoningEffort: null, environmentId: null, plannedParallelAgents: null, provenance: "UNKNOWN", ...agentTask.runtimeContext };
+  for (const field of ["modelId", "reasoningEffort", "environmentId"]) if (typeof runtime[field] === "string") runtime[field] = runtime[field].trim() || null;
+  if (runtime.reasoningEffort !== null) runtime.reasoningEffort = runtime.reasoningEffort.toLowerCase();
+  agentTask.runtimeContext = runtime;
   const dedupe = (items, key) => {
     if (items === null) return null;
     const seen = new Map();
@@ -880,7 +887,8 @@ export function normalizeAgentTaskV1(input) {
   const missingFields = ESTIMATE_PROFILE_FIELDS.filter(key => agentTask.profile[key] === "UNKNOWN").map(key => "profile." + key);
   for (const key of ["outcomes", "changedContracts", "verificationKinds"]) if (agentTask[key] === null) missingFields.push(key);
   const features = { ...agentTask.profile, outcomeCount: agentTask.outcomes?.length ?? null,
-    contractCount: agentTask.changedContracts?.length ?? null, verificationKindCount: agentTask.verificationKinds?.length ?? null };
+    contractCount: agentTask.changedContracts?.length ?? null, verificationKindCount: agentTask.verificationKinds?.length ?? null,
+    modelId: runtime.modelId, reasoningEffort: runtime.reasoningEffort, plannedParallelAgents: runtime.plannedParallelAgents };
   return { agentTask, features, missingFields };
 }
 
