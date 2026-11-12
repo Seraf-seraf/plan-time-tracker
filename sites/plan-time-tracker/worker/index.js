@@ -2577,7 +2577,7 @@ const UI_ATLM = String.raw`(()=>{
     if(reason&&(!data.lastAttempt||data.lastAttempt.code!==reason))
       statusBody.append(make("p",reasonText(reason)+" Подробные параметры этой причины не сохранены.",data.lastError?"error":"atlm-note"));
     if(lastProcessFailure)statusBody.append(make("p",lastProcessFailure,"error atlm-process-feedback"));
-    const method=make("details",null,"atlm-method");method.open=methodOpen;method.append(make("summary","Кто рассчитывает прогноз"),make("p","Агент передаёт исходные сведения о задаче. Сервер трекера обучает модель ATLM и рассчитывает полное активное время плана. Интерфейс показывает сохранённую оценку. Ранний прогноз доступен до пяти проверочных сравнений с пометкой «Качество не подтверждено». Размер обучения и число проверок показаны отдельно. Модель хранится на сервере; новый прогноз использует готовые коэффициенты без повторного обучения.","atlm-note"));statusBody.append(method);updateControls();
+    const method=make("details",null,"atlm-method");method.open=methodOpen;method.append(make("summary","Кто рассчитывает прогноз"),make("p","Агент передаёт исходные сведения о задаче. Сервер трекера обучает модель ATLM и рассчитывает полное активное время плана. Интерфейс показывает сохранённую оценку. Ранний прогноз доступен до пяти проверочных сравнений с пометкой «Качество не подтверждено». Размер обучения и число проверок показаны отдельно. Модель хранится на сервере; новый прогноз использует готовые коэффициенты без повторного обучения. До готовности ATLM при наличии пригодной истории сервер выдаёт отдельно обозначенный ранний ориентир по общей медиане завершённых планов. Это приблизительная оценка, которая не учитывает особенности новой задачи.","atlm-note"));statusBody.append(method);updateControls();
   }
   function queueKey(data){const t=data.training;return JSON.stringify([data.datasetRevision,t.generation,t.progressRevision,t.pendingRefreshCount,t.nextAttemptAt]);}
   function schedulePoll(){clearTimeout(pollTimer);if(pollsLeft>0){pollsLeft--;pollTimer=setTimeout(()=>loadStatus(true),750);}}
@@ -2619,13 +2619,17 @@ const UI_ATLM = String.raw`(()=>{
       if(data.forecastAvailability?.deleted===true||data.forecastAvailability?.planStatus==="COMPLETED"){panel.remove();return;}
       if(data.forecastAvailability?.canRefreshSaved===false)refresh.remove();
       if(data.forecastAvailability?.canRefreshSaved===true&&planRoot.dataset.planStatus==="PLANNED"&&!refresh.isConnected)toolbar.append(refresh);
-      body.append(make("p","Время рассчитывает сервер трекера по модели ATLM. Агент передаёт исходные сведения о задаче.","atlm-note"));
+      body.append(make("p","Время рассчитывает сервер трекера. Агент передаёт исходные сведения о задаче.","atlm-note"));
       if(estimate==null){body.append(make("p","Исходная оценка до запуска не сохранена.","atlm-note"));}
       else if(estimate.status==="AVAILABLE"&&Number.isFinite(estimate.pointMs)&&estimate.pointMs>=0){
         body.append(make("p","Около "+minutes(estimate.pointMs),"atlm-point"));
         body.append(make("p","Полное активное время от первого запуска. Паузы исключены; подготовка оценки до запуска не входит.","atlm-note"));
         if(estimate.modelVersion||estimate.modelId)body.append(make("p","Модель: "+String(estimate.modelVersion||estimate.modelId)+".","atlm-note"));
-        appendQuality(body,estimate);
+        if(estimate.method?.id==="historical-median"){
+          body.append(make("strong","Ранний ориентир по истории"));
+          body.append(make("p","Учтено завершённых планов: "+count(estimate.sampleCount)+". Общая медиана активного времени; особенности новой задачи не учитываются. Качество не подтверждено.","atlm-note"));
+          if(estimate.fallback?.atlmDiagnostics)body.append(make("p","ATLM на момент оценки: "+(diagnosticText(estimate.fallback.atlmDiagnostics)||reasonText(estimate.fallback.atlmUnavailableReason)),"atlm-note"));
+        }else appendQuality(body,estimate);
       }else if(estimate.status==="UNAVAILABLE"){
         body.append(make("p",diagnosticText(data.diagnostics)||diagnosticText(estimate.diagnostics)||reasonText(estimate.unavailableReason||"COLLECTING_DATA"),"atlm-note"));
         body.append(make("p",planRoot.dataset.planStatus==="PLANNED"?"Агент может дополнить исходные сведения до первого запуска плана.":"Исходная оценка зафиксирована при первом запуске плана. Отсутствие прогноза не блокирует работу.","atlm-note"));
@@ -3326,7 +3330,7 @@ const MCP_DESCRIPTIONS = Object.freeze({
   GetPlanExecutionSnapshot: "Показать текст и текущее состояние плана и этапов.",
   GetCommandReceipt: "Проверить результат ранее отправленной команды по её идентификатору.",
   SetStepStatus: "Изменить статус этапа исходного плана. Нужна текущая версия этапа; текст плана и таймер не меняются.",
-  CalculateAtlmEstimate: "Получить прогноз полного активного времени плана по ATLM до первого запуска; прогноз не сохраняется.",
+  CalculateAtlmEstimate: "Получить прогноз до первого запуска: ATLM либо явно обозначенный ранний ориентир historical-median по пригодной истории. Прогноз не сохраняется.",
   GetPlanEstimate: "Прочитать сохранённый прогноз плана и узнать, не устарел ли он; новая оценка не рассчитывается.",
   GetEstimationModelStatus: "Посмотреть количество примеров, состояние обучения и причины исключения данных.",
   StartEstimationTraining: "По прямой просьбе пользователя запросить новую попытку обучения на доступных данных.",
@@ -3344,7 +3348,7 @@ function mcpTools() {
   return TOOL_NAMES.map((name) => {
     let inputSchema = { type: "object", additionalProperties: false };
     if (Object.hasOwn(ATLM_TOOL_SCHEMAS, name)) return { name, description: ({
-      CalculateAtlmEstimate: "Предпросмотр полного PLAN_ACTIVE по активной ATLM-модели владельца до первого StartPlan. Только факты AgentTaskV1; ничего не обучает и не сохраняет.",
+      CalculateAtlmEstimate: "Предпросмотр полного PLAN_ACTIVE до первого StartPlan: приоритет активной ATLM, при расчётной недоступности — явный historical-median по реальной истории. Факты AgentTaskV1; без обучения и записи.",
       GetPlanEstimate: "Сохранённый прогноз плана; после первого запуска только исходная frozen-оценка. isStale отмечает изменение требований или исходных данных модели.",
       GetEstimationModelStatus: "Состояние модели, накопление пригодных планов и очередь обучения владельца. Только чтение.",
       ProcessEstimationTraining: "Один ограниченный проход долговечной очереди владельца. Идемпотентная мутация без planId, с lease и fence; может потребоваться повторный проход.",

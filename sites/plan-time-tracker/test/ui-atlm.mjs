@@ -127,6 +127,13 @@ try {
     if(k===0){await page.setViewportSize({width:320,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.screenshot({path:resolve(artifacts,'atlm-experimental-320.png'),fullPage:true});await page.setViewportSize({width:1440,height:1000});}
     else assert.match(text,/Средняя ошибка прошлых проверок: 0 мин/);
   }
+  estimate=estimateFor(PLAN);estimate.serverEstimation={...estimate.serverEstimation,method:{id:'historical-median',version:'1'},pointMs:300000,modelId:null,modelVersion:null,sampleCount:7,accuracy:'HISTORICAL_BASELINE',evaluation:null,fallback:{atlmUnavailableReason:'COLLECTING_DATA',atlmDiagnostics:{code:'INSUFFICIENT_DATA',message:'Недостаточно данных: sampleCount=7, p=9.'}}};
+  await refreshPlan();let baselineText=await forecast().innerText();
+  assert.match(baselineText,/Около 5 мин/);assert.match(baselineText,/Ранний ориентир по истории/);assert.match(baselineText,/Учтено завершённых планов: 7/);
+  assert.match(baselineText,/особенности новой задачи не учитываются/);assert.match(baselineText,/sampleCount=7, p=9/);
+  assert.doesNotMatch(baselineText,/Проверено прогнозов|Средняя ошибка|Качество проверено/);
+  estimate.serverEstimation.pointMs=0;await refreshPlan();assert.match(await forecast().innerText(),/Около 0 мин/);
+
   estimate=estimateFor(PLAN);await refreshPlan();assert.doesNotMatch(await forecast().innerText(),/Качество не подтверждено/);
 
   estimate = { planId: PLAN, isStale: false, serverEstimation: { status: 'UNAVAILABLE', unavailableReason: 'INCOMPLETE_FEATURES', pointMs: null } };

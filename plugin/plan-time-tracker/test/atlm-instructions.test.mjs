@@ -28,7 +28,7 @@ test('delivered skills give one pre-start ATLM workflow with current-state steps
   assert.match(primary, /не вычитай затраченное время/);
   assert.doesNotMatch(primary, /candidates/);
   assert.doesNotMatch(assess, /CalculateEstimate/);
-  assert.match(assess, /Для получения прогноза используй только ATLM/);
+  assert.match(assess, /серверный EstimatePlanTime/);assert.match(assess,/historical-median/);assert.match(assess,/не называй медиану обученной ATLM/);
 });
 
 test('instruction names and immutable input fields are available through real MCP discovery', async () => {
