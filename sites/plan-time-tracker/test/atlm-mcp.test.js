@@ -72,7 +72,7 @@ test("cold and incomplete previews are read-only across MCP/HTTP; forecasts are 
     assert.equal(value(await mcp(c, "EstimatePlanTime", args)).unavailableReason, "UNSUPPORTED_FORECAST_SCOPE");
     assert.equal((await command(c, "RecordAssessment", await atlmAssessment(c, PLAN, atlmTask(), { predictionRequest: request }), 0)).value.error.code, "ATLM_FORECAST_SCOPE_CHANGED");
     await ok(c, "RecordAssessment", await atlmAssessment(c), 0);
-    assert.equal(value(await mcp(c, "GetSavedEstimate", { planId: PLAN })).serverEstimation, null);
+    assert.equal(value(await mcp(c, "GetSavedEstimate", { planId: PLAN })).serverEstimation.status, "UNAVAILABLE");
   } finally { c.close(); }
 });
 
@@ -107,7 +107,7 @@ test("first Start racing inference rejects the new assessment atomically with a 
     assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM assessment_revisions WHERE assessment_id=?").get(payload.assessmentId).n, 0);
     const receipt = value(await mcp(c, "GetCommandResult", { commandId: id })); assert.equal(receipt.status, "FINAL");
     assert.equal((await command(c, "RecordAssessment", payload, 0, id)).value.error.code, "ATLM_FORECAST_SCOPE_CHANGED");
-    assert.equal(value(await mcp(c, "GetSavedEstimate", { planId: PLAN })).serverEstimation, null);
+    assert.equal(value(await mcp(c, "GetSavedEstimate", { planId: PLAN })).serverEstimation.status, "UNAVAILABLE");
   } finally { restore?.(); c.close(); }
 });
 
@@ -508,4 +508,62 @@ test("current PLANNED reads latest input without predictionRequest and refuses c
   assert.equal(latest.assessmentId,revised.assessmentId);
   assert.equal(latest.serverEstimation.unavailableReason,"INCOMPLETE_FEATURES");assert.equal(latest.serverEstimation.pointMs,null);
  }finally{c.close();}
+});
+
+test("first Start freezes fresh forecast, preserves recorded revision and replays without recapture",async()=>{
+ const c=context();try{
+  await baselineHistory(c,[1000,5000,9000]);const planned=await plannedAtlm(c);
+  const payload=await atlmAssessment(c,PLAN,atlmTask(),{predictionRequest:request});await ok(c,"RecordAssessment",payload,0);
+  const raw=c.db.sqlite.prepare("SELECT assessment_json FROM assessment_revisions WHERE assessment_id=?").get(payload.assessmentId).assessment_json;
+  const task=atlmTask();task.profile.workKind="MIXED";
+  await completeAtlm(c,await plannedAtlm(c,crypto.randomUUID(),task),13000);await process(c);c.advance(200);
+  const id=crypto.randomUUID(),first=await command(c,"StartPlan",{planId:PLAN},0,id);
+  assert.equal(first.status,200);
+  const frozen=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+  assert.equal(frozen.source,"FROZEN_INPUT");assert.equal(frozen.serverEstimation.pointMs,7000);
+  assert.equal(frozen.recordedEstimation.pointMs,5000);assert.equal(frozen.serverEstimation.calculatedAt,c.now());
+  const input=c.db.sqlite.prepare("SELECT * FROM plan_estimation_inputs WHERE plan_id=?").get(PLAN);
+  assert.throws(()=>c.db.sqlite.prepare("UPDATE plan_estimation_inputs SET forecast_json='{}' WHERE plan_id=?").run(PLAN),/IMMUTABLE/);
+  c.advance(300);await ok(c,"RecordAssessment",await atlmAssessment(c),0);
+  assert.equal((await command(c,"StartPlan",{planId:PLAN},0,id)).status,200);
+  assert.deepEqual(c.db.sqlite.prepare("SELECT * FROM plan_estimation_inputs WHERE plan_id=?").get(PLAN),input);
+  assert.equal(c.db.sqlite.prepare("SELECT assessment_json FROM assessment_revisions WHERE assessment_id=?").get(payload.assessmentId).assessment_json,raw);
+  assert.equal((await readAtlmSampleSource(c.db,OWNER,PLAN,c.now())).capturedAt,input.first_started_at);
+  assert.deepEqual(value(await mcp(c,"GetSavedEstimate",{planId:PLAN})).serverEstimation,frozen.serverEstimation);
+ }finally{c.close();}
+});
+function beforeStartWrite(c,effect){
+ const prepare=c.db.prepare;let used=false;
+ c.db.prepare=function(sql){
+  const statement=prepare.call(this,sql),bind=statement.bind.bind(statement);
+  statement.bind=(...args)=>{
+   const bound=bind(...args);
+   if(!used&&sql.startsWith("INSERT OR IGNORE INTO command_receipts")&&args[3]==="StartPlan"){
+    const run=bound.run.bind(bound);bound.run=async()=>{used=true;await effect();return run();};
+   }
+   return bound;
+  };return statement;
+ };return()=>{c.db.prepare=prepare;};
+}
+test("first Start rejects changed features durably, with no interval or snapshot; private input is rejected",async()=>{
+ const c=context();let restore;try{
+  await plannedAtlm(c);
+  assert.equal((await command(c,"StartPlan",{planId:PLAN,atlmStartForecast:{}},0)).status,400);
+  restore=beforeStartWrite(c,async()=>ok(c,"RecordAssessment",await atlmAssessment(c),0));
+  const id=crypto.randomUUID(),r=await command(c,"StartPlan",{planId:PLAN},0,id);
+  assert.equal(r.status,409);assert.equal(r.value.error.code,"ASSESSMENT_CONTEXT_CHANGED");restore();
+  assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM work_intervals WHERE plan_id=?").get(PLAN).n,0);
+  assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM plan_estimation_inputs WHERE plan_id=?").get(PLAN).n,0);
+  assert.equal((await command(c,"StartPlan",{planId:PLAN},0,id)).value.error.code,"ASSESSMENT_CONTEXT_CHANGED");
+  await ok(c,"StartPlan",{planId:PLAN},0);
+ }finally{restore?.();c.close();}
+});
+test("first Start rejects changed historical source before timer begins",async()=>{
+ const c=context();let restore;try{
+  const sources=await baselineHistory(c,[1000,5000,9000]);await plannedAtlm(c);
+  restore=beforeStartWrite(c,()=>ok(c,"DeletePlan",{planId:sources[0].planId},2));
+  const r=await command(c,"StartPlan",{planId:PLAN},0);
+  assert.equal(r.status,409);assert.equal(r.value.error.code,"ASSESSMENT_CONTEXT_CHANGED");
+  assert.equal(c.db.sqlite.prepare("SELECT first_started_at FROM plans WHERE plan_id=?").get(PLAN).first_started_at,null);
+ }finally{restore?.();c.close();}
 });

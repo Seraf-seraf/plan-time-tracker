@@ -957,7 +957,7 @@ export async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
   if (!UUID.test(planId || "") || !Number.isSafeInteger(nowMs) || nowMs < 0) throw appError("VALIDATION_ERROR", "Invalid ATLM source arguments.");
   const row = await dbFirst(db, `SELECT p.*,
     i.assessment_sequence AS input_assessment_sequence,i.selection_status,i.requirements_json AS input_requirements_json,
-    i.requirements_digest AS input_requirements_digest,i.captured_receipt_rowid,
+    i.requirements_digest AS input_requirements_digest,i.captured_receipt_rowid,i.forecast_json,
     a.assessment_json,a.recorded_at AS captured_at,t.requirements_json AS current_requirements_json,
     COALESCE(j.generation,0) AS source_generation,COALESCE(j.source_changed_at,p.registered_at) AS source_changed_at,
     EXISTS(SELECT 1 FROM plan_steps cfg WHERE cfg.owner_id=p.owner_id AND cfg.plan_id=p.plan_id) AS tracker_enabled,
@@ -1028,13 +1028,13 @@ export async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
   const sourceAvailableAt = Math.max(row.registered_at, row.finished_at ?? 0, row.source_changed_at,
     ...steps.map(s => s.updatedAt ?? 0));
   if (!safeTime(sourceAvailableAt)) throw appError("INVALID_ESTIMATION_SOURCE", "ATLM source timestamps are invalid.", 500);
-  const originalPrediction = row.assessment_json ? JSON.parse(row.assessment_json).serverEstimation : null;
+  const originalPrediction = row.forecast_json !== null ? JSON.parse(row.forecast_json) : row.assessment_json ? JSON.parse(row.assessment_json).serverEstimation : null;
   const issuedPrediction = reasons.length === 0 && originalPrediction?.status === "AVAILABLE"
     && typeof originalPrediction.modelId === "string" && Number.isSafeInteger(originalPrediction.pointMs) && originalPrediction.pointMs >= 0
     ? { modelId: originalPrediction.modelId, pointMs: originalPrediction.pointMs, actualMs, errorMs: originalPrediction.pointMs - actualMs } : null;
   const source = { planId, issuedPrediction, inputAssessmentSequence: row.input_assessment_sequence ?? null,
     eligibility: reasons.length ? "EXCLUDED" : "ELIGIBLE", reasons, features, actualMs,
-    capturedAt: row.captured_at ?? null, sourceAvailableAt, observedAt: nowMs, sourceGeneration: row.source_generation };
+    capturedAt: row.forecast_json !== null ? row.first_started_at : row.captured_at ?? null, sourceAvailableAt, observedAt: nowMs, sourceGeneration: row.source_generation };
   // Versions reflect source changes, not repeated observations or the current wall clock.
   source.sourceDigest = "sha256:" + await hashCommandInput({ ...source, observedAt: undefined, sourceGeneration: undefined,
     requirements: row.current_requirements_json, intervals: intervals.sort((a, b) => a.startMs - b.startMs || (a.endMs ?? Infinity) - (b.endMs ?? Infinity)),
@@ -1169,8 +1169,9 @@ async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
 
 // Read inputs and source generation together; optimistic retries keep a multi-read
 // calculation from being returned as current after its inputs or plan status changed.
-async function currentForecastInput(db, ownerId, planId) {
-  return dbFirst(db, `SELECT p.status,p.first_started_at,p.deleted_at,t.requirements_json,
+const CURRENT_FORECAST_INPUT_SQL = `SELECT input.*,json_array(status,first_started_at,deleted_at,requirements_json,
+  sequence,dataset_revision,active_model_id,model_status,last_training_diagnostics_json,training_generation,jobs_json) AS snapshot_key
+  FROM (SELECT p.status,p.first_started_at,p.deleted_at,t.requirements_json,
     a.sequence,a.assessment_id,a.revision,a.requirements_digest,a.assessment_json,
     COALESCE(o.dataset_revision,0) AS dataset_revision,o.active_model_id,m.status AS model_status,
     o.last_training_diagnostics_json,o.training_generation,
@@ -1181,7 +1182,9 @@ async function currentForecastInput(db, ownerId, planId) {
       WHERE r.owner_id=p.owner_id AND r.plan_id=p.plan_id AND r.step_id IS NULL)
     LEFT JOIN estimation_owner_state o ON o.owner_id=p.owner_id
     LEFT JOIN estimation_models m ON m.owner_id=o.owner_id AND m.model_id=o.active_model_id
-    WHERE p.owner_id=? AND p.plan_id=?`,ownerId,planId);
+    WHERE p.owner_id=? AND p.plan_id=?) input`;
+async function currentForecastInput(db, ownerId, planId) {
+  return dbFirst(db,CURRENT_FORECAST_INPUT_SQL,ownerId,planId);
 }
 async function currentPlanForecast(db, ownerId, planId, nowMs) {
   for(let attempt=0;attempt<3;attempt++){
@@ -1223,7 +1226,7 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
   const current = await currentPlanForecast(db,ownerId,args.planId,nowMs);
   if(current)return current.result;
   const row = await dbFirst(db, `SELECT p.status,p.first_started_at,p.deleted_at,t.requirements_json AS current_requirements_json,
-      a.assessment_id,a.revision,a.requirements_digest,a.assessment_json
+      a.assessment_id,a.revision,a.requirements_digest,a.assessment_json,i.forecast_json
     FROM plans p JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id AND t.step_id IS NULL
     LEFT JOIN plan_estimation_inputs i ON i.owner_id=p.owner_id AND i.plan_id=p.plan_id
     LEFT JOIN assessment_revisions a ON a.owner_id=p.owner_id AND a.plan_id=p.plan_id AND a.sequence=CASE
@@ -1232,7 +1235,8 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
         AND latest.step_id IS NULL AND json_type(latest.assessment_json,'$.serverEstimation')='object') END
     WHERE p.owner_id=? AND p.plan_id=?`, ownerId, args.planId);
   if (!row) throw appError("PLAN_NOT_FOUND", messageFor("PLAN_NOT_FOUND"), 404);
-  const serverEstimation = row.assessment_json ? JSON.parse(row.assessment_json).serverEstimation ?? null : null;
+  const recordedEstimation = row.assessment_json ? JSON.parse(row.assessment_json).serverEstimation ?? null : null;
+  const serverEstimation = row.forecast_json !== null ? JSON.parse(row.forecast_json) : recordedEstimation;
   const staleReasons = [];
   if (serverEstimation) {
     if (row.deleted_at !== null) staleReasons.push("PLAN_DELETED");
@@ -1286,7 +1290,7 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
     calculationMethod:canRefreshSaved?calculationMethod:null,reason:availabilityDiagnostics?.code ?? null,diagnostics:availabilityDiagnostics};
   return { formatVersion: 1, planId: args.planId, assessmentId: row.assessment_id ?? null, assessmentRevision: row.revision ?? null,
     source: row.first_started_at !== null ? "FROZEN_INPUT" : row.assessment_id ? "LATEST_ASSESSMENT" : "NONE",
-    serverEstimation, diagnostics, forecastAvailability, isStale: staleReasons.length > 0, staleReasons, serverNow: nowMs };
+    serverEstimation, recordedEstimation, diagnostics, forecastAvailability, isStale: staleReasons.length > 0, staleReasons, serverNow: nowMs };
 }
 
 async function getAtlmDataset(db, ownerId, args, nowMs) {
@@ -1805,6 +1809,7 @@ export async function executeCommand(db, identity, envelope, channel, nowMs) {
   }
 
   const payload = { ...envelope.payload };
+  if(Object.hasOwn(payload,"atlmStartForecast"))throw appError("VALIDATION_ERROR","atlmStartForecast — служебный параметр сервера.");
   if (["DeletePlan", "RestorePlan"].includes(envelope.commandType)) {
     assertExactKeys(envelope, new Set(["schemaVersion", "commandId", "commandType", "expectedVersion", "payloadHash", "payload"]), "Конверт команды");
     assertExactKeys(payload, new Set(["planId", "reason"]), "payload");
@@ -1863,12 +1868,43 @@ export async function executeCommand(db, identity, envelope, channel, nowMs) {
 
   }
 
+  let startInput = null;
+  if(envelope.commandType==="StartPlan"){
+    const initial=await currentForecastInput(db,identity.ownerId,planId);
+    if(initial?.status==="PLANNED"&&initial.first_started_at===null&&initial.deleted_at===null){
+      let current;
+      try {current=await currentPlanForecast(db,identity.ownerId,planId,nowMs);}
+      catch(error){
+        if(error.code!=="SOURCE_UNAVAILABLE")throw error;
+        const input=await currentForecastInput(db,identity.ownerId,planId);
+        if(canonical(input)!==canonical(initial))throw appError("ASSESSMENT_CONTEXT_CHANGED",messageFor("ASSESSMENT_CONTEXT_CHANGED"),409);
+        current={input,result:{serverEstimation:{formatVersion:1,metric:"PLAN_ACTIVE",forecastScope:"FULL_FROM_FIRST_START",
+          status:"UNAVAILABLE",pointMs:null,method:{...ATLM_METHOD},modelId:null,modelVersion:null,calculatedAt:nowMs,
+          requirementsDigest:"sha256:"+await hashCommandInput(JSON.parse(input.requirements_json)),
+          sampleCount:0,accuracy:"NOT_VALIDATED",evaluation:null,interval:null,confidence:"UNKNOWN",
+          unavailableReason:"SOURCE_UNAVAILABLE",diagnostics:atlmDiagnostics("SOURCE_UNAVAILABLE")}}};
+      }
+      if(current){
+        startInput=current.input;
+        const assessment=startInput.assessment_json?JSON.parse(startInput.assessment_json):null;
+        payload.atlmStartForecast={assessmentSequence:assessment?.context?.agentTask&&startInput.requirements_digest===current.result.serverEstimation.requirementsDigest?startInput.sequence:null,
+          estimation:current.result.serverEstimation};
+      }
+    }
+  }
   const actorType = channel === "mcp" ? "agent" : "user";
   let receiptInserted = false;
   try {
-    const write = await db.prepare("INSERT OR IGNORE INTO command_receipts (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?)")
+    const startGuard=startInput ? `CASE
+      WHEN NOT EXISTS(SELECT 1 FROM plans WHERE owner_id=? AND plan_id=? AND deleted_at IS NULL) THEN 'PLAN_NOT_FOUND'
+      WHEN (SELECT version FROM plans WHERE owner_id=? AND plan_id=?)<>? THEN 'VERSION_CONFLICT'
+      WHEN NOT EXISTS(SELECT 1 FROM (${CURRENT_FORECAST_INPUT_SQL}) source WHERE source.snapshot_key=?) THEN 'ASSESSMENT_CONTEXT_CHANGED'
+      ELSE 'PENDING' END` : "'PENDING'";
+    const guardArgs=startInput?[identity.ownerId,planId,identity.ownerId,planId,envelope.expectedVersion,
+      identity.ownerId,planId,startInput.snapshot_key]:[];
+    const write = await db.prepare(`INSERT OR IGNORE INTO command_receipts (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,${startGuard},?)`)
       .bind(identity.ownerId, envelope.commandId, hash, envelope.commandType, planId, envelope.expectedVersion == null ? null : envelope.expectedVersion,
-        nowMs, identity.ownerId, actorType, JSON.stringify(payload), nowMs).run();
+        nowMs, identity.ownerId, actorType, JSON.stringify(payload), ...guardArgs, nowMs).run();
     receiptInserted = Number(write.meta?.changes) > 0;
   } catch (error) { throw mapDbError(error); }
   receipt = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=?", identity.ownerId, envelope.commandId);

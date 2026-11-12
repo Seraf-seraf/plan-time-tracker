@@ -115,7 +115,8 @@ for(const [name,paths] of chains)test(`${name} populated migration deletes the o
   c.db.sqlite.exec(sql);
   assert.deepEqual(c.db.sqlite.prepare('PRAGMA foreign_key_check').all(),[]);c.db.sqlite.exec('COMMIT;');
   for(const table of preserved){
-    const expected=table==='estimation_owner_state'?before[table].map(row=>Object.assign(Object.create(Object.getPrototypeOf(row)),row,{last_training_diagnostics_json:null})):before[table];
+    const added=table==='estimation_owner_state'?{last_training_diagnostics_json:null}:table==='plan_estimation_inputs'?{forecast_json:null}:null;
+    const expected=added?before[table].map(row=>Object.assign(Object.create(Object.getPrototypeOf(row)),row,added)):before[table];
     assert.deepEqual(c.db.sqlite.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all(),expected,table);
   }
   assert.deepEqual(c.db.sqlite.prepare('SELECT * FROM assessment_targets ORDER BY owner_id,plan_id,step_id').all(),requirements);
