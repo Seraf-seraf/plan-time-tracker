@@ -10,8 +10,10 @@ const modulePath = process.env.PLAYWRIGHT_MODULE || 'playwright';
 const { chromium } = await import(modulePath.startsWith('/') ? pathToFileURL(modulePath).href : modulePath);
 const c = context();c.advance(Date.now() - c.now());
 if (process.env.SITE_WORKER_MODULE) c.worker = (await import(pathToFileURL(process.env.SITE_WORKER_MODULE).href)).createWorker(() => c.now());
-await running(c, []);
-const otherPlan = crypto.randomUUID();await running(c, [], otherPlan);
+const legacyPlan=crypto.randomUUID(), legacyOther=crypto.randomUUID();
+await running(c,[],legacyPlan);await running(c,[],legacyOther);
+const otherPlan=crypto.randomUUID();
+for(const planId of [PLAN,otherPlan])await ok(c,"CreatePlan",{planId,title:"Forecast planned",planText:"## Этап 1. Проверить\nГотово.",planCreatedAt:{precision:"dateOnly",on:"2026-10-01",timeZone:"UTC"}});
 const capabilities = await call(c, '/api/tracker/capabilities');
 assert.equal(capabilities.status, 200);assert(capabilities.value.assessments.atlm, 'the delivered Worker must advertise ATLM');
 const initial = await call(c, '/api/tracker/estimation-model');
@@ -73,10 +75,10 @@ const settings = () => page.locator('#atlm-model-status');
 const open = async id => {
   await page.locator('[data-view="overview"]').click();
   await page.locator('[data-plan-id="' + id + '"] .plan-open').first().click();
-  await forecast().getByRole('button', { name: 'Обновить прогноз', exact: true }).waitFor();
+  await forecast().waitFor();
   await page.waitForFunction(id => document.querySelector('.atlm-plan-estimate')?.dataset.planId === id && !document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy'), id);
 };
-const refreshPlan = async () => { await forecast().getByRole('button', { name: 'Обновить прогноз', exact: true }).click();await page.waitForFunction(() => !document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy')); };
+const refreshPlan = async () => { await forecast().getByRole('button', { name: 'Обновить данные прогноза', exact: true }).click();await page.waitForFunction(() => !document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy')); };
 const refreshStatus = async () => { await page.locator('[data-view="settings"]').click();await page.waitForFunction(() => !document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy')); };
 const readPoll = async () => {
   const before = statusCount;await page.clock.runFor(800);
@@ -100,7 +102,7 @@ try {
   await refreshStatus();assert.equal(await settings().locator('.atlm-exclusions').evaluate(node => node.open), true, 'status reads preserve the open explanation');
   const manual = () => settings().getByRole('button', { name: 'Начать обучение', exact: true });
   await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
-  assert.equal(startCount, 1);assert.match(await settings().innerText(), /Пока недостаточно пригодных данных/);
+  assert.equal(startCount, 1);assert.match(await settings().innerText(), /Недостаточно данных для расчёта коэффициентов модели/);
   assert.equal((await call(c, '/api/tracker/estimation-model')).value.training.generation, 1, 'real browser request reaches Worker training below two plans');
   await page.screenshot({ path: resolve(artifacts, 'atlm-cold-start.png'), fullPage: true });
 
@@ -109,7 +111,7 @@ try {
   assert.match(await forecast().innerText(), /Полное активное время от первого запуска/);
   assert.match(await forecast().innerText(), /Средняя ошибка прошлых проверок/);
   assert.match(await forecast().innerText(), /не гарантия длительности/);
-  const refresh = forecast().getByRole('button', { name: 'Обновить прогноз', exact: true });
+  const refresh = forecast().getByRole('button', { name: 'Обновить данные прогноза', exact: true });
   await refresh.focus();assert.equal(await refresh.evaluate(node => node === document.activeElement), true);
   const keyboardRequest = page.waitForRequest(request => new URL(request.url()).pathname.endsWith('/' + PLAN + '/estimate'));
   await page.keyboard.press('Enter');await keyboardRequest;
@@ -129,6 +131,8 @@ try {
 
   estimate = { planId: PLAN, isStale: false, serverEstimation: { status: 'UNAVAILABLE', unavailableReason: 'INCOMPLETE_FEATURES', pointMs: null } };
   await refreshPlan();assert.match(await forecast().innerText(), /не хватает исходных сведений/);assert.equal(await forecast().locator('.atlm-point').count(), 0);
+  estimate={planId:PLAN,isStale:false,serverEstimation:{status:'UNAVAILABLE',unavailableReason:'COLLECTING_DATA',pointMs:null},diagnostics:{code:'INSUFFICIENT_DATA',message:'Недостаточно данных: sampleCount=5, p=8, residualDegreesOfFreedom=-3.'}};
+  await refreshPlan();assert.match(await forecast().innerText(),/sampleCount=5, p=8, residualDegreesOfFreedom=-3/);
   estimate = { ...estimateFor(PLAN), isStale: true };await refreshPlan();assert.match(await forecast().innerText(), /Оценка устарела/);assert.match(await forecast().innerText(), /Около 2 мин/);
   estimateError = true;await refreshPlan();assert.match(await forecast().innerText(), /Не удалось загрузить прогноз/);assert.equal(await forecast().locator('.atlm-point').count(), 0);
   estimateError = false;estimate = null;await refreshPlan();assert.match(await forecast().innerText(), /Около 2 мин/);
@@ -139,7 +143,7 @@ try {
   // Release the old response only after a different plan has rendered its own forecast.
   const started = new Promise(resolve => { heldStarted = resolve; });
   const finished = new Promise(resolve => { heldFinished = resolve; });holdPlan = PLAN;
-  await forecast().getByRole('button', { name: 'Обновить прогноз', exact: true }).click();await started;
+  await forecast().getByRole('button', { name: 'Обновить данные прогноза', exact: true }).click();await started;
   await open(otherPlan);assert.match(await forecast().innerText(), /Около 7 мин/);
   releaseHeld();releaseHeld = null;await finished;
   assert.equal(await forecast().getAttribute('data-plan-id'), otherPlan);assert.match(await forecast().innerText(), /Около 7 мин/);assert.doesNotMatch(await forecast().innerText(), /Около 2 мин/);
@@ -211,9 +215,17 @@ try {
     assert.equal(await manual().evaluate(node=>node===document.activeElement),true);
     await page.screenshot({ path: resolve(artifacts, `atlm-settings-${width}.png`), fullPage: true });
   }
+  controlled=false;await open(legacyPlan);assert.equal(await forecast().getByRole('button').count(),0);
+  assert.match(await forecast().innerText(),/status=RUNNING/);
+  await ok(c,'PausePlan',{planId:legacyPlan},1);
+  controlled=false;
+  await open(legacyPlan);assert.equal(await forecast().getByRole('button').count(),0);
+  assert.match(await forecast().innerText(),/status=PAUSED/);
+  controlled=true;
   // Completion removes the working forecast instead of requesting its frozen history.
   const completedStep = c.db.sqlite.prepare('SELECT step_id FROM plan_steps WHERE plan_id=?').get(otherPlan).step_id;
-  await ok(c, 'SetStepStatus', { stepId: completedStep, status: 'DONE' }, 2);
+  await ok(c,'StartPlan',{planId:otherPlan},0);
+  await ok(c, 'SetStepStatus', { stepId: completedStep, status: 'DONE' }, 1);
   await ok(c, 'FinishPlan', { planId: otherPlan }, 1);
   await page.reload();await page.locator('#plans[data-loaded="true"]').waitFor({ state: 'attached' });
   const estimateReads = requests.filter(item => item.path.endsWith('/' + otherPlan + '/estimate')).length;

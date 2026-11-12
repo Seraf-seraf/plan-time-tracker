@@ -2482,7 +2482,8 @@ const UI_ATLM = String.raw`(()=>{
     if(!response.ok){const error=new Error(data?.error?.message||"Не удалось получить ответ сервера.");error.code=data?.error?.code;throw error;}
     if(!data||typeof data!=="object")throw new Error("Сервер вернул неполный ответ. Повторите загрузку.");return data;
   }
-  function reasonText(reason){return reasons[reason]||"Причина: "+String(reason)+".";}
+  function reasonText(reason){return reasons[reason]||"Расчёт недоступен. Причина: "+String(reason)+".";}
+  function diagnosticText(value){return typeof value?.message==="string"?value.message:null;}
   function appendQuality(target,model){
     const evaluation=model.evaluation,n=model.sampleCount,k=evaluation?.caseCount;
     target.append(make("p",Number.isSafeInteger(n)&&n>=1?"В обучении использовано планов: "+n+".":"Размер обучающей выборки не сохранён.","atlm-note"));
@@ -2510,7 +2511,14 @@ const UI_ATLM = String.raw`(()=>{
     if(data.training.status==="REJECTED"&&data.activeModel)statusBody.append(make("p","Предыдущая пригодная модель продолжает давать прогнозы.","atlm-note"));
     if(data.training.progress&&Number.isSafeInteger(data.training.progress.totalCases)&&data.training.progress.totalCases>0)statusBody.append(make("p","Обработано примеров: "+count(data.training.progress.completedCases)+" из "+data.training.progress.totalCases+".","atlm-note"));
     if(data.training.status==="RETRY_WAIT"&&Number.isFinite(data.training.nextAttemptAt))statusBody.append(make("p","Повторная попытка не раньше "+new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short",timeZone:document.querySelector("#tz")?.value||"UTC"}).format(new Date(data.training.nextAttemptAt))+".","atlm-note"));
-    const reason=data.lastError||data.lastReason;if(reason)statusBody.append(make("p",reasonText(reason),data.lastError?"error":"atlm-note"));
+    const reason=data.lastError||data.lastReason;
+    if(data.lastAttempt){
+      statusBody.append(make("p","Последняя завершённая попытка: "+(diagnosticText(data.lastAttempt)||reasonText(data.lastAttempt.code)),"atlm-note"));
+      const facts=data.lastAttempt;
+      statusBody.append(make("p","Снимок попытки: datasetRevision="+String(facts.datasetRevision)+", generation="+String(facts.generation)+". Текущие пригодные планы показаны отдельно выше.","atlm-note"));
+    }
+    if(reason&&(!data.lastAttempt||data.lastAttempt.code!==reason))
+      statusBody.append(make("p",reasonText(reason)+(data.lastAttempt?"":" Подробные параметры последней попытки не сохранены."),data.lastError?"error":"atlm-note"));
     if(lastProcessFailure)statusBody.append(make("p",lastProcessFailure,"error atlm-process-feedback"));
     const method=make("details",null,"atlm-method");method.open=methodOpen;method.append(make("summary","Кто рассчитывает прогноз"),make("p","Агент передаёт исходные сведения о задаче. Сервер трекера обучает модель ATLM и рассчитывает полное активное время плана. Интерфейс показывает сохранённую оценку. Ранний прогноз доступен до пяти проверочных сравнений с пометкой «Качество не подтверждено». Размер обучения и число проверок показаны отдельно. Модель хранится на сервере; новый прогноз использует готовые коэффициенты без повторного обучения.","atlm-note"));statusBody.append(method);updateControls();
   }
@@ -2541,7 +2549,8 @@ const UI_ATLM = String.raw`(()=>{
     if(planRoot.dataset.planStatus==="COMPLETED"||planRoot.dataset.deleted==="true")return;
     const panel=make("section",null,"atlm-panel atlm-plan-estimate");panel.dataset.planId=planId;panel.setAttribute("aria-labelledby","atlm-plan-heading");panel.setAttribute("aria-busy","true");
     const heading=make("h3","Прогноз активного времени");heading.id="atlm-plan-heading";
-    const toolbar=make("div",null,"atlm-heading"),refresh=button("Обновить прогноз",()=>loadPlan(planId));toolbar.append(heading,refresh);
+    const toolbar=make("div",null,"atlm-heading"),refresh=button("Обновить данные прогноза",()=>loadPlan(planId));toolbar.append(heading);
+    if(planRoot.dataset.planStatus==="PLANNED")toolbar.append(refresh);
     const body=make("div","Загружаю сохранённую оценку…");body.setAttribute("role","status");body.setAttribute("aria-live","polite");panel.append(toolbar,body);planRoot.insertBefore(panel,planRoot.children[2]||null);
     refresh.disabled=true;
     try{
@@ -2550,6 +2559,8 @@ const UI_ATLM = String.raw`(()=>{
       if(data.planId!==planId)throw new Error("Ответ относится к другому плану. Повторите загрузку.");
       if(!Object.hasOwn(data,"serverEstimation")||typeof data.isStale!=="boolean")throw new Error("Сервер вернул неполную оценку. Повторите загрузку.");
       body.replaceChildren();const estimate=data.serverEstimation;
+      if(data.forecastAvailability?.canRefreshSaved===false)refresh.remove();
+      if(data.forecastAvailability?.canRefreshSaved===true&&planRoot.dataset.planStatus==="PLANNED"&&!refresh.isConnected)toolbar.append(refresh);
       body.append(make("p","Время рассчитывает сервер трекера по модели ATLM. Агент передаёт исходные сведения о задаче.","atlm-note"));
       if(estimate==null){body.append(make("p","Исходная оценка до запуска не сохранена.","atlm-note"));}
       else if(estimate.status==="AVAILABLE"&&Number.isFinite(estimate.pointMs)&&estimate.pointMs>=0){
@@ -2558,9 +2569,13 @@ const UI_ATLM = String.raw`(()=>{
         if(estimate.modelVersion||estimate.modelId)body.append(make("p","Модель: "+String(estimate.modelVersion||estimate.modelId)+".","atlm-note"));
         appendQuality(body,estimate);
       }else if(estimate.status==="UNAVAILABLE"){
-        body.append(make("p",reasonText(estimate.unavailableReason||"COLLECTING_DATA"),"atlm-note"));
+        body.append(make("p",diagnosticText(data.diagnostics)||diagnosticText(estimate.diagnostics)||reasonText(estimate.unavailableReason||"COLLECTING_DATA"),"atlm-note"));
         body.append(make("p",planRoot.dataset.planStatus==="PLANNED"?"Агент может дополнить исходные сведения до первого запуска плана.":"Исходная оценка зафиксирована при первом запуске плана. Отсутствие прогноза не блокирует работу.","atlm-note"));
       }else throw new Error("Сервер вернул некорректную оценку.");
+      if(estimate==null&&data.diagnostics)body.append(make("p",diagnosticText(data.diagnostics)||reasonText(data.diagnostics.code),"atlm-note"));
+      if(data.forecastAvailability?.reason==="UNSUPPORTED_FORECAST_SCOPE")body.append(make("p",diagnosticText(data.forecastAvailability.diagnostics),"atlm-note"));
+      if(planRoot.dataset.planStatus==="PLANNED"&&data.forecastAvailability?.canRefreshSaved!==false)
+        body.append(make("p","Кнопка перечитывает сохранённые данные. Для нового расчёта агент сохраняет оценку исходных признаков.","atlm-note"));
       if(data.isStale)body.append(make("p","Оценка устарела: изменился объём задачи или исходные данные модели. Сохранённое значение показано для истории.","atlm-stale"));
     }catch(error){if(token!==planToken||planRoot.dataset.planId!==planId||error.name==="AbortError")return;body.replaceChildren(make("p","Не удалось загрузить прогноз. "+error.message,"error"));}
     finally{if(token===planToken&&panel.isConnected){refresh.disabled=false;panel.removeAttribute("aria-busy");}}

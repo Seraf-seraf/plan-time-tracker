@@ -369,3 +369,23 @@ test("forecast diagnostics explain missing inputs and freeze calculation availab
     }
   } finally {c.close();}
 });
+
+test("completed and deleted plans keep history but reject new forecasts",async()=>{
+ const c=context();try{
+  const p=await plannedAtlm(c);const args=await argsFor(c);
+  await completeAtlm(c,p);
+  const completed=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+  assert.equal(completed.forecastAvailability.canCalculate,false);
+  assert.equal(completed.forecastAvailability.canRefreshSaved,false);
+  assert.match(completed.forecastAvailability.diagnostics.message,/status=COMPLETED/);
+  const before=rows(c);
+  assert.equal(value(await mcp(c,"EstimatePlanTime",args)).unavailableReason,"UNSUPPORTED_FORECAST_SCOPE");
+  assert.deepEqual(rows(c),before);
+  await ok(c,"DeletePlan",{planId:PLAN},2);
+  const deleted=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+  assert.equal(deleted.forecastAvailability.reason,"PLAN_DELETED");
+  assert.deepEqual(deleted.serverEstimation,completed.serverEstimation);
+  const refusal=await mcp(c,"EstimatePlanTime",args);
+  assert.equal(refusal.value.result.structuredContent.code,"PLAN_NOT_FOUND");
+ }finally{c.close();}
+});
