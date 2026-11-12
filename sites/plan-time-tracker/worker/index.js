@@ -833,7 +833,7 @@ function messageFor(code) {
     ASSESSMENT_TARGET_CONFLICT: "Серия оценки уже привязана к другой цели.",
     ASSESSMENT_CONTEXT_CHANGED: "Требования изменились после анализа задачи. Перечитайте контекст и пересмотрите оценку.",
     ATLM_FORECAST_SCOPE_CHANGED: "План уже запущен. Новый исходный прогноз сохранять нельзя.",
-    ATLM_MODEL_CHANGED: "Модель изменилась во время расчёта. Получите свежую оценку новой командой.",
+    ATLM_MODEL_CHANGED: "Модель или исходная история изменились во время расчёта. Получите свежую оценку новой командой.",
     DATASET_CHANGED: "Набор обучающих данных изменился. Начните выгрузку заново.",
     ASSESSMENT_SOURCE_NOT_FOUND: "Исторический источник оценки недоступен.",
     PLAN_PAUSED: "План на паузе. Сначала явно возобновите его.",
@@ -1115,6 +1115,40 @@ async function atlmPlanContext(db, ownerId, planId) {
   if (!row || row.deleted_at !== null) throw appError("PLAN_NOT_FOUND", messageFor("PLAN_NOT_FOUND"), 404);
   return { ...row, requirementsDigest: "sha256:" + await hashCommandInput(JSON.parse(row.requirements_json)) };
 }
+const HISTORICAL_MEDIAN_METHOD=Object.freeze({id:"historical-median",version:"1"});
+function canUseHistoricalMedian(prediction){
+  const allowed=new Set(["COLLECTING_DATA","TRAINING_NOT_STARTED","TRAINING_IN_PROGRESS","INSUFFICIENT_DATA","RANK_DEFICIENT",
+    "UNSUPPORTED_CATEGORY","MODEL_INVALIDATED","INSUFFICIENT_INCUMBENT_CASES","INSUFFICIENT_EVALUATION_CASES"]);
+  const diagnostic=prediction.diagnostics;
+  return prediction.status==="UNAVAILABLE" && allowed.has(diagnostic?.code||prediction.unavailableReason)
+    && (!diagnostic?.cause || allowed.has(diagnostic.cause.code));
+}
+async function historicalMedianForecast(db,ownerId,planId,nowMs,throughSequence=null){
+  const snapshot=await dbFirst(db,`WITH selected AS(
+    SELECT s.sequence,s.actual_ms FROM estimation_samples s
+    WHERE s.owner_id=? AND s.plan_id<>? AND s.eligibility='ELIGIBLE' AND ${ATLM_LATEST_SAMPLE_SQL}
+      AND s.source_available_at<=? AND (? IS NULL OR s.sequence<=?) ORDER BY s.sequence LIMIT ?
+  ) SELECT COALESCE((SELECT dataset_revision FROM estimation_owner_state WHERE owner_id=?),0) AS revision,
+    EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND kind='REFRESH_SAMPLE' AND generation>processed_generation) AS dirty,
+    (SELECT json_group_array(json_object('sequence',sequence,'actualMs',actual_ms)) FROM selected) AS rows_json`,
+    ownerId,planId,nowMs,throughSequence,throughSequence,ATLM_MAX_ROWS+1,ownerId,ownerId);
+  if(snapshot.dirty)return null;
+  const rows=JSON.parse(snapshot.rows_json||"[]");
+  if(!rows.length||rows.length>ATLM_MAX_ROWS)return null;
+  if(rows.some(row=>!isNonnegativeSafeInteger(row.actualMs)))throw appError("SOURCE_UNAVAILABLE","История содержит некорректное actualMs.",503);
+  const pointMs=Math.round(median(rows.map(row=>row.actualMs)));
+  if(!isNonnegativeSafeInteger(pointMs))throw appError("SOURCE_UNAVAILABLE","Не удалось рассчитать медиану истории.",503);
+  return {status:"AVAILABLE",pointMs,method:{...HISTORICAL_MEDIAN_METHOD},modelId:null,modelVersion:null,sampleCount:rows.length,
+    accuracy:"HISTORICAL_BASELINE",evaluation:null,unavailableReason:null,diagnostics:null,
+    fallback:{kind:"HISTORICAL_MEDIAN",datasetRevision:snapshot.revision,throughSequence:throughSequence??rows.at(-1).sequence,
+      sourceDigest:"sha256:"+await hashCommandInput(rows),sampleCount:rows.length}};
+}
+async function earlyForecast(db,ownerId,planId,prediction,nowMs){
+  if(!canUseHistoricalMedian(prediction))return prediction;
+  const baseline=await historicalMedianForecast(db,ownerId,planId,nowMs);
+  return baseline?{...baseline,fallback:{...baseline.fallback,atlmUnavailableReason:prediction.unavailableReason,atlmDiagnostics:prediction.diagnostics??null}}:prediction;
+}
+
 async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
   validateAssessmentValue(args, ATLM_TOOL_SCHEMAS.CalculateAtlmEstimate);
   if (!isSnapshotDigest(args.expectedRequirementsDigest)) throw appError("VALIDATION_ERROR", "Invalid requirements digest.");
@@ -1124,13 +1158,13 @@ async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
   let prediction;
   if (target.status !== "PLANNED" || target.first_started_at !== null) prediction = { status: "UNAVAILABLE", unavailableReason: "UNSUPPORTED_FORECAST_SCOPE", diagnostics:atlmDiagnostics("UNSUPPORTED_FORECAST_SCOPE",{status:target.status,firstStartedAt:target.first_started_at}) };
   else if (normalized.missingFields.length) prediction = { status: "UNAVAILABLE", unavailableReason: "INCOMPLETE_FEATURES", missingFields: normalized.missingFields, diagnostics:atlmDiagnostics("INCOMPLETE_FEATURES",{missingFields:normalized.missingFields}) };
-  else prediction = await predictWithActiveModel(db, ownerId, normalized.features, nowMs);
-  return { formatVersion: 1, metric: "PLAN_ACTIVE", forecastScope: "FULL_FROM_FIRST_START", method: { ...ATLM_METHOD },
+  else prediction = await earlyForecast(db,ownerId,args.planId,await predictWithActiveModel(db, ownerId, normalized.features, nowMs),nowMs);
+  return { formatVersion: 1, metric: "PLAN_ACTIVE", forecastScope: "FULL_FROM_FIRST_START", method: prediction.method ?? { ...ATLM_METHOD },
     status: prediction.status, pointMs: prediction.pointMs ?? null, modelId: prediction.modelId ?? null, modelVersion: prediction.modelVersion ?? null,
     requirementsDigest: target.requirementsDigest, featureDigest: "sha256:" + await hashCommandInput(normalized.features), calculatedAt: nowMs,
     sampleCount: prediction.sampleCount ?? 0, evaluation: prediction.evaluation ?? null,
     accuracy: prediction.accuracy ?? "NOT_VALIDATED", interval: null, confidence: "UNKNOWN",
-    unavailableReason: prediction.unavailableReason ?? null, diagnostics:prediction.diagnostics ?? null, ...(prediction.missingFields ? { missingFields: prediction.missingFields } : {}) };
+    unavailableReason: prediction.unavailableReason ?? null, diagnostics:prediction.diagnostics ?? null, ...(prediction.fallback?{fallback:prediction.fallback}:{}), ...(prediction.missingFields ? { missingFields: prediction.missingFields } : {}) };
 }
 
 async function getPlanEstimate(db, ownerId, args, nowMs) {
@@ -1152,6 +1186,10 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
     const digest = "sha256:" + await hashCommandInput(JSON.parse(row.current_requirements_json));
     if (digest !== row.requirements_digest) staleReasons.push("SCOPE_CHANGED");
     else if (row.first_started_at !== null && (await readAtlmSampleSource(db, ownerId, args.planId, nowMs)).reasons.includes("SCOPE_CHANGED")) staleReasons.push("SCOPE_CHANGED");
+    if(serverEstimation.fallback?.kind==="HISTORICAL_MEDIAN"){
+      const current=await historicalMedianForecast(db,ownerId,args.planId,nowMs,serverEstimation.fallback.throughSequence);
+      if(!current||current.fallback.sourceDigest!==serverEstimation.fallback.sourceDigest)staleReasons.push("BASELINE_SOURCE_CHANGED");
+    }
     if (serverEstimation.modelId) {
       const model = await dbFirst(db, `SELECT m.status,
         EXISTS(SELECT 1 FROM json_each(m.manifest_json) item LEFT JOIN estimation_samples s
@@ -1185,9 +1223,14 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
     }else diagnostics=atlmDiagnostics("MISSING_FEATURES");
     if(!diagnostics) diagnostics = atlmStatusDiagnostics(await getEstimationModelStatus(db,ownerId,nowMs));
   }
-  const availabilityDiagnostics = scopeDiagnostics || diagnostics;
-  const forecastAvailability = {planStatus:row.status,deleted:row.deleted_at!==null,canCalculate:canRefreshSaved && !diagnostics,canRefreshSaved,
-    reason:availabilityDiagnostics?.code ?? null,diagnostics:availabilityDiagnostics};
+  let calculationMethod=!diagnostics?{...ATLM_METHOD}:null;
+  if(canRefreshSaved&&diagnostics&&canUseHistoricalMedian({status:"UNAVAILABLE",diagnostics})){
+    const baseline=await historicalMedianForecast(db,ownerId,args.planId,nowMs);
+    if(baseline)calculationMethod={...HISTORICAL_MEDIAN_METHOD};
+  }
+  const availabilityDiagnostics = scopeDiagnostics || (!calculationMethod?diagnostics:null);
+  const forecastAvailability = {planStatus:row.status,deleted:row.deleted_at!==null,canCalculate:canRefreshSaved && !!calculationMethod,canRefreshSaved,
+    calculationMethod:canRefreshSaved?calculationMethod:null,reason:availabilityDiagnostics?.code ?? null,diagnostics:availabilityDiagnostics};
   return { formatVersion: 1, planId: args.planId, assessmentId: row.assessment_id ?? null, assessmentRevision: row.revision ?? null,
     source: row.first_started_at !== null ? "FROZEN_INPUT" : row.assessment_id ? "LATEST_ASSESSMENT" : "NONE",
     serverEstimation, diagnostics, forecastAvailability, isStale: staleReasons.length > 0, staleReasons, serverNow: nowMs };
@@ -1669,7 +1712,9 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
       envelope.expectedVersion == null ? null : envelope.expectedVersion, nowMs, identity.ownerId, actorType, JSON.stringify(payload)];
     let write;
     if (envelope.commandType === "RecordAssessment" && input.predictionRequest) {
-      const modelId = JSON.parse(payload.assessmentJson).serverEstimation?.modelId ?? null;
+      const serverPrediction=JSON.parse(payload.assessmentJson).serverEstimation;
+      const modelId = serverPrediction?.modelId ?? null;
+      const baselineRevision=serverPrediction?.fallback?.kind==="HISTORICAL_MEDIAN"?serverPrediction.fallback.datasetRevision:null;
       write = await db.prepare(`INSERT OR IGNORE INTO command_receipts
         (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,result_json,recorded_at)
         SELECT ?,?,?,?,?,?,?,?,?,?,CASE
@@ -1678,8 +1723,10 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
           WHEN EXISTS(SELECT 1 FROM plans WHERE owner_id=? AND plan_id=? AND first_started_at IS NOT NULL) THEN 'ATLM_FORECAST_SCOPE_CHANGED'
           WHEN ? IS NOT NULL THEN ?
           WHEN ? IS NOT NULL AND NOT EXISTS(${ATLM_CURRENT_MODEL_SQL}) THEN 'ATLM_MODEL_CHANGED'
+          WHEN ? IS NOT NULL AND (COALESCE((SELECT dataset_revision FROM estimation_owner_state WHERE owner_id=?),0)<>?
+            OR EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND kind='REFRESH_SAMPLE' AND generation>processed_generation)) THEN 'ATLM_MODEL_CHANGED'
           ELSE 'PENDING' END,?,?`).bind(...values, identity.ownerId, planId, identity.ownerId, planId,
-            identity.ownerId, planId, predictionPreparationError, predictionPreparationError, modelId, identity.ownerId, modelId, JSON.stringify({ serverNow: nowMs }), nowMs).run();
+            identity.ownerId, planId, predictionPreparationError, predictionPreparationError, modelId, identity.ownerId, modelId, baselineRevision,identity.ownerId,baselineRevision,identity.ownerId, JSON.stringify({ serverNow: nowMs }), nowMs).run();
     } else {
       write = await db.prepare("INSERT OR IGNORE INTO command_receipts (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?)")
         .bind(...values, nowMs).run();
@@ -1921,7 +1968,7 @@ async function readTrackerCapabilities(db,ownerId){return {
       contextRead: { tool: "GetAssessment", omitAssessmentId: true }, expectedRequirementsDigestRequired: true,
       historyMaxTargets: 20, historyMaxLimit: 100, methodologyControlsExecution: false,
       atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v1", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
-        predictionScope: "FULL_FROM_FIRST_START", retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
+        predictionScope: "FULL_FROM_FIRST_START", earlyForecastMethod:{...HISTORICAL_MEDIAN_METHOD}, retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
         calculateTool: "CalculateAtlmEstimate", planEstimateTool: "GetPlanEstimate", modelStatusTool: "GetEstimationModelStatus",
         processTool: "ProcessEstimationTraining", startTrainingTool: "StartEstimationTraining", datasetTool: "GetAtlmDataset", predictionRequest: { method: "ATLM", methodVersion: 1 },
         limits: { maxTrainingSamples: 5000, datasetDefaultLimit: 50, datasetMaxLimit: 100, maxOutcomes: 20, maxChangedContracts: 20, maxVerificationKinds: 5 } },

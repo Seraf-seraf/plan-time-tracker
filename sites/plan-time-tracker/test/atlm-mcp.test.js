@@ -401,7 +401,9 @@ test("saved availability checks actual model categories and successful training 
   const p=await plannedAtlm(c,crypto.randomUUID(),task);
   await ok(c,"RecordAssessment",await atlmAssessment(c,p.planId,task,{predictionRequest:request}),0);
   const before=rows(c), saved=value(await mcp(c,"GetSavedEstimate",{planId:p.planId}));
-  assert.equal(saved.forecastAvailability.canCalculate,false);
+  assert.equal(saved.forecastAvailability.canCalculate,true);
+  assert.equal(saved.forecastAvailability.calculationMethod.id,"historical-median");
+  assert.equal(saved.serverEstimation.method.id,"historical-median");
   assert.equal(saved.diagnostics.code,"UNSUPPORTED_CATEGORY");
   assert.match(saved.diagnostics.message,/workKind/);
   assert.deepEqual(rows(c),before);
@@ -417,5 +419,68 @@ test("saved availability checks actual model categories and successful training 
   const invalid=value(await mcp(c,"GetSavedEstimate",{planId:known.planId}));
   assert.equal(invalid.diagnostics.code,"MODEL_INVALIDATED");
   assert.equal(invalid.forecastAvailability.canCalculate,false);
+ }finally{c.close();}
+});
+
+async function baselineHistory(c,durations){
+ const plans=[];
+ for(let i=0;i<durations.length;i++){
+  const task=atlmTask();task.profile.workKind=["MODIFY_MECHANISM","CREATE_MECHANISM","INVESTIGATE","MIXED"][i%4];task.profile.reuseState=["PARTIAL","ABSENT","READY"][i%3];
+  const p=await plannedAtlm(c,crypto.randomUUID(),task);await completeAtlm(c,p,durations[i]);c.advance(1);plans.push(p);
+ }
+ await process(c);return plans;
+}
+test("early historical median returns real odd/even durations, persists honestly and does not impersonate ATLM",async()=>{
+ const c=context();try{
+  const sources=await baselineHistory(c,[1000,5000,9000]);await plannedAtlm(c);
+  const args=await argsFor(c),before=rows(c);
+  const p=value(await mcp(c,"EstimatePlanTime",args));
+  assert.equal(p.status,"AVAILABLE");assert.equal(p.method.id,"historical-median");assert.equal(p.pointMs,5000);
+  assert.equal(p.modelId,null);assert.equal(p.sampleCount,3);assert.equal(p.accuracy,"HISTORICAL_BASELINE");
+  assert.equal(p.interval,null);assert.equal(p.confidence,"UNKNOWN");assert.equal(p.fallback.atlmUnavailableReason,"COLLECTING_DATA");
+  assert.deepEqual(rows(c),before);
+  const payload=await atlmAssessment(c,PLAN,atlmTask(),{predictionRequest:request});
+  await ok(c,"RecordAssessment",payload,0);
+  const saved=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+  assert.equal(saved.serverEstimation.pointMs,5000);
+  assert.equal(saved.forecastAvailability.canCalculate,true);
+  assert.equal(saved.forecastAvailability.calculationMethod.id,"historical-median");
+  const t=atlmTask();t.profile.workKind="MIXED";t.profile.reuseState="READY";
+  await completeAtlm(c,await plannedAtlm(c,crypto.randomUUID(),t),13000);await process(c);
+  const even=value(await mcp(c,"EstimatePlanTime",args));assert.equal(even.pointMs,7000);
+  assert.equal(value(await mcp(c,"GetSavedEstimate",{planId:PLAN})).serverEstimation.pointMs,5000);
+  await ok(c,"DeletePlan",{planId:sources[0].planId},2);
+  const stale=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+  assert.ok(stale.staleReasons.includes("BASELINE_SOURCE_CHANGED"));assert.equal(stale.serverEstimation.pointMs,5000);
+  await ok(c,"StartPlan",{planId:PLAN},0);
+  assert.equal(value(await mcp(c,"EstimatePlanTime",args)).unavailableReason,"UNSUPPORTED_FORECAST_SCOPE");
+ }finally{c.close();}
+});
+test("baseline source change racing assessment write is receipted and cannot save stale history",async()=>{
+ const c=context();let restore;try{
+  const plans=await baselineHistory(c,[1000,5000,9000]);await plannedAtlm(c);
+  const payload=await atlmAssessment(c,PLAN,atlmTask(),{predictionRequest:request});
+  restore=beforePredictionWrite(c,()=>ok(c,"DeletePlan",{planId:plans[0].planId},2));
+  const r=await command(c,"RecordAssessment",payload,0);
+  assert.equal(r.status,409);assert.equal(r.value.error.code,"ATLM_MODEL_CHANGED");
+  assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM assessment_revisions WHERE assessment_id=?").get(payload.assessmentId).n,0);
+ }finally{restore?.();c.close();}
+});
+test("early median respects owner isolation, genuine zero and incomplete inputs",async()=>{
+ const c=context();try{
+  const sources=await baselineHistory(c,[0]);await plannedAtlm(c);
+  const zero=value(await mcp(c,"EstimatePlanTime",await argsFor(c)));assert.equal(zero.pointMs,0);assert.equal(zero.sampleCount,1);
+  const incomplete=atlmTask();incomplete.outcomes=null;
+  assert.equal(value(await mcp(c,"EstimatePlanTime",await argsFor(c,PLAN,incomplete))).unavailableReason,"INCOMPLETE_FEATURES");
+  const otherPlan=crypto.randomUUID(),other="isolated-other";
+  assert.equal((await command(c,"CreatePlan",{planId:otherPlan,title:"Isolated",planText:"## Этап 1. Test\nГотово.",planCreatedAt:{precision:"dateOnly",on:"2026-01-01",timeZone:"UTC"}},undefined,undefined,other)).status,200);
+  const ctx=value(await mcp(c,"GetTaskAssessment",{planId:otherPlan},other));
+  const isolated=value(await mcp(c,"EstimatePlanTime",{planId:otherPlan,expectedRequirementsDigest:ctx.currentRequirementsDigest,agentTask:atlmTask()},other));
+  assert.equal(isolated.status,"UNAVAILABLE");assert.equal(isolated.pointMs,null);
+  await ok(c,"DeletePlan",{planId:sources[0].planId},2);
+  const dirty=value(await mcp(c,"EstimatePlanTime",await argsFor(c)));
+  assert.equal(dirty.status,"UNAVAILABLE");
+  await process(c);
+  assert.equal(value(await mcp(c,"EstimatePlanTime",await argsFor(c))).pointMs,null);
  }finally{c.close();}
 });
