@@ -110,8 +110,9 @@ for(const [name,paths] of chains)test(`${name} populated migration deletes the o
   const before=Object.fromEntries(preserved.map(t=>[t,c.db.sqlite.prepare(`SELECT * FROM "${t}" ORDER BY rowid`).all()]));
   const requirements=c.db.sqlite.prepare('SELECT * FROM assessment_targets ORDER BY owner_id,plan_id,step_id').all(),steps=c.db.sqlite.prepare('SELECT owner_id,step_id,plan_id,ordinal,title,status,version FROM plan_steps ORDER BY step_id').all();
   c.db.sqlite.exec('BEGIN;');const sql=paths.slice(paths.findIndex(path=>String(path).endsWith('0021_simple_steps.sql'))).map(path=>readFileSync(path,'utf8')).join('\n');
-  if(name==='Sites')await c.db.batch(sql.split('--> statement-breakpoint').filter(s=>s.trim()).map(s=>c.db.prepare(s)));
-  else c.db.sqlite.exec(sql);
+  // A migration contains multiple statements and complete trigger bodies.
+  // A single SQLite/D1 prepared statement would silently skip the remainder.
+  c.db.sqlite.exec(sql);
   assert.deepEqual(c.db.sqlite.prepare('PRAGMA foreign_key_check').all(),[]);c.db.sqlite.exec('COMMIT;');
   for(const table of preserved)assert.deepEqual(c.db.sqlite.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all(),before[table],table);
   assert.deepEqual(c.db.sqlite.prepare('SELECT * FROM assessment_targets ORDER BY owner_id,plan_id,step_id').all(),requirements);
