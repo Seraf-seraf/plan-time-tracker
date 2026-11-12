@@ -564,6 +564,8 @@ test("first Start rejects changed historical source before timer begins",async()
   restore=beforeStartWrite(c,()=>ok(c,"DeletePlan",{planId:sources[0].planId},2));
   const r=await command(c,"StartPlan",{planId:PLAN},0);
   assert.equal(r.status,409);assert.equal(r.value.error.code,"ASSESSMENT_CONTEXT_CHANGED");
+  assert.match(r.value.error.message,/данные прогноза/);assert.match(r.value.error.message,/Таймер не запущен/);
+  assert.doesNotMatch(r.value.error.message,/Перечитайте контекст и пересмотрите оценку/);
   assert.equal(c.db.sqlite.prepare("SELECT first_started_at FROM plans WHERE plan_id=?").get(PLAN).first_started_at,null);
  }finally{restore?.();c.close();}
 });

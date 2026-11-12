@@ -856,7 +856,8 @@ function resultFromReceipt(row, replayed) {
       if (code === "VERSION_CONFLICT" && Number.isSafeInteger(row.result_version) && snapshot.currentVersion === undefined) snapshot.currentVersion = row.result_version;
     }
     const status=["ATLM_FORECAST_SCOPE_CHANGED","ATLM_MODEL_CHANGED","ASSESSMENT_TARGET_CONFLICT","ASSESSMENT_CONTEXT_CHANGED","VERSION_CONFLICT","CHECKPOINTS_INCOMPLETE","IDEMPOTENCY_KEY_REUSED","PLAN_DELETED","PLAN_NOT_DELETED","PLAN_PAUSED","PLAN_COMPLETED","INVALID_TRANSITION"].includes(code)?409:["PLAN_NOT_FOUND","STEP_NOT_FOUND"].includes(code)?404:code==="SOURCE_UNAVAILABLE"?503:code==="RATE_LIMITED"?429:code==="INTERNAL_ERROR"?500:422;
-    throw appError(code, typeof snapshot.message === "string" ? snapshot.message : messageFor(code), status, snapshot);
+    throw appError(code, typeof snapshot.message === "string" ? snapshot.message : row.command_type==="StartPlan"&&code==="ASSESSMENT_CONTEXT_CHANGED"
+      ? "Во время запуска изменились требования, исходные признаки или данные прогноза. Таймер не запущен. Повторите StartPlan новой командой." : messageFor(code), status, snapshot);
   }
   const wasReplayed = replayed || snapshot.replayed === true || snapshot.replayed === 1;
   if (snapshot.replayed !== undefined) snapshot.replayed = snapshot.replayed === true || snapshot.replayed === 1;
