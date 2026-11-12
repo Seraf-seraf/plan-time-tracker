@@ -94,9 +94,9 @@ try {
   // Completed mode must use the selected end date, even if a plan was active that day.
   await page.locator("#planFrom").fill("2026-10-14");await page.locator("#planTo").fill("2026-10-14");
   await page.locator("#planMode").selectOption("finished");
-  await page.waitForFunction(() => document.querySelector("#plansPager .pager-summary")?.textContent === "Нет планов");
+  await page.waitForFunction(() => document.querySelector("#plans > p")?.textContent === "За выбранный период планов нет.");
   assert.equal(await page.locator("#plans>.row").count(), 0);
-  assert.equal(await previous("plans").isDisabled(), true);assert.equal(await next("plans").isDisabled(), true);
+  assert.equal(await page.locator("#plansPager").count(), 0);
   await page.locator("#planTo").fill("2026-10-15");
   await page.locator("#view-plans .plan-period-panel").getByRole("button", { name: "Применить" }).click();
   await page.waitForFunction(() => document.querySelectorAll("#plans>.row").length === 2);
