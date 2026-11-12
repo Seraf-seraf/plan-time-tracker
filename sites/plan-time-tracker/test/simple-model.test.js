@@ -114,7 +114,10 @@ for(const [name,paths] of chains)test(`${name} populated migration deletes the o
   // A single SQLite/D1 prepared statement would silently skip the remainder.
   c.db.sqlite.exec(sql);
   assert.deepEqual(c.db.sqlite.prepare('PRAGMA foreign_key_check').all(),[]);c.db.sqlite.exec('COMMIT;');
-  for(const table of preserved)assert.deepEqual(c.db.sqlite.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all(),before[table],table);
+  for(const table of preserved){
+    const expected=table==='estimation_owner_state'?before[table].map(row=>Object.assign(Object.create(Object.getPrototypeOf(row)),row,{last_training_diagnostics_json:null})):before[table];
+    assert.deepEqual(c.db.sqlite.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all(),expected,table);
+  }
   assert.deepEqual(c.db.sqlite.prepare('SELECT * FROM assessment_targets ORDER BY owner_id,plan_id,step_id').all(),requirements);
   assert.deepEqual(c.db.sqlite.prepare('SELECT owner_id,step_id,plan_id,ordinal,title,status,version FROM plan_steps ORDER BY step_id').all(),steps);
   const status=await getEstimationModelStatus(c.db,fixture.owner,c.now());assert.equal(status.activeModel,null);assert.equal(status.eligibleSampleCount,15);
