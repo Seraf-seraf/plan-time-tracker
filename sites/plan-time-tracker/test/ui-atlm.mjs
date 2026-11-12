@@ -77,7 +77,7 @@ const open = async id => {
   await page.waitForFunction(id => document.querySelector('.atlm-plan-estimate')?.dataset.planId === id && !document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy'), id);
 };
 const refreshPlan = async () => { await forecast().getByRole('button', { name: 'Обновить прогноз', exact: true }).click();await page.waitForFunction(() => !document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy')); };
-const refreshStatus = async () => { await settings().getByRole('button', { name: 'Обновить состояние обучения', exact: true }).click();await page.waitForFunction(() => !document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy')); };
+const refreshStatus = async () => { await page.locator('[data-view="settings"]').click();await page.waitForFunction(() => !document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy')); };
 const readPoll = async () => {
   const before = statusCount;await page.clock.runFor(800);
   // Fetch callbacks run in Node, outside Playwright's controlled browser clock.
@@ -96,8 +96,8 @@ try {
   assert.equal(recovered.value.training.due, false);assert.equal(recovered.value.activeModel, null);
   assert(requests.some(item => item.path === '/api/tracker/estimation-model/process' && item.method === 'POST'), 'opening the real UI must recover pending source refresh');
   await settings().getByText('Почему планы не учитываются', { exact: true }).click();
-  assert.match(await settings().locator('details').innerText(), /До первого запуска не сохранены исходные признаки/);
-  await refreshStatus();assert.equal(await settings().locator('details').evaluate(node => node.open), true, 'status reads preserve the open explanation');
+  assert.match(await settings().locator('.atlm-exclusions').innerText(), /До первого запуска не сохранены исходные признаки/);
+  await refreshStatus();assert.equal(await settings().locator('.atlm-exclusions').evaluate(node => node.open), true, 'status reads preserve the open explanation');
   const manual = () => settings().getByRole('button', { name: 'Начать обучение', exact: true });
   await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
   assert.equal(startCount, 1);assert.match(await settings().innerText(), /Нужно не менее пяти случаев с прогнозами/);
@@ -137,7 +137,7 @@ try {
   assert.match(await settings().innerText(), /Начать обучение можно в любое время/);
   assert.equal(await settings().getByRole('button', { name: 'Начать обучение', exact: true }).isEnabled(), true);
   status = modelState('RUNNING');status.training.progress = { phase: 'EVALUATION', completedCases: 2, totalCases: 7 };await refreshStatus();
-  assert.match(await settings().innerText(), /Модель обучается/);assert.match(await settings().innerText(), /Проверено случаев: 2 из 7/);
+  assert.match(await settings().innerText(), /Модель обучается/);assert.match(await settings().innerText(), /Обработано примеров: 2 из 7/);
   status = modelState('REJECTED');status.lastReason = 'CANDIDATE_MAE_WORSE';await refreshStatus();
   assert.match(await settings().innerText(), /Новая модель не прошла проверку/);assert.match(await settings().innerText(), /Предыдущая пригодная модель продолжает/);
   assert.match(await settings().innerText(), /Средняя ошибка новой модели выше/);
@@ -168,21 +168,22 @@ try {
   advancingQueue = false;status = modelState('IDLE');await refreshStatus();
 
   status = modelState('RETRY_WAIT');status.training.nextAttemptAt = c.now() + 60000;await refreshStatus();
-  await manual().click();await settings().getByText('Запрос принят. Обработка ещё не завершена.', { exact: true }).waitFor();
+  const beforeWaitStart=startCount;await settings().getByRole('button',{name:'Проверить состояние',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('#atlm-model-status').hasAttribute('aria-busy'));
+  assert.equal(startCount,beforeWaitStart,'checking a pending attempt must not start training again');
   assert.doesNotMatch(await settings().innerText(), /Попытка обучения завершена/, 'a delayed retry remains unfinished');
   status = modelState('IDLE');await refreshStatus();
 
   holdStart = true;const startsBefore = startCount;
   await manual().focus();await page.keyboard.press('Enter');
   await settings().getByRole('button', { name: 'Запускаем обучение…', exact: true }).waitFor();
-  assert.equal(await settings().getByRole('button', { name: 'Обновить состояние обучения', exact: true }).isDisabled(), true);
+  assert.equal(await settings().getByRole('button').count(),1);assert.equal(await settings().getByRole('button',{name:'Запускаем обучение…',exact:true}).isDisabled(),true);
   await settings().getByRole('button', { name: 'Запускаем обучение…', exact: true }).evaluate(button => button.click());
   assert.equal(startCount, startsBefore + 1, 'duplicate clicks cannot submit another training request');
   releaseStart();releaseStart = null;await manual().waitFor();assert.equal(await manual().isEnabled(), true);
   startError = true;await manual().click();await settings().getByText(/Не удалось подтвердить запуск обучения/).waitFor();
   assert.doesNotMatch(await settings().innerText(), /Попытка обучения завершена/, 'a new attempt cannot retain the previous success message');
   const failedStarts = startCount;await page.clock.runFor(30000);assert.equal(startCount, failedStarts, 'a lost start response is never retried automatically');
-  startError = false;await refreshStatus();await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
+  startError = false;await settings().getByRole('button',{name:'Проверить состояние',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('#atlm-model-status').hasAttribute('aria-busy'));assert.equal(startCount,failedStarts,'reconciling an unknown start outcome only reads status');await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
   assert.doesNotMatch(await settings().innerText(), /Не удалось подтвердить запуск/);
 
   for (const width of [320, 390, 768, 1440]) {
@@ -192,8 +193,8 @@ try {
     await page.screenshot({ path: resolve(artifacts, `atlm-plan-${width}.png`), fullPage: true });
     await page.locator('[data-view="settings"]').click();await refreshStatus();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `model status overflows at ${width}`);
-    await settings().getByRole('button', { name: 'Обновить состояние обучения', exact: true }).focus();
-    assert.equal(await settings().getByRole('button', { name: 'Обновить состояние обучения', exact: true }).evaluate(node => node === document.activeElement), true);
+    assert.equal(await settings().getByRole('button').count(),1);await manual().focus();
+    assert.equal(await manual().evaluate(node=>node===document.activeElement),true);
     await page.screenshot({ path: resolve(artifacts, `atlm-settings-${width}.png`), fullPage: true });
   }
   // Completion removes the working forecast instead of requesting its frozen history.
