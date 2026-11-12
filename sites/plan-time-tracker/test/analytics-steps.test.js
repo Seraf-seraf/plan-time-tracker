@@ -78,7 +78,13 @@ test('analytics clips local date boundaries and validates owner, plan and snapsh
 test('upgrading a populated current-state database preserves data without inventing past timing', async () => {
   const boundary = migrations.indexOf('0022_step_time.sql'), c = context(boundary);
   try {
-    const [step] = await create(c);await ok(c, 'StartPlan', { planId: PLAN }, 0);await set(c, step, 'RUNNING', 1);c.advance(60000);
+    const [step] = await create(c);
+    // Seed the pre-0022 lifecycle through that schema's receipt triggers. The current
+    // Worker intentionally requires all current migrations before serving StartPlan.
+    c.db.sqlite.prepare("INSERT INTO command_receipts(owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,'StartPlan',?,0,?,?,'agent',?,'PENDING',?)")
+      .run(OWNER,crypto.randomUUID(),'legacy-fixture',PLAN,c.now(),OWNER,JSON.stringify({planId:PLAN}),c.now());
+    assert.equal(c.db.sqlite.prepare('SELECT status FROM plans WHERE plan_id=?').get(PLAN).status,'RUNNING');
+    await set(c, step, 'RUNNING', 1);c.advance(60000);
     const before = rows(c);c.db.sqlite.exec(migration('0022_step_time.sql'));
     const after = rows(c);delete after.step_work_intervals;assert.deepEqual(after, before);
     assert.equal((await call(c, path())).value.steps[0].activeMs, null);
