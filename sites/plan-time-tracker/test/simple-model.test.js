@@ -91,7 +91,8 @@ test('timer transitions reject inconsistent intervals instead of completing or r
  }finally{c.close();}
 });
 function populatedContext(paths){
- const c=context(0);for(const path of paths.slice(0,-1))c.db.sqlite.exec(readFileSync(path,'utf8'));
+ const boundary=paths.findIndex(path=>String(path).endsWith('0021_simple_steps.sql'));
+ assert(boundary>=0);const c=context(0);for(const path of paths.slice(0,boundary))c.db.sqlite.exec(readFileSync(path,'utf8'));
  const triggers=c.db.sqlite.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger'").all();
  for(const t of triggers)c.db.sqlite.exec(`DROP TRIGGER "${t.name}"`);
  c.db.sqlite.exec('PRAGMA foreign_keys=OFF;');
@@ -108,7 +109,7 @@ for(const [name,paths] of chains)test(`${name} populated migration deletes the o
   const preserved=['plans','work_intervals','plan_documents','plan_date_history','assessment_revisions','plan_estimation_inputs','estimation_samples','estimation_models','estimation_owner_state','estimation_jobs'];
   const before=Object.fromEntries(preserved.map(t=>[t,c.db.sqlite.prepare(`SELECT * FROM "${t}" ORDER BY rowid`).all()]));
   const requirements=c.db.sqlite.prepare('SELECT * FROM assessment_targets ORDER BY owner_id,plan_id,step_id').all(),steps=c.db.sqlite.prepare('SELECT owner_id,step_id,plan_id,ordinal,title,status,version FROM plan_steps ORDER BY step_id').all();
-  c.db.sqlite.exec('BEGIN;');const sql=readFileSync(paths.at(-1),'utf8');
+  c.db.sqlite.exec('BEGIN;');const sql=paths.slice(paths.findIndex(path=>String(path).endsWith('0021_simple_steps.sql'))).map(path=>readFileSync(path,'utf8')).join('\n');
   if(name==='Sites')await c.db.batch(sql.split('--> statement-breakpoint').filter(s=>s.trim()).map(s=>c.db.prepare(s)));
   else c.db.sqlite.exec(sql);
   assert.deepEqual(c.db.sqlite.prepare('PRAGMA foreign_key_check').all(),[]);c.db.sqlite.exec('COMMIT;');

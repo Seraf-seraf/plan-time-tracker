@@ -8,7 +8,7 @@ Summary содержит planCount, deletedPlanCount, measuredPlanCount, totalAc
 
 Интервал имеет `{intervalId,startMs,endMs}`; открытый endMs — null. Дата instant имеет value с явным UTC-смещением и timeZone, dateOnly — on и timeZone. Date history сохраняет предыдущую дату, changedAt и причину её исправления.
 
-Steps содержат `{stepId,ordinal,title,content,status,version,createdAt,updatedAt,readyToFinish,assessments}`. Это текущие состояния. Плановые и поэтапные assessment revisions содержат исходную методику, scale, complexity, context, forecast, approach, requirements и needsRevision. Пользовательские ключи в context сохраняются без удаления по совпадению имени.
+Steps содержат `{stepId,ordinal,title,content,status,version,createdAt,updatedAt,readyToFinish,intervals,assessments}`. Это текущие состояния. `steps[].intervals` содержит записанные интервалы этапа `{startMs,endMs}`; открытый endMs — null. Паузы плана исключаются при пересечении с интервалами плана; до начала измерений массив пуст. Плановые и поэтапные assessment revisions содержат исходную методику, scale, complexity, context, forecast, approach, requirements и needsRevision. Пользовательские ключи в context сохраняются без удаления по совпадению имени.
 
 FinishExceptions содержат reason и recordedAt. Старые попытки, результаты и проверки отдельного механизма исполнения, журнал событий и история смены статусов в экспорт не входят. Формат 1 не поддерживается.
 

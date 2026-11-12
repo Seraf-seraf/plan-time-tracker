@@ -1747,11 +1747,45 @@ async function readPlan(db, ownerId, planId, nowMs) {
   return plan;
 }
 
+// Recorded execution windows are independent for each step. Overlapping steps
+// may both be executing; their sum is not the plan's union of active time.
+export async function buildStepAnalytics(db, ownerId, planId, filter, nowMs) {
+  if (!UUID.test(planId || "")) throw appError("VALIDATION_ERROR", "planId должен быть UUID.");
+  const timeZone = checkTimeZone(filter.timeZone || "UTC");
+  const range = inclusiveDateRange(filter.from, filter.to, timeZone);
+  if (typeof filter.asOf === "string" && !/^\d+$/.test(filter.asOf)) throw appError("VALIDATION_ERROR", "Некорректное время отчёта.");
+  const asOf = filter.asOf == null ? nowMs : Number(filter.asOf);
+  if (!Number.isSafeInteger(asOf) || asOf < 0 || asOf > nowMs) throw appError("VALIDATION_ERROR", "Некорректное время отчёта.");
+  const row = await dbFirst(db, `SELECT p.plan_id,
+    (SELECT json_group_array(json_object('stepId',step_id,'ordinal',ordinal,'title',title)) FROM
+      (SELECT step_id,ordinal,title FROM plan_steps WHERE owner_id=?1 AND plan_id=?2 AND created_at<=?3 ORDER BY ordinal)) AS steps,
+    (SELECT json_group_array(json_object('stepId',i.step_id,'startMs',i.start_ms,'endMs',i.end_ms))
+      FROM step_work_intervals i JOIN plan_steps s ON s.owner_id=i.owner_id AND s.step_id=i.step_id
+      WHERE s.owner_id=?1 AND s.plan_id=?2 AND i.start_ms<=?3) AS windows,
+    (SELECT json_group_array(json_object('startMs',start_ms,'endMs',end_ms)) FROM work_intervals
+      WHERE owner_id=?1 AND plan_id=?2 AND start_ms<=?3) AS intervals
+    FROM plans p WHERE p.owner_id=?1 AND p.plan_id=?2 AND p.deleted_at IS NULL`, ownerId, planId, asOf);
+  if (!row) throw appError("PLAN_NOT_FOUND", messageFor("PLAN_NOT_FOUND"), 404);
+  const windows = JSON.parse(row.windows), intervals = JSON.parse(row.intervals);
+  const endMs = Math.min(range.endMs, asOf);
+  const steps = JSON.parse(row.steps).map(step => {
+    const recorded = windows.filter(window => window.stepId === step.stepId);
+    let activeMs = recorded.length ? 0 : null;
+    for (const window of recorded) for (const interval of intervals) {
+      activeMs += Math.max(0, Math.min(window.endMs ?? asOf, interval.endMs ?? asOf, endMs)
+        - Math.max(window.startMs, interval.startMs, range.startMs));
+    }
+    return { ...step, activeMs, firstMeasuredAt: recorded.length ? Math.min(...recorded.map(window => window.startMs)) : null };
+  });
+  return { planId, period: { from: filter.from, to: filter.to, timeZone }, asOf, steps };
+}
+
 // All exported collections share one SQLite read snapshot.
 const EXPORT_SOURCES={
  settings:["owners","timezone"],documents:["plan_documents","plan_id,markdown"],
  plans:["plans","plan_id,title,description,acceptance_criteria,plan_created_precision,plan_created_at_ms,plan_created_on,plan_created_timezone,registered_at,status,deleted_at,first_started_at,finished_at,source_reference"],
  steps:["plan_steps","step_id,plan_id,ordinal,title,content,status,version,created_at,updated_at"],
+ stepIntervals:["step_work_intervals","step_id,start_ms,end_ms"],
  intervals:["work_intervals","interval_id,plan_id,start_ms,end_ms"],dates:["plan_date_history","history_id,plan_id,old_precision,old_at_ms,old_on,old_timezone,changed_at,reason"],
  assessments:["assessment_revisions","assessment_id,revision,plan_id,step_id,recorded_at,requirements_digest,requirements_json,assessment_json"],targets:["assessment_targets","plan_id,step_id,requirements_json"],
  exceptions:["tracker_finish_exceptions","plan_id,reason,created_at"]
@@ -1772,7 +1806,7 @@ async function buildExportReport(db,ownerId,clock){
    completion:{trackerEnabled:steps.length>0,incompleteStepCount:incomplete,readyToFinish:row.deleted_at==null&&incomplete===0},activeMs,calendarMs,pausedMs:calendarMs==null?null:Math.max(0,calendarMs-activeMs),intervals:intervals.map(i=>({intervalId:i.interval_id,startMs:i.start_ms,endMs:i.end_ms})),
    dateHistory:get("dates").sort((a,b)=>a.changed_at-b.changed_at).map(d=>({previous:exportPlanDate(d.old_precision,d.old_at_ms,d.old_on,d.old_timezone),changedAt:d.changed_at,reason:d.reason})),
    assessments:assessments(get("assessments").filter(a=>a.step_id==null)),
-   steps:steps.map(step=>({stepId:step.step_id,ordinal:step.ordinal,title:step.title,content:step.content,status:step.status,version:step.version,createdAt:step.created_at,updatedAt:step.updated_at,readyToFinish:step.status==="DONE",assessments:assessments(get("assessments").filter(a=>a.step_id===step.step_id))})),
+   steps:steps.map(step=>({stepId:step.step_id,ordinal:step.ordinal,title:step.title,content:step.content,status:step.status,version:step.version,createdAt:step.created_at,updatedAt:step.updated_at,readyToFinish:step.status==="DONE",intervals:data.stepIntervals.filter(i=>i.step_id===step.step_id).sort((a,b)=>a.start_ms-b.start_ms).map(i=>({startMs:i.start_ms,endMs:i.end_ms})),assessments:assessments(get("assessments").filter(a=>a.step_id===step.step_id))})),
    finishExceptions:get("exceptions").map(e=>({reason:e.reason,recordedAt:e.created_at}))};
  });
  const included=plans.filter(p=>p.deletedAt==null),measured=included.filter(p=>p.activeMs!=null),union=unionIntervals(included.flatMap(p=>p.intervals.map(i=>[i.startMs,i.endMs??nowMs])));
@@ -1794,7 +1828,7 @@ async function readTrackerCapabilities(db,ownerId){return {
       },
 
  planDocuments:{available:true,format:"markdown",createField:"planText",maxLength:60000,stageHeadings:"## Этап 1. Название",statusTool:"SetStepStatus",statuses:["PENDING","RUNNING","BLOCKED","FAILED","DONE"],preservesOriginal:true},
- steps:{model:"current-state",statusHistory:false,versionRequired:true},
+ steps:{model:"current-state",statusHistory:false,versionRequired:true,timing:{available:true,unit:"ms",startStatus:"RUNNING",excludesPlanPauses:true,historyBackfilled:false}},
  planDeletion:{softDelete:true,deleteTool:"DeletePlan",restoreTool:"RestorePlan",deletedFilter:"deleted",restoreStartsTimer:false},
  parallelPlans:true,planList:{tool:"ListPlans",statuses:PLAN_STATUSES,defaultLimit:50,maxLimit:MAX_PLAN_PAGE_SIZE,order:"registeredAt DESC, planId DESC",deletedDefault:false},
  analytics:{totalActiveMs:"union of owner intervals",activeByDay:"union by local day",sumPlanActiveMs:"sum of per-plan intervals"},exportFormatVersion:2
@@ -1838,7 +1872,7 @@ export async function buildAnalytics(db, ownerId, filter, nowMs) {
     const intervals = await dbAll(db, "SELECT start_ms,end_ms FROM work_intervals WHERE owner_id=? AND plan_id=? ORDER BY start_ms", ownerId, plan.plan_id);
     let clippedTotal = 0;
     for (const interval of intervals) {
-      const end = interval.end_ms == null ? nowMs : interval.end_ms;
+      const end = Math.min(interval.end_ms ?? nowMs, nowMs);
       let cursor = Math.max(interval.start_ms, range.startMs);
       const stop = Math.min(end, range.endMs);
       if (stop <= cursor) continue;
@@ -1847,8 +1881,8 @@ export async function buildAnalytics(db, ownerId, filter, nowMs) {
     }
     sumPlanActiveMs += clippedTotal;
     const fullActive = plan.first_started_at == null || intervals.length === 0 ? null : intervals.reduce((sum, interval) =>
-      sum + Math.max(0, (interval.end_ms == null ? nowMs : interval.end_ms) - interval.start_ms), 0);
-    const finishedInRange = plan.status === "COMPLETED" && plan.finished_at >= range.startMs && plan.finished_at < range.endMs;
+      sum + Math.max(0, Math.min(interval.end_ms ?? nowMs, nowMs) - interval.start_ms), 0);
+    const finishedInRange = plan.status === "COMPLETED" && plan.finished_at <= nowMs && plan.finished_at >= range.startMs && plan.finished_at < range.endMs;
     if (finishedInRange) {
       completedPlans += 1;
       if (fullActive != null) completedDurations.push(fullActive);
@@ -1928,7 +1962,22 @@ button,input,textarea,select{font-size:var(--text-md);line-height:1.5}input:not(
 @media(max-width:600px){.step-status-form{grid-template-columns:minmax(0,1fr)}.tracker-card-toggle{display:grid;grid-template-columns:minmax(0,1fr) auto}.tracker-card-toggle>.tracker-card-status{grid-column:1;grid-row:2}.document-plan .tracker-card{padding:20px 0}.tracker-actions button{min-height:44px}}
 `;
 
-const UI_ANALYTICS_CSS = "";
+const UI_ANALYTICS_CSS = String.raw`
+/* Hallmark · component: stage duration chart · genre: modern-minimal · theme: existing Console Paper · data: measured · v2.0.0 */
+/* Critique: full stage names and exact times stay visible; one accent and a zero baseline make comparison direct. */
+details.analytics-plan{padding:8px 12px}
+.stage-chart-body{padding:8px 0 24px;min-width:0}.stage-chart-body h3{margin:8px 0 12px;font-size:var(--text-lg);font-weight:500}
+.stage-chart-note,.stage-axis,.stage-value,.stage-axis-unit{font-size:var(--text-sm);color:var(--ink-2);font-variant-numeric:tabular-nums}
+.stage-chart-note{max-width:75ch;margin:12px 0;overflow-wrap:anywhere}
+.stage-rows{list-style:none;padding:0;margin:0}.stage-row,.stage-axis-row{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,3fr) 110px;gap:16px;align-items:center}
+.stage-row{padding:16px 0;border-top:1px solid var(--line)}.stage-row:last-child{border-bottom:1px solid var(--line)}
+.stage-title{min-width:0;overflow-wrap:anywhere;font-size:var(--text-sm)}.stage-value,.stage-axis-unit{text-align:right;color:var(--ink);overflow-wrap:anywhere}
+.stage-bar{display:block;width:100%;height:24px;color:var(--blue)}.stage-bar rect{fill:currentColor}.stage-bar line{stroke:var(--line-strong);stroke-width:1;vector-effect:non-scaling-stroke}
+.stage-axis{grid-column:2;display:flex;justify-content:space-between;gap:8px;margin-bottom:8px}.stage-axis span{min-width:0}
+.analytics-plan>summary{cursor:pointer;min-height:44px;gap:16px}.analytics-plan>summary:focus-visible,.stage-chart-body button:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+.analytics-plan>summary:hover .row-title{color:var(--ink-2)}.analytics-plan>summary:active{background:var(--paper-3)}
+@media(max-width:600px){.stage-row,.stage-axis-row{grid-template-columns:minmax(0,1fr) 100px;gap:8px 12px}.stage-title{grid-column:1/-1}.stage-axis{grid-column:1}.stage-value,.stage-axis-unit{grid-column:2}.stage-row{padding:16px 0}.analytics-plan>summary{align-items:flex-start}}
+`;
 
 const UI_PLAN_LISTS_CSS = String.raw`
 #active{display:grid;gap:10px}
@@ -1948,9 +1997,48 @@ const UI_PLAN_LISTS_CSS = String.raw`
 
 // Inserted into the base client so metrics, day bars and disclosures share its accepted response.
 const UI_ANALYTICS = String.raw`
+function stageDuration(ms){
+ if(ms===null)return "Нет данных";
+ const minutes=Math.floor(ms/60000),seconds=Math.floor(ms%60000/1000),millis=ms%1000;
+ return minutes+" мин"+(seconds?" "+seconds+" с":"")+(millis?" "+millis+" мс":"");
+}
+function renderStageChart(body,data){
+ const make=(tag,text,cls)=>{const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e;};
+ if(!Array.isArray(data.steps)||!data.steps.every(s=>typeof s.title==="string"&&(s.activeMs===null||Number.isSafeInteger(s.activeMs)&&s.activeMs>=0)))throw new Error("Не удалось прочитать время этапов.");
+ body.replaceChildren(make("h3","Записанное время этапов"));
+ body.append(make("p","С "+data.period.from+" по "+data.period.to+" включительно, "+data.period.timeZone+".","stage-chart-note"));
+ if(!data.steps.length){body.append(make("p","На момент отчёта в плане нет этапов.","stage-chart-note"));return;}
+ const max=Math.max(60000,...data.steps.map(s=>s.activeMs||0)),axisRow=make("div",null,"stage-axis-row"),axis=make("div",null,"stage-axis");
+ for(const value of [0,max/2,max])axis.append(make("span",new Intl.NumberFormat("ru-RU",{maximumFractionDigits:2}).format(value/60000)));
+ const unit=make("span","Минуты","stage-axis-unit");axisRow.setAttribute("aria-hidden","true");axisRow.append(axis,unit);body.append(axisRow);
+ const rows=make("ol",null,"stage-rows");rows.setAttribute("aria-label","Длительность выполнения этапов");
+ for(const step of data.steps){
+   const row=make("li",null,"stage-row"),title=make("span",step.title,"stage-title"),value=make("span",stageDuration(step.activeMs),"stage-value");
+   const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");svg.setAttribute("viewBox","0 0 1000 24");svg.setAttribute("preserveAspectRatio","none");svg.setAttribute("aria-hidden","true");svg.classList.add("stage-bar");
+   for(const x of [0,500,1000]){const line=document.createElementNS(svg.namespaceURI,"line");line.setAttribute("x1",x);line.setAttribute("x2",x);line.setAttribute("y1",0);line.setAttribute("y2",24);svg.append(line);}
+   if(step.activeMs>0){const rect=document.createElementNS(svg.namespaceURI,"rect");rect.setAttribute("width",1000*step.activeMs/max);rect.setAttribute("height",14);rect.setAttribute("y",5);rect.setAttribute("rx",2);svg.append(rect);}
+   row.append(title,svg,value);rows.append(row);
+ }
+ body.append(rows,make("p","Учитывается время со статусом «Выполняется», за вычетом пауз плана. Параллельные этапы измеряются независимо: их сумма может превышать время плана. Старое время без измерений не восстанавливается; «Нет данных» отличается от измеренных 0 минут.","stage-chart-note"));
+}
 function renderAnalyticsPlanCards(list,report){
  const make=(tag,text,cls)=>{const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e;};
- for(const plan of report.plans){const row=make("article",null,"row"),title=make("span",plan.title,"row-title"),value=make("span",duration(plan.activeInPeriodMs),"analytics-plan-meta");row.append(title,value);list.append(row);}
+ for(const plan of report.plans){
+   const card=make("details",null,"analytics-plan"),summary=make("summary",null,"row"),title=make("span",plan.title,"row-title"),value=make("span",duration(plan.activeInPeriodMs),"analytics-plan-meta"),body=make("div",null,"stage-chart-body");
+   card.dataset.planId=plan.planId;summary.append(title,value);card.append(summary,body);list.append(card);
+   let pending=false,loaded=false;
+   async function load(){
+     if(pending||loaded||!card.isConnected)return;pending=true;body.setAttribute("aria-busy","true");body.replaceChildren(make("p","Загружаем время этапов…","stage-chart-note"));
+     try{
+       const query=new URLSearchParams({from:report.period.from,to:report.period.to,timeZone:report.period.timeZone,asOf:String(report.asOf)});
+       const data=await call("/api/analytics/plans/"+encodeURIComponent(plan.planId)+"/steps?"+query);
+       if(!card.isConnected)return;if(data.planId!==plan.planId)throw new Error("Ответ относится к другому плану.");renderStageChart(body,data);loaded=true;
+     }catch(error){
+       if(!card.isConnected)return;const message=make("p","Не удалось загрузить график. "+error.message,"error"),retry=make("button","Повторить загрузку");message.setAttribute("role","alert");retry.type="button";retry.addEventListener("click",load);body.replaceChildren(message,retry);
+     }finally{pending=false;body.removeAttribute("aria-busy");}
+   }
+   card.addEventListener("toggle",()=>{if(card.open)load();});
+ }
 }
 `;
 
@@ -2905,6 +2993,10 @@ async function apiRoute(request, env, url, channel, now, clock = () => now, ctx)
     if (url.search) throw appError("VALIDATION_ERROR", "Plan estimate accepts only planId.");
     return json(await executeAtlmTool(env.DB, identity.ownerId, "GetPlanEstimate", { planId: decodeURIComponent(atlmPlanMatch[1]) }, now, clock));
   }
+  const stepAnalyticsMatch = url.pathname.match(/^\/api\/analytics\/plans\/([^/]+)\/steps$/);
+  if (request.method === "GET" && stepAnalyticsMatch) return json(await buildStepAnalytics(env.DB, identity.ownerId, decodeURIComponent(stepAnalyticsMatch[1]), {
+    from: url.searchParams.get("from"), to: url.searchParams.get("to"), timeZone: url.searchParams.get("timeZone"), asOf: url.searchParams.get("asOf") ?? undefined,
+  }, now));
   if (request.method === "POST" && url.pathname === "/api/tracker/estimation-history") return json(await readEstimationHistory(env.DB, identity.ownerId, await bodyJson(request), now));
   const trackerReceiptMatch = url.pathname.match(/^\/api\/tracker\/commands\/([^/]+)$/);
   if (request.method === "GET" && trackerReceiptMatch) return json(await readCommandReceipt(env.DB, identity.ownerId, decodeURIComponent(trackerReceiptMatch[1])));
