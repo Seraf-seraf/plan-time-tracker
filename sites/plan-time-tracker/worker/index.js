@@ -1167,8 +1167,61 @@ async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
     unavailableReason: prediction.unavailableReason ?? null, diagnostics:prediction.diagnostics ?? null, ...(prediction.fallback?{fallback:prediction.fallback}:{}), ...(prediction.missingFields ? { missingFields: prediction.missingFields } : {}) };
 }
 
+// Read inputs and source generation together; optimistic retries keep a multi-read
+// calculation from being returned as current after its inputs or plan status changed.
+async function currentForecastInput(db, ownerId, planId) {
+  return dbFirst(db, `SELECT p.status,p.first_started_at,p.deleted_at,t.requirements_json,
+    a.sequence,a.assessment_id,a.revision,a.requirements_digest,a.assessment_json,
+    COALESCE(o.dataset_revision,0) AS dataset_revision,o.active_model_id,m.status AS model_status,
+    o.last_training_diagnostics_json,o.training_generation,
+    (SELECT json_group_array(json_array(j.job_key,j.generation,j.processed_generation,j.status))
+      FROM estimation_jobs j WHERE j.owner_id=p.owner_id) AS jobs_json
+    FROM plans p JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id AND t.step_id IS NULL
+    LEFT JOIN assessment_revisions a ON a.sequence=(SELECT MAX(r.sequence) FROM assessment_revisions r
+      WHERE r.owner_id=p.owner_id AND r.plan_id=p.plan_id AND r.step_id IS NULL)
+    LEFT JOIN estimation_owner_state o ON o.owner_id=p.owner_id
+    LEFT JOIN estimation_models m ON m.owner_id=o.owner_id AND m.model_id=o.active_model_id
+    WHERE p.owner_id=? AND p.plan_id=?`,ownerId,planId);
+}
+async function currentPlanForecast(db, ownerId, planId, nowMs) {
+  for(let attempt=0;attempt<3;attempt++){
+    const input=await currentForecastInput(db,ownerId,planId);
+    if(!input)throw appError("PLAN_NOT_FOUND",messageFor("PLAN_NOT_FOUND"),404);
+    if(input.status!=="PLANNED"||input.first_started_at!==null||input.deleted_at!==null)return null;
+    const assessment=input.assessment_json?JSON.parse(input.assessment_json):null;
+    const digest="sha256:"+await hashCommandInput(JSON.parse(input.requirements_json));
+    let estimation;
+    const unavailable=code=>({formatVersion:1,metric:"PLAN_ACTIVE",forecastScope:"FULL_FROM_FIRST_START",
+      method:{...ATLM_METHOD},status:"UNAVAILABLE",pointMs:null,modelId:null,modelVersion:null,requirementsDigest:digest,
+      calculatedAt:nowMs,sampleCount:0,accuracy:"NOT_VALIDATED",evaluation:null,interval:null,confidence:"UNKNOWN",
+      unavailableReason:code,diagnostics:atlmDiagnostics(code)});
+    if(!assessment?.context?.agentTask)estimation=unavailable("MISSING_FEATURES");
+    else if(input.requirements_digest!==digest)estimation=unavailable("SCOPE_CHANGED");
+    else {
+      try {
+        estimation=await calculateAtlmEstimate(db,ownerId,{planId,agentTask:assessment.context.agentTask,expectedRequirementsDigest:digest},nowMs);
+      }catch(error){
+        if(error.code==="ASSESSMENT_CONTEXT_CHANGED")continue;
+        throw error;
+      }
+    }
+    const after=await currentForecastInput(db,ownerId,planId);
+    if(canonical(input)!==canonical(after))continue;
+    const diagnostics=estimation.fallback?.atlmDiagnostics??estimation.diagnostics;
+    return {input, result:{formatVersion:1,planId,assessmentId:input.assessment_id??null,assessmentRevision:input.revision??null,
+      source:"CURRENT_INPUT",serverEstimation:estimation,recordedEstimation:assessment?.serverEstimation??null,diagnostics,
+      forecastAvailability:{planStatus:input.status,deleted:false,canCalculate:estimation.status==="AVAILABLE",canRefreshSaved:true,
+        calculationMethod:estimation.status==="AVAILABLE"?estimation.method:null,reason:estimation.status==="AVAILABLE"?null:estimation.unavailableReason,
+        diagnostics:estimation.status==="AVAILABLE"?null:diagnostics},
+      isStale:false,staleReasons:[],serverNow:nowMs}};
+  }
+  throw appError("ASSESSMENT_CONTEXT_CHANGED","Исходные признаки, статус плана или история изменились во время расчёта. Повторите обновление прогноза.",409);
+}
+
 async function getPlanEstimate(db, ownerId, args, nowMs) {
   validateAssessmentValue(args, ATLM_TOOL_SCHEMAS.GetPlanEstimate);
+  const current = await currentPlanForecast(db,ownerId,args.planId,nowMs);
+  if(current)return current.result;
   const row = await dbFirst(db, `SELECT p.status,p.first_started_at,p.deleted_at,t.requirements_json AS current_requirements_json,
       a.assessment_id,a.revision,a.requirements_digest,a.assessment_json
     FROM plans p JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id AND t.step_id IS NULL
@@ -2758,6 +2811,7 @@ function atlmDiagnostics(code, facts = {}) {
   const messages = {
     AVAILABLE:"Модель успешно обучена.",
     MISSING_FEATURES:"До первого запуска не сохранены исходные признаки задачи.",
+    SCOPE_CHANGED:"Требования плана изменились. Сохраните актуальную оценку исходных признаков: expectedRequirementsDigest не совпадает.",
     INCOMPLETE_FEATURES:"Не заполнены обязательные параметры: " + (parameters.missingFields?.join(", ") || "missingFields не сохранён") + ".",
     TRAINING_NOT_STARTED:"Обучение модели ещё не выполнялось. Активной модели нет.",
     INSUFFICIENT_DATA:"Недостаточно данных для расчёта коэффициентов модели.",

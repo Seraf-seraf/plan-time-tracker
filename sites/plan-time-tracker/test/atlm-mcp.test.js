@@ -449,11 +449,15 @@ test("early historical median returns real odd/even durations, persists honestly
   await completeAtlm(c,await plannedAtlm(c,crypto.randomUUID(),t),13000);await process(c);
   const even=value(await mcp(c,"EstimatePlanTime",args));assert.equal(even.pointMs,7000);
   const previous=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
-  assert.equal(previous.serverEstimation.pointMs,5000);
-  assert.ok(previous.staleReasons.includes("BASELINE_SOURCE_CHANGED"),"new eligible history must mark the old median stale");
+  assert.equal(previous.serverEstimation.pointMs,7000);
+  assert.equal(previous.recordedEstimation.pointMs,5000);
+  assert.equal(previous.source,"CURRENT_INPUT");assert.equal(previous.isStale,false);
+  assert.deepEqual((await call(c,"/api/tracker/plans/"+PLAN+"/estimate")).value,previous);
   await ok(c,"DeletePlan",{planId:sources[0].planId},2);
   const stale=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
-  assert.ok(stale.staleReasons.includes("BASELINE_SOURCE_CHANGED"));assert.equal(stale.serverEstimation.pointMs,5000);
+  assert.equal(stale.serverEstimation.pointMs,null);assert.equal(stale.recordedEstimation.pointMs,5000);
+  assert.equal(stale.isStale,false);await process(c);
+  assert.equal(value(await mcp(c,"GetSavedEstimate",{planId:PLAN})).serverEstimation.pointMs,9000);
   await ok(c,"StartPlan",{planId:PLAN},0);
   assert.equal(value(await mcp(c,"EstimatePlanTime",args)).unavailableReason,"UNSUPPORTED_FORECAST_SCOPE");
  }finally{c.close();}
@@ -484,5 +488,24 @@ test("early median respects owner isolation, genuine zero and incomplete inputs"
   assert.equal(dirty.status,"UNAVAILABLE");
   await process(c);
   assert.equal(value(await mcp(c,"EstimatePlanTime",await argsFor(c))).pointMs,null);
+ }finally{c.close();}
+});
+
+
+test("current PLANNED reads latest input without predictionRequest and refuses changed requirements",async()=>{
+ const c=context();try{
+  await baselineHistory(c,[1000,5000,9000]);const planned=await plannedAtlm(c);
+  const before=rows(c),fresh=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+  assert.equal(fresh.serverEstimation.pointMs,5000);assert.equal(fresh.recordedEstimation,null);
+  assert.equal(fresh.assessmentId,planned.assessment.assessmentId);assert.deepEqual(rows(c),before);
+  await ok(c,"UpdatePlanMetadata",{planId:PLAN,title:"New scope"},0);
+  const stale=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+  assert.equal(stale.serverEstimation.pointMs,null);assert.equal(stale.serverEstimation.unavailableReason,"SCOPE_CHANGED");
+  assert.match(stale.diagnostics.message,/expectedRequirementsDigest/);
+  const unknown=atlmTask();unknown.outcomes=null;
+  const revised=await atlmAssessment(c,PLAN,unknown);await ok(c,"RecordAssessment",revised,0);
+  const latest=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+  assert.equal(latest.assessmentId,revised.assessmentId);
+  assert.equal(latest.serverEstimation.unavailableReason,"INCOMPLETE_FEATURES");assert.equal(latest.serverEstimation.pointMs,null);
  }finally{c.close();}
 });
