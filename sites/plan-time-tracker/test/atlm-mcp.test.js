@@ -338,3 +338,34 @@ test("active public names expose the reduced model and preserve command receipts
     assert.equal(cap.assessments.recordTool, "SaveTaskAssessment");
   } finally { c.close(); }
 });
+
+test("forecast diagnostics explain missing inputs and freeze calculation availability after first start", async () => {
+  const c=context();
+  try {
+    await ok(c,"CreatePlan",{planId:PLAN,title:"Diagnostics",planText:"## Этап 1. Выполнить\nРезультат.",planCreatedAt:{precision:"dateOnly",on:"2026-01-01",timeZone:"UTC"}});
+    const before=rows(c);
+    const empty=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+    assert.equal(empty.diagnostics.code,"MISSING_FEATURES");
+    assert.match(empty.diagnostics.message,/не сохранены/i);
+    assert.equal(empty.forecastAvailability.canRefreshSaved,true);
+    assert.equal(empty.forecastAvailability.canCalculate,false);
+    assert.deepEqual(rows(c),before);
+    const unknown=atlmTask();unknown.outcomes=null;
+    const preview=value(await mcp(c,"EstimatePlanTime",await argsFor(c,PLAN,unknown)));
+    assert.equal(preview.diagnostics.code,"INCOMPLETE_FEATURES");
+    assert.match(preview.diagnostics.message,/outcomes/);
+    const cold=value(await mcp(c,"EstimatePlanTime",await argsFor(c)));
+    assert.equal(cold.diagnostics.code,"TRAINING_NOT_STARTED");
+    assert.match(cold.diagnostics.message,/обучение/i);
+    await ok(c,"StartPlan",{planId:PLAN},0);
+    for(const [statusName,version] of [["RUNNING",1],["PAUSED",2],["RUNNING",3]]){
+      if(statusName==="PAUSED")await ok(c,"PausePlan",{planId:PLAN},1);
+      else if(version===3)await ok(c,"ResumePlan",{planId:PLAN},2);
+      const saved=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+      assert.equal(saved.forecastAvailability.canCalculate,false);
+      assert.equal(saved.forecastAvailability.canRefreshSaved,false);
+      assert.match(saved.forecastAvailability.diagnostics.message,new RegExp(statusName));
+      assert.equal(saved.forecastAvailability.reason,"UNSUPPORTED_FORECAST_SCOPE");
+    }
+  } finally {c.close();}
+});

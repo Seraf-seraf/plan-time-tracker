@@ -444,3 +444,25 @@ test("a checkpoint from another method restarts evaluation under the current lea
     assert.equal((await predictWithActiveModel(c.db,OWNER,features,c.now())).pointMs,1000);
   }finally{paused?.release();if(pending)await pending.catch(()=>{});c.close();}
 });
+
+test("failed fit retains exact attempt parameters independently of later eligible counts",async()=>{
+ const c=context();try{
+  await completed(c);
+  const t=atlmTask();t.profile.workKind="CREATE_MECHANISM";t.profile.reuseState="ABSENT";
+  t.outcomes.push({id:"second",description:"Second independent result",evidence:"Synthetic requirement"});
+  await completed(c,2000,t);await drain(c);
+  const first=await status(c);
+  assert.equal(first.lastReason,"INSUFFICIENT_DATA");
+  assert.deepEqual(first.lastAttempt.parameters,{sampleCount:2,p:4,residualDegreesOfFreedom:-2});
+  assert.match(first.lastAttempt.message,/sampleCount=2, p=4, residualDegreesOfFreedom=-2/);
+  assert.match(first.lastAttempt.message,/Требуется sampleCount >= p/);
+  const snapshot=JSON.stringify(first.lastAttempt);
+  await completed(c);await drain(c);
+  const next=await status(c);assert.equal(next.eligibleSampleCount,3);
+  assert.equal(JSON.stringify(next.lastAttempt),snapshot);
+  const other=await getEstimationModelStatus(c.db,"unrelated-owner",c.now());
+  assert.equal(other.lastAttempt,null);
+  const preview=await predictWithActiveModel(c.db,OWNER,features,c.now());
+  assert.equal(preview.diagnostics.parameters.p,4);
+ }finally{c.close();}
+});

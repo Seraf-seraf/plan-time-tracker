@@ -1,0 +1,1 @@
+ALTER TABLE estimation_owner_state ADD COLUMN last_training_diagnostics_json TEXT;

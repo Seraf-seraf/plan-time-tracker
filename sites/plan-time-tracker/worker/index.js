@@ -1108,7 +1108,7 @@ const ATLM_CURRENT_MODEL_SQL = `SELECT 1 FROM estimation_models m JOIN estimatio
           AND dirty.kind='REFRESH_SAMPLE' AND dirty.generation>dirty.processed_generation))`;
 
 async function atlmPlanContext(db, ownerId, planId) {
-  const row = await dbFirst(db, `SELECT p.first_started_at,p.deleted_at,t.requirements_json FROM plans p
+  const row = await dbFirst(db, `SELECT p.status,p.first_started_at,p.deleted_at,t.requirements_json FROM plans p
     JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id AND t.step_id IS NULL
     WHERE p.owner_id=? AND p.plan_id=?`, ownerId, planId);
   if (!row || row.deleted_at !== null) throw appError("PLAN_NOT_FOUND", messageFor("PLAN_NOT_FOUND"), 404);
@@ -1121,20 +1121,20 @@ async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
   if (target.requirementsDigest !== args.expectedRequirementsDigest) throw appError("ASSESSMENT_CONTEXT_CHANGED", messageFor("ASSESSMENT_CONTEXT_CHANGED"), 409);
   const normalized = normalizeAgentTaskV1(args.agentTask);
   let prediction;
-  if (target.first_started_at !== null) prediction = { status: "UNAVAILABLE", unavailableReason: "UNSUPPORTED_FORECAST_SCOPE" };
-  else if (normalized.missingFields.length) prediction = { status: "UNAVAILABLE", unavailableReason: "INCOMPLETE_FEATURES", missingFields: normalized.missingFields };
+  if (target.status !== "PLANNED" || target.first_started_at !== null) prediction = { status: "UNAVAILABLE", unavailableReason: "UNSUPPORTED_FORECAST_SCOPE", diagnostics:atlmDiagnostics("UNSUPPORTED_FORECAST_SCOPE",{status:target.status,firstStartedAt:target.first_started_at}) };
+  else if (normalized.missingFields.length) prediction = { status: "UNAVAILABLE", unavailableReason: "INCOMPLETE_FEATURES", missingFields: normalized.missingFields, diagnostics:atlmDiagnostics("INCOMPLETE_FEATURES",{missingFields:normalized.missingFields}) };
   else prediction = await predictWithActiveModel(db, ownerId, normalized.features, nowMs);
   return { formatVersion: 1, metric: "PLAN_ACTIVE", forecastScope: "FULL_FROM_FIRST_START", method: { ...ATLM_METHOD },
     status: prediction.status, pointMs: prediction.pointMs ?? null, modelId: prediction.modelId ?? null, modelVersion: prediction.modelVersion ?? null,
     requirementsDigest: target.requirementsDigest, featureDigest: "sha256:" + await hashCommandInput(normalized.features), calculatedAt: nowMs,
     sampleCount: prediction.sampleCount ?? 0, evaluation: prediction.evaluation ?? null,
     accuracy: prediction.accuracy ?? "NOT_VALIDATED", interval: null, confidence: "UNKNOWN",
-    unavailableReason: prediction.unavailableReason ?? null, ...(prediction.missingFields ? { missingFields: prediction.missingFields } : {}) };
+    unavailableReason: prediction.unavailableReason ?? null, diagnostics:prediction.diagnostics ?? null, ...(prediction.missingFields ? { missingFields: prediction.missingFields } : {}) };
 }
 
 async function getPlanEstimate(db, ownerId, args, nowMs) {
   validateAssessmentValue(args, ATLM_TOOL_SCHEMAS.GetPlanEstimate);
-  const row = await dbFirst(db, `SELECT p.first_started_at,p.deleted_at,t.requirements_json AS current_requirements_json,
+  const row = await dbFirst(db, `SELECT p.status,p.first_started_at,p.deleted_at,t.requirements_json AS current_requirements_json,
       a.assessment_id,a.revision,a.requirements_digest,a.assessment_json
     FROM plans p JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id AND t.step_id IS NULL
     LEFT JOIN plan_estimation_inputs i ON i.owner_id=p.owner_id AND i.plan_id=p.plan_id
@@ -1162,9 +1162,25 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
       if (!model || model.status === "INVALIDATED" || model.source_changed) staleReasons.push("MODEL_INVALIDATED");
     }
   }
+  const canRefreshSaved = row.deleted_at === null && row.status === "PLANNED" && row.first_started_at === null;
+  const scopeDiagnostics = row.deleted_at !== null ? atlmDiagnostics("PLAN_DELETED") : !canRefreshSaved
+    ? atlmDiagnostics("UNSUPPORTED_FORECAST_SCOPE",{status:row.status,firstStartedAt:row.first_started_at}) : null;
+  let diagnostics = null;
+  if(!row.assessment_json) diagnostics = atlmDiagnostics("MISSING_FEATURES");
+  else {
+    const assessment = JSON.parse(row.assessment_json);
+    if(assessment.context?.agentTask){
+      const normalized = normalizeAgentTaskV1(assessment.context.agentTask);
+      if(normalized.missingFields.length) diagnostics = atlmDiagnostics("INCOMPLETE_FEATURES",{missingFields:normalized.missingFields});
+    }
+    if(!diagnostics) diagnostics = atlmStatusDiagnostics(await getEstimationModelStatus(db,ownerId,nowMs));
+  }
+  const availabilityDiagnostics = scopeDiagnostics || diagnostics;
+  const forecastAvailability = {canCalculate:canRefreshSaved && !diagnostics,canRefreshSaved,
+    reason:availabilityDiagnostics?.code ?? null,diagnostics:availabilityDiagnostics};
   return { formatVersion: 1, planId: args.planId, assessmentId: row.assessment_id ?? null, assessmentRevision: row.revision ?? null,
     source: row.first_started_at !== null ? "FROZEN_INPUT" : row.assessment_id ? "LATEST_ASSESSMENT" : "NONE",
-    serverEstimation, isStale: staleReasons.length > 0, staleReasons, serverNow: nowMs };
+    serverEstimation, diagnostics, forecastAvailability, isStale: staleReasons.length > 0, staleReasons, serverNow: nowMs };
 }
 
 async function getAtlmDataset(db, ownerId, args, nowMs) {
@@ -2420,7 +2436,8 @@ const UI_ATLM = String.raw`(()=>{
   const button=(text,action)=>{const el=make("button",text);el.type="button";el.addEventListener("click",action);return el;};
   const minutes=value=>new Intl.NumberFormat("ru-RU",{maximumFractionDigits:1}).format(value/60000)+" мин";
   const count=value=>Number.isSafeInteger(value)&&value>=0?value:0;
-  const reasons={COLLECTING_DATA:"Пока недостаточно проверенных завершённых планов.",INCOMPLETE_FEATURES:"Для прогноза не хватает исходных сведений о задаче.",UNSUPPORTED_CATEGORY:"В накопленной истории ещё нет опыта для этого вида задачи.",MODEL_INVALIDATED:"Исходные данные модели изменились; требуется пересборка.",INVALID_PREDICTION:"Модель не смогла получить корректную оценку.",UNSUPPORTED_FORECAST_SCOPE:"Прогноз доступен для полного плана до первого запуска.",DATASET_LIMIT_REACHED:"Накопленные данные сохранены, но превышен текущий предел обучения.",RANK_DEFICIENT:"Данных пока недостаточно для независимой оценки влияния признаков.",MODEL_CAPACITY_LIMIT:"Превышен ресурсный предел числа коэффициентов модели. История сохранена.",INSUFFICIENT_DATA:"Пока недостаточно пригодных данных для обучения и проверки.",INSUFFICIENT_VALIDATION:"Пока недостаточно случаев для проверки новой модели.",INSUFFICIENT_EVALUATION_CASES:"В последней попытке не хватило проверочных сравнений. Новая версия допускает ранний прогноз с неподтверждённым качеством.",INSUFFICIENT_INCUMBENT_CASES:"Для замены действующей модели недостаточно независимых сравнений с ней.",MEDIAN_BASELINE_BETTER:"Новая модель ошибается сильнее обычной медианы прошлых длительностей.",CANDIDATE_COVERAGE_WORSE:"Новая модель даёт прогноз для меньшей доли задач, чем действующая.",CANDIDATE_MAE_WORSE:"Средняя ошибка новой модели выше, чем у действующей.",SNAPSHOT_INVALIDATED:"Исходные данные изменились; подготовлена новая попытка обучения.",LEASE_EXPIRED:"Предыдущая обработка не завершилась вовремя; её состояние сохранено.",TRAINING_EXECUTION_FAILED:"Во время обучения произошёл технический сбой.",SOURCE_UNAVAILABLE:"Источник данных временно недоступен.",INVALID_ESTIMATION_SOURCE:"Сохранённый источник оценки не удалось проверить.",MISSING_FEATURES:"До первого запуска не сохранены исходные признаки.",INVALID_FEATURES:"Исходные признаки не соответствуют схеме.",PLAN_DELETED:"План удалён.",PLAN_NOT_COMPLETED:"План ещё не завершён.",RESULT_NOT_VERIFIED:"Результат и обязательные проверки не подтверждены.",SCOPE_CHANGED:"После начала изменился объём задачи.",INCOMPLETE_MEASUREMENT:"Нет полного подтверждённого измерения активного времени."};
+  const reasons={COLLECTING_DATA:"Пока недостаточно проверенных завершённых планов.",INCOMPLETE_FEATURES:"Для прогноза не хватает исходных сведений о задаче.",UNSUPPORTED_CATEGORY:"В накопленной истории ещё нет опыта для этого вида задачи.",MODEL_INVALIDATED:"Исходные данные модели изменились; требуется пересборка.",INVALID_PREDICTION:"Модель не смогла получить корректную оценку.",UNSUPPORTED_FORECAST_SCOPE:"Прогноз доступен для полного плана до первого запуска.",DATASET_LIMIT_REACHED:"Накопленные данные сохранены, но превышен текущий предел обучения.",RANK_DEFICIENT:"Данных пока недостаточно для независимой оценки влияния признаков.",MODEL_CAPACITY_LIMIT:"Превышен ресурсный предел числа коэффициентов модели. История сохранена.",INSUFFICIENT_DATA:"Пока недостаточно пригодных данных для обучения и проверки.",INSUFFICIENT_VALIDATION:"Пока недостаточно случаев для проверки новой модели.",INSUFFICIENT_EVALUATION_CASES:"В последней попытке не хватило проверочных сравнений. Новая версия допускает ранний прогноз с неподтверждённым качеством.",INSUFFICIENT_INCUMBENT_CASES:"Для замены действующей модели недостаточно независимых сравнений с ней.",MEDIAN_BASELINE_BETTER:"Новая модель ошибается сильнее обычной медианы прошлых длительностей.",CANDIDATE_COVERAGE_WORSE:"Новая модель даёт прогноз для меньшей доли задач, чем действующая.",CANDIDATE_MAE_WORSE:"Средняя ошибка новой модели выше, чем у действующей.",SNAPSHOT_INVALIDATED:"Исходные данные изменились; подготовлена новая попытка обучения.",LEASE_EXPIRED:"Предыдущая обработка не завершилась вовремя; её состояние сохранено.",TRAINING_EXECUTION_FAILED:"Во время обучения произошёл технический сбой.",SOURCE_UNAVAILABLE:"Источник данных временно недоступен.",INVALID_ESTIMATION_SOURCE:"Сохранённый источник оценки не удалось проверить.",AVAILABLE:"Модель успешно обучена.",
+    MISSING_FEATURES:"До первого запуска не сохранены исходные признаки.",INVALID_FEATURES:"Исходные признаки не соответствуют схеме.",PLAN_DELETED:"План удалён.",PLAN_NOT_COMPLETED:"План ещё не завершён.",RESULT_NOT_VERIFIED:"Результат и обязательные проверки не подтверждены.",SCOPE_CHANGED:"После начала изменился объём задачи.",INCOMPLETE_MEASUREMENT:"Нет полного подтверждённого измерения активного времени."};
   const statuses={IDLE:"Ожидание новых планов",QUEUED:"Обучение в очереди",RUNNING:"Модель обучается",RETRY_WAIT:"Ожидание повторной попытки",COLLECTING_DATA:"Накапливаем опыт",REJECTED:"Новая модель не прошла проверку",FAILED:"Не удалось завершить обучение"};
   const style=make("style");style.textContent=".atlm-panel{min-width:0;overflow-wrap:anywhere}.atlm-panel p{margin:9px 0}.atlm-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.atlm-heading h2,.atlm-heading h3{margin:0}.atlm-panel button{min-height:42px;white-space:normal}.atlm-controls{display:flex;gap:8px;flex-wrap:wrap}.atlm-point{font-size:1.35rem;font-weight:700;color:var(--ink)}.atlm-plan-estimate{margin:18px 0;padding:16px;border:1px solid var(--line-strong,var(--line));border-radius:var(--radius,10px);background:var(--paper-3,var(--panel))}.atlm-note{color:var(--ink-2,var(--muted));font-size:.9rem}.atlm-stale{border-left:3px solid var(--amber,var(--amber));padding-left:10px}@media(max-width:390px){.atlm-heading{align-items:flex-start}.atlm-controls{width:100%}.atlm-controls button{flex:1 1 100%}}";document.head.append(style);
   let supported=false,capabilityPending=false,planToken=0,planAbort=null,statusPending=null,pollTimer=null,pollsLeft=0,autoBudget=8,processPending=false,startPending=false,lastProcessFailure=null,latestStatus=null,recoveryAction=null;
@@ -2654,6 +2671,60 @@ function atlmJobDue(job, nowMs) {
   if (job.status === "RUNNING") return job.lease_until <= nowMs;
   return job.next_attempt_at <= nowMs;
 }
+// Public diagnostics contain only bounded, non-sensitive model facts.
+function atlmDiagnostics(code, facts = {}) {
+  const parameters = {};
+  for (const key of ["sampleCount","p","residualDegreesOfFreedom","rank","limit","status","firstStartedAt"])
+    if (facts[key] !== undefined && facts[key] !== null && (typeof facts[key] === "string" || Number.isFinite(facts[key]))) parameters[key] = facts[key];
+  if (Array.isArray(facts.missingFields)) parameters.missingFields = facts.missingFields.filter(x => typeof x === "string").slice(0, 20);
+  const messages = {
+    MISSING_FEATURES:"До первого запуска не сохранены исходные признаки задачи.",
+    INCOMPLETE_FEATURES:"Не заполнены обязательные параметры: " + (parameters.missingFields?.join(", ") || "missingFields не сохранён") + ".",
+    TRAINING_NOT_STARTED:"Обучение модели ещё не выполнялось. Активной модели нет.",
+    INSUFFICIENT_DATA:"Недостаточно данных для расчёта коэффициентов модели.",
+    RANK_DEFICIENT:"Не удаётся независимо оценить коэффициенты: признаки в обучающей выборке линейно зависимы.",
+    MODEL_CAPACITY_LIMIT:"Число коэффициентов превышает ресурсный предел модели.",
+    DATASET_LIMIT_REACHED:"Число обучающих примеров превышает допустимый предел.",
+    UNSUPPORTED_FORECAST_SCOPE:"Новый расчёт доступен только до первого запуска плана. Показана исходная сохранённая оценка.",
+    PLAN_DELETED:"План удалён. Новый расчёт недоступен.",
+    TRAINING_IN_PROGRESS:"Обучение или обновление исходных данных ещё не завершено.",
+    COLLECTING_DATA:"Активной модели нет. Подробные параметры последней попытки не сохранены.",
+    MODEL_INVALIDATED:"Исходные данные сохранённой модели изменились. Требуется повторное обучение.",
+    UNSUPPORTED_CATEGORY:"В обученной модели отсутствует категория обязательного признака этой задачи.",
+    INVALID_FEATURES:"Исходные параметры не соответствуют схеме задачи.",
+    INVALID_PREDICTION:"Модель не смогла получить конечное неотрицательное время.",
+    INVALID_ARTIFACT:"Сохранённая модель повреждена или не соответствует текущей версии.",
+    NUMERICAL_FAILURE:"При расчёте коэффициентов получены некорректные числовые значения.",
+    SOURCE_UNAVAILABLE:"Источник исходных данных или сохранённой модели недоступен.",
+    TRAINING_EXECUTION_FAILED:"Во время обучения произошёл технический сбой.",
+    LEASE_EXPIRED:"Попытка обучения не завершилась в отведённое время.",
+    MEDIAN_BASELINE_BETTER:"Новая модель ошибается сильнее медианы прошлых длительностей.",
+    CANDIDATE_MAE_WORSE:"Средняя ошибка новой модели выше, чем у действующей.",
+    CANDIDATE_COVERAGE_WORSE:"Новая модель оценивает меньшую долю задач, чем действующая.",
+    INSUFFICIENT_INCUMBENT_CASES:"Недостаточно проверочных сравнений для замены действующей модели.",
+    SNAPSHOT_INVALIDATED:"Исходные данные изменились во время обучения. Требуется новая попытка."
+  };
+  let message = messages[code] || "Расчёт недоступен. Причина: " + String(code) + ".";
+  const values = Object.entries(parameters).filter(([key]) => key !== "missingFields").map(([key,value]) => key+"="+String(value));
+  if(values.length) message += " " + values.join(", ") + ".";
+  if(code === "INSUFFICIENT_DATA" && parameters.p !== undefined) message += " Требуется sampleCount >= p и независимость признаков.";
+  return {code,message,parameters};
+}
+function atlmAttemptDiagnostics(result, snapshot, job, nowMs) {
+  return {...atlmDiagnostics(result.reason || "AVAILABLE", {...result.details,status:undefined}),
+    methodVersion:ATLM_METHOD.version,featureSchemaVersion:ATLM_FEATURE_VERSION,
+    datasetRevision:snapshot?.datasetRevision ?? null,generation:job.generation,completedAt:nowMs};
+}
+function atlmStatusDiagnostics(status) {
+  if(status.activeModel) return null;
+  if(status.training?.pendingRefreshCount || ["QUEUED","RUNNING","RETRY_WAIT"].includes(status.training?.status))
+    return atlmDiagnostics("TRAINING_IN_PROGRESS",{status:status.training.status});
+  if(status.lastAttempt?.code && status.lastAttempt.code === status.lastReason && status.lastAttempt.code !== "AVAILABLE") return status.lastAttempt;
+  if(status.lastReason) return {...atlmDiagnostics(status.lastReason),
+    message:atlmDiagnostics(status.lastReason).message+" Подробные параметры последней попытки не сохранены."};
+  return atlmDiagnostics("TRAINING_NOT_STARTED");
+}
+
 function atlmPublicEvaluation(evaluation) {
   if (!evaluation) return null;
   return { qualityConfirmed: evaluation.qualityConfirmed === true, caseCount: evaluation.paired?.caseCount ?? 0, coverage: evaluation.metrics?.atlm?.forecastRate ?? 0,
@@ -2687,7 +2758,8 @@ export async function predictWithActiveModel(db, ownerId, features, nowMs) {
     sampleCount: 0, evaluation: null, unavailableReason: reason, accuracy: "NOT_VALIDATED" });
   if (!model) {
     const state = await dbFirst(db, "SELECT active_model_id FROM estimation_owner_state WHERE owner_id=?", ownerId);
-    return unavailable(state?.active_model_id ? "MODEL_INVALIDATED" : "COLLECTING_DATA");
+    const reason=state?.active_model_id ? "MODEL_INVALIDATED" : "COLLECTING_DATA";
+    return {...unavailable(reason),diagnostics:reason==="MODEL_INVALIDATED"?atlmDiagnostics(reason):atlmStatusDiagnostics(await getEstimationModelStatus(db,ownerId,nowMs))};
   }
   let prediction;
   try { prediction = predictAtlm(atlmTrainingJson(model.artifact_json), features); }
@@ -2696,7 +2768,7 @@ export async function predictWithActiveModel(db, ownerId, features, nowMs) {
   const metadata = { modelId: model.model_id, modelVersion: model.model_version, sampleCount: model.sample_count,
     evaluation: atlmPublicEvaluation(atlmTrainingJson(model.metrics_json)),
     accuracy: atlmTrainingJson(model.metrics_json)?.qualityConfirmed === true ? "HISTORICALLY_EVALUATED" : "EXPERIMENTAL" };
-  if (prediction.status !== "AVAILABLE") return { ...unavailable(prediction.reason), ...metadata,
+  if (prediction.status !== "AVAILABLE") return { ...unavailable(prediction.reason), ...metadata, diagnostics:atlmDiagnostics(prediction.reason,prediction),
     ...(prediction.missingFields ? { missingFields: prediction.missingFields } : {}) };
   return { status: "AVAILABLE", pointMs: prediction.pointMs, ...metadata, unavailableReason: null };
 }
@@ -2739,7 +2811,7 @@ export async function getEstimationModelStatus(db, ownerId, nowMs) {
       progress: { phase: checkpoint.phase ?? null, completedCases: checkpoint.cases?.length ?? 0,
         totalCases: snapshot.selection?.caseSampleIds?.length ?? 0 } },
     lastError: refreshFailed?.last_error ?? train?.last_error ?? null,
-    lastReason: state?.last_training_reason ?? null };
+    lastReason: state?.last_training_reason ?? null, lastAttempt:atlmTrainingJson(state?.last_training_diagnostics_json) };
 }
 
 function atlmEnqueueTrainingStatements(db, ownerId, nowMs) {
@@ -2866,10 +2938,10 @@ async function atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, resu
   const completedGuard = `${finalGuard} AND EXISTS(SELECT 1 FROM estimation_models WHERE owner_id=? AND model_id=? AND status=?)`;
   const completedValues = [...guardValues, ownerId, snapshot.modelId, result.activate ? "ACTIVE" : "REJECTED"];
   statements.push(db.prepare(`UPDATE estimation_owner_state SET last_attempted_new_sample_count=MAX(last_attempted_new_sample_count,?),
-    last_attempted_new_sample_sequence=MAX(last_attempted_new_sample_sequence,?),last_training_status=?,last_training_reason=?,updated_at=?,
+    last_attempted_new_sample_sequence=MAX(last_attempted_new_sample_sequence,?),last_training_status=?,last_training_reason=?,last_training_diagnostics_json=?,updated_at=?,
     forced_retrain=CASE WHEN dataset_revision=? AND NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END
     WHERE owner_id=? AND ${completedGuard}`)
-    .bind(snapshot.newSampleCount, snapshot.newSampleSequence, result.status, result.reason, nowMs, snapshot.datasetRevision, ownerId, ...completedValues));
+    .bind(snapshot.newSampleCount, snapshot.newSampleSequence, result.status, result.reason, JSON.stringify(atlmAttemptDiagnostics(result,snapshot,job,nowMs)), nowMs, snapshot.datasetRevision, ownerId, ...completedValues));
   // Update the pointer last, after all guards which compare the old pointer.
   if (result.activate) statements.push(db.prepare(`UPDATE estimation_owner_state SET active_model_id=? WHERE owner_id=? AND ${completedGuard}`)
     .bind(snapshot.modelId, ownerId, ...completedValues));
@@ -2917,10 +2989,10 @@ async function atlmRecordFailure(db, ownerId, job, error, nowMs) {
   if (exhausted && job.kind === "TRAIN") statements.push(db.prepare(`UPDATE estimation_owner_state SET
     last_attempted_new_sample_count=MAX(last_attempted_new_sample_count,COALESCE(?,new_sample_count)),
     last_attempted_new_sample_sequence=MAX(last_attempted_new_sample_sequence,COALESCE(?,(SELECT MAX(sequence) FROM estimation_samples WHERE owner_id=estimation_owner_state.owner_id),0)),
-    last_training_status='FAILED',last_training_reason=?,
+    last_training_status='FAILED',last_training_reason=?,last_training_diagnostics_json=?,
     forced_retrain=CASE WHEN NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END,updated_at=?
     WHERE owner_id=? AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?)`)
-    .bind(snapshot?.newSampleCount ?? null, snapshot?.newSampleSequence ?? null, code, nowMs, ownerId, ownerId, job.job_key, job.generation, job.fence, nowMs));
+    .bind(snapshot?.newSampleCount ?? null, snapshot?.newSampleSequence ?? null, code, JSON.stringify(atlmAttemptDiagnostics({reason:code},snapshot,job,nowMs)), nowMs, ownerId, ownerId, job.job_key, job.generation, job.fence, nowMs));
   statements.push(db.prepare(`UPDATE estimation_jobs SET status=?,lease_until=NULL,next_attempt_at=?,last_error=?,updated_at=?
     WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`)
     .bind(exhausted ? "FAILED" : "RETRY_WAIT", nextAttempt, code, nowMs, ownerId, job.job_key, job.generation, job.fence, nowMs));
@@ -2979,13 +3051,13 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
       }
       if (snapshot.resourceLimitReached) {
         await atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint,
-          { activate: false, status: "FAILED", reason: "DATASET_LIMIT_REACHED", artifact: null, evaluation: null }, clock());
+          { activate: false, status: "FAILED", reason: "DATASET_LIMIT_REACHED", details:{sampleCount:snapshot.manifest.length,limit:ATLM_MAX_ROWS}, artifact: null, evaluation: null }, clock());
         continue;
       }
       rows ||= await atlmManifestRows(db, ownerId, snapshot.manifest);
       if (snapshot.selection?.status !== "AVAILABLE") {
         await atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint,
-          { activate: false, status: "COLLECTING_DATA", reason: snapshot.selection?.reason || "INVALID_DATASET", artifact: null, evaluation: null }, clock());
+          { activate: false, status: "COLLECTING_DATA", reason: snapshot.selection?.reason || "INVALID_DATASET", details:{sampleCount:rows.length}, artifact: null, evaluation: null }, clock());
         continue;
       }
       let lostLease = false;
@@ -3020,7 +3092,7 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
       }
       if (rejection) {
         await atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, { activate: false,
-          status: rejection.startsWith("INSUFFICIENT_") ? "COLLECTING_DATA" : "REJECTED", reason: rejection, artifact: null, evaluation }, clock());
+          status: rejection.startsWith("INSUFFICIENT_") ? "COLLECTING_DATA" : "REJECTED", reason: rejection, details:{sampleCount:rows.length}, artifact: null, evaluation }, clock());
         continue;
       }
       checkpoint = { ...checkpoint, phase: "FIT", progressRevision: checkpoint.progressRevision + 1 };
@@ -3028,7 +3100,7 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
       if (!budget()) { await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true }); break; }
       const fitted = await fitAtlm(rows);
       const final = { activate: fitted.status === "AVAILABLE", status: fitted.status === "AVAILABLE" ? "IDLE" : "COLLECTING_DATA",
-        artifact: fitted.artifact || null, reason: fitted.reason || null, evaluation };
+        artifact: fitted.artifact || null, reason: fitted.reason || null, details:{...fitted,sampleCount:rows.length}, evaluation };
       if (!await atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, final, clock())) {
         // A changed source invalidates this snapshot. A new generation captures current facts.
         await atlmSupersedeSnapshot(db, ownerId, job, snapshot, clock());
