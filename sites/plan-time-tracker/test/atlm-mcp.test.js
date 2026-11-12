@@ -280,6 +280,27 @@ test("manual training starts below the automatic threshold and reports insuffici
   } finally { c.close(); }
 });
 
+test("web manual training shares the MCP path below threshold and enforces request boundaries", async () => {
+  const c = context();
+  try {
+    for (let i = 0; i < 2; i++) { const p = await plannedAtlm(c, crypto.randomUUID()); await completeAtlm(c, p); }
+    await process(c);
+    const path = "/api/tracker/estimation-model/start", before = rows(c);
+    assert.equal((await call(c, path, {}, null)).status, 401);
+    assert.equal((await call(c, path, { actualMs: 1 })).status, 400);
+    const forbidden = await c.worker.fetch(new Request("http://localhost" + path, { method: "POST", headers: { "content-type": "application/json", "oai-authenticated-user-id": OWNER, origin: "https://elsewhere.example" }, body: "{}" }), { DB: c.db });
+    assert.equal(forbidden.status, 403);assert.deepEqual(rows(c), before);
+    const first = await call(c, path, {});
+    assert.equal(first.status, 200);assert.equal(first.value.eligibleSampleCount, 2);
+    assert.equal(first.value.training.generation, 1);assert.equal(first.value.activeModel, null);assert.ok(first.value.lastReason);
+    const second = await call(c, path, {});
+    assert.equal(second.status, 200);assert.equal(second.value.training.generation, 2);
+    const isolated = await call(c, path, {}, "other-owner");
+    assert.equal(isolated.status, 200);assert.equal(isolated.value.eligibleSampleCount, 0);
+    assert.equal(value(await mcp(c, "GetTrainingStatus")).training.generation, 2);
+  } finally { c.close(); }
+});
+
 test("MCP exposes one forecasting method, a time report and no BlockStep", async () => {
   const c = context();
   try {

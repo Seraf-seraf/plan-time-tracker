@@ -2261,14 +2261,32 @@ const UI_ATLM = String.raw`(()=>{
   const reasons={COLLECTING_DATA:"Пока недостаточно проверенных завершённых планов.",INCOMPLETE_FEATURES:"Для прогноза не хватает исходных сведений о задаче.",UNSUPPORTED_CATEGORY:"В накопленной истории ещё нет опыта для этого вида задачи.",MODEL_INVALIDATED:"Исходные данные модели изменились; требуется пересборка.",INVALID_PREDICTION:"Модель не смогла получить корректную оценку.",UNSUPPORTED_FORECAST_SCOPE:"Прогноз доступен для полного плана до первого запуска.",DATASET_LIMIT_REACHED:"Накопленные данные сохранены, но превышен текущий предел обучения.",RANK_DEFICIENT:"Данных пока недостаточно для независимой оценки влияния признаков.",INSUFFICIENT_DATA:"Пока недостаточно пригодных данных для обучения и проверки.",INSUFFICIENT_VALIDATION:"Пока недостаточно случаев для проверки новой модели.",INSUFFICIENT_EVALUATION_CASES:"Нужно не менее пяти случаев с прогнозами, проверенными на более поздних результатах.",INSUFFICIENT_INCUMBENT_CASES:"Нужно не менее пяти новых случаев для сравнения с действующей моделью.",MEDIAN_BASELINE_BETTER:"Новая модель ошибается сильнее обычной медианы прошлых длительностей.",CANDIDATE_COVERAGE_WORSE:"Новая модель даёт прогноз для меньшей доли задач, чем действующая.",CANDIDATE_MAE_WORSE:"Средняя ошибка новой модели выше, чем у действующей.",SNAPSHOT_INVALIDATED:"Исходные данные изменились; подготовлена новая попытка обучения.",LEASE_EXPIRED:"Предыдущая обработка не завершилась вовремя; её состояние сохранено.",TRAINING_EXECUTION_FAILED:"Во время обучения произошёл технический сбой.",SOURCE_UNAVAILABLE:"Источник данных временно недоступен.",INVALID_ESTIMATION_SOURCE:"Сохранённый источник оценки не удалось проверить.",MISSING_FEATURES:"До первого запуска не сохранены исходные признаки.",INVALID_FEATURES:"Исходные признаки не соответствуют схеме.",PLAN_DELETED:"План удалён.",PLAN_NOT_COMPLETED:"План ещё не завершён.",RESULT_NOT_VERIFIED:"Результат и обязательные проверки не подтверждены.",SCOPE_CHANGED:"После начала изменился объём задачи.",INCOMPLETE_MEASUREMENT:"Нет полного подтверждённого измерения активного времени."};
   const statuses={IDLE:"Ожидание новых планов",QUEUED:"Обучение в очереди",RUNNING:"Модель обучается",RETRY_WAIT:"Ожидание повторной попытки",COLLECTING_DATA:"Накапливаем опыт",REJECTED:"Новая модель не прошла проверку",FAILED:"Не удалось завершить обучение"};
   const style=make("style");style.textContent=".atlm-panel{min-width:0;overflow-wrap:anywhere}.atlm-panel p{margin:9px 0}.atlm-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.atlm-heading h2,.atlm-heading h3{margin:0}.atlm-panel button{min-height:42px;white-space:normal}.atlm-controls{display:flex;gap:8px;flex-wrap:wrap}.atlm-point{font-size:1.35rem;font-weight:700;color:var(--ink)}.atlm-plan-estimate{margin:18px 0;padding:16px;border:1px solid var(--line-strong,var(--line));border-radius:var(--radius,10px);background:var(--paper-3,var(--panel))}.atlm-note{color:var(--ink-2,var(--muted));font-size:.9rem}.atlm-stale{border-left:3px solid var(--amber,var(--amber));padding-left:10px}@media(max-width:390px){.atlm-heading{align-items:flex-start}.atlm-controls{width:100%}.atlm-controls button{flex:1 1 100%}}";document.head.append(style);
-  let supported=false,capabilityPending=false,planToken=0,planAbort=null,statusPending=null,pollTimer=null,pollsLeft=0,autoBudget=8,processPending=false,lastProcessFailure=null;
+  let supported=false,capabilityPending=false,planToken=0,planAbort=null,statusPending=null,pollTimer=null,pollsLeft=0,autoBudget=8,processPending=false,startPending=false,lastProcessFailure=null;
   const processed=new Set();
   const statusPanel=make("article",null,"panel atlm-panel");statusPanel.id="atlm-model-status";statusPanel.setAttribute("aria-labelledby","atlm-model-heading");
   const statusHeading=make("h2","Накопление опыта");statusHeading.id="atlm-model-heading";
   const statusBody=make("div");statusBody.setAttribute("role","status");statusBody.setAttribute("aria-live","polite");
   const refreshStatus=button("Обновить состояние обучения",()=>loadStatus(false));
+  const startTraining=button("Начать обучение",requestTraining);
   const resume=button("Продолжить обработку",()=>{autoBudget=8;processed.clear();lastProcessFailure=null;pollsLeft=3;loadStatus(true);});resume.hidden=true;
-  const controls=make("div",null,"atlm-controls");controls.append(refreshStatus,resume);statusPanel.append(statusHeading,statusBody,controls);
+  const controls=make("div",null,"atlm-controls");controls.append(startTraining,refreshStatus,resume);statusPanel.append(statusHeading,statusBody,controls);
+  function updateControls(){startTraining.disabled=startPending||processPending||statusPending!==null;refreshStatus.disabled=startPending||statusPending!==null;resume.disabled=startPending||processPending;}
+  async function requestTraining(){
+    if(startPending||processPending||statusPending)return;
+    statusBody.querySelectorAll(".atlm-start-feedback,.atlm-process-feedback").forEach(message=>message.remove());lastProcessFailure=null;
+    startPending=true;clearTimeout(pollTimer);statusPanel.setAttribute("aria-busy","true");updateControls();
+    startTraining.textContent="Запускаем обучение…";
+    try{
+      const data=await api("/api/tracker/estimation-model/start",{method:"POST",body:"{}"});
+      lastProcessFailure=null;processed.clear();autoBudget=8;pollsLeft=3;showStatus(data);
+      const pending=data.training.due||["QUEUED","RUNNING","RETRY_WAIT"].includes(data.training.status);
+      statusBody.append(make("p",pending?"Запрос принят. Обработка ещё не завершена.":"Попытка обучения завершена. Результат показан выше.","atlm-note atlm-start-feedback"));
+      schedulePoll();
+    }catch(error){
+      lastProcessFailure="Не удалось подтвердить запуск обучения. "+error.message+" Обновите состояние перед повторным запуском.";
+      statusBody.append(make("p",lastProcessFailure,"error atlm-start-feedback"));
+    }finally{startPending=false;startTraining.textContent="Начать обучение";statusPanel.removeAttribute("aria-busy");updateControls();}
+  }
   async function api(path,options={}){
     const response=await fetch(path,{cache:"no-store",...options,headers:{"content-type":"application/json",...options.headers}});
     const data=await response.json().catch(()=>null);
@@ -2280,7 +2298,8 @@ const UI_ATLM = String.raw`(()=>{
     if(!data.training||!statuses[data.training.status]||![data.newPlansSinceTraining,data.eligibleSampleCount,data.excludedSampleCount].every(value=>Number.isSafeInteger(value)&&value>=0)||!Number.isSafeInteger(data.retrainEveryNewPlans)||data.retrainEveryNewPlans<1||typeof data.training.due!=="boolean"||!Object.hasOwn(data,"activeModel")||(data.activeModel!==null&&(!Number.isSafeInteger(data.activeModel.sampleCount)||data.activeModel.sampleCount<1)))throw new Error("Не удалось прочитать состояние обучения.");
     const exclusionsOpen=statusBody.querySelector("details")?.open===true;
     statusBody.replaceChildren();statusBody.append(make("p",statuses[data.training.status]));
-    statusBody.append(make("p",count(data.newPlansSinceTraining)+" новых пригодных планов из "+data.retrainEveryNewPlans+" до следующей попытки обучения."));
+    statusBody.append(make("p","Новых пригодных планов: "+count(data.newPlansSinceTraining)+". Начать обучение можно в любое время."));
+    statusBody.append(make("p","Автоматическое обучение запускается после "+data.retrainEveryNewPlans+" новых пригодных планов. Для ручного запуска ждать не нужно.","atlm-note"));
     statusBody.append(make("p","Всего пригодных планов: "+count(data.eligibleSampleCount)+". Исключено: "+count(data.excludedSampleCount)+".","atlm-note"));
     if(Array.isArray(data.exclusionReasons)&&data.exclusionReasons.length){
       const disclosure=make("details"),list=make("ul");disclosure.open=exclusionsOpen;disclosure.append(make("summary","Почему планы не учитываются"));
@@ -2292,28 +2311,28 @@ const UI_ATLM = String.raw`(()=>{
     if(data.training.progress&&Number.isSafeInteger(data.training.progress.totalCases)&&data.training.progress.totalCases>0)statusBody.append(make("p","Проверено случаев: "+count(data.training.progress.completedCases)+" из "+data.training.progress.totalCases+".","atlm-note"));
     if(data.training.status==="RETRY_WAIT"&&Number.isFinite(data.training.nextAttemptAt))statusBody.append(make("p","Повторная попытка не раньше "+new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short",timeZone:document.querySelector("#tz")?.value||"UTC"}).format(new Date(data.training.nextAttemptAt))+".","atlm-note"));
     const reason=data.lastError||data.lastReason;if(reason)statusBody.append(make("p",reasonText(reason),data.lastError?"error":"atlm-note"));
-    if(lastProcessFailure)statusBody.append(make("p",lastProcessFailure,"error"));
-    resume.hidden=!data.training.due||(autoBudget>0&&!processed.has(queueKey(data)));resume.disabled=processPending;
+    if(lastProcessFailure)statusBody.append(make("p",lastProcessFailure,"error atlm-process-feedback"));
+    resume.hidden=!data.training.due||(autoBudget>0&&!processed.has(queueKey(data)));updateControls();
   }
   function queueKey(data){const t=data.training;return JSON.stringify([data.datasetRevision,t.generation,t.progressRevision,t.pendingRefreshCount,t.nextAttemptAt]);}
   function schedulePoll(){clearTimeout(pollTimer);if(pollsLeft>0){pollsLeft--;pollTimer=setTimeout(()=>loadStatus(true),750);}}
   function loadStatus(allowProcess=true){
-    if(!supported)return Promise.resolve();if(statusPending)return statusPending;
+    if(!supported||startPending)return Promise.resolve();if(statusPending)return statusPending;
     statusPanel.setAttribute("aria-busy","true");refreshStatus.disabled=true;
     statusPending=(async()=>{
       try{
         const data=await api("/api/tracker/estimation-model");showStatus(data);
         const key=queueKey(data);
         if(allowProcess&&data.training.due&&!processPending&&autoBudget>0&&!processed.has(key)){
-          processed.add(key);autoBudget--;processPending=true;resume.disabled=true;
+          processed.add(key);autoBudget--;processPending=true;updateControls();
           try{await api("/api/tracker/estimation-model/process",{method:"POST",body:"{}"});lastProcessFailure=null;pollsLeft=Math.max(pollsLeft,3);}
           catch(error){lastProcessFailure="Не удалось продолжить обучение. "+error.message;statusBody.append(make("p",lastProcessFailure,"error"));resume.hidden=false;}
-          finally{processPending=false;resume.disabled=false;}
+          finally{processPending=false;updateControls();}
           schedulePoll();
         }else if(allowProcess&&(data.training.status==="RUNNING"||data.training.due))schedulePoll();
       }catch(error){statusBody.replaceChildren(make("p","Не удалось загрузить состояние обучения. "+error.message,"error"));resume.hidden=true;}
-      finally{statusPending=null;refreshStatus.disabled=false;statusPanel.removeAttribute("aria-busy");}
-    })();return statusPending;
+      finally{statusPending=null;updateControls();statusPanel.removeAttribute("aria-busy");}
+    })();updateControls();return statusPending;
   }
   async function loadPlan(planId){
     if(!supported||!planId||planRoot.dataset.planId!==planId)return;
@@ -2875,7 +2894,7 @@ async function apiRoute(request, env, url, channel, now, clock = () => now, ctx)
 
   if (request.method === "GET" && url.pathname === "/api/tracker/capabilities") return json(publicToolReferences(await readTrackerCapabilities(env.DB, identity.ownerId)));
   if (request.method === "POST" && url.pathname === "/api/tracker/assessment") return json(await readAssessment(env.DB, identity.ownerId, await bodyJson(request), now));
-  const atlmPaths = { "/api/tracker/atlm-estimate": "CalculateAtlmEstimate", "/api/tracker/atlm-dataset": "GetAtlmDataset", "/api/tracker/estimation-model/process": "ProcessEstimationTraining" };
+  const atlmPaths = { "/api/tracker/atlm-estimate": "CalculateAtlmEstimate", "/api/tracker/atlm-dataset": "GetAtlmDataset", "/api/tracker/estimation-model/process": "ProcessEstimationTraining", "/api/tracker/estimation-model/start": "StartEstimationTraining" };
   if (request.method === "POST" && atlmPaths[url.pathname]) return json(await executeAtlmTool(env.DB, identity.ownerId, atlmPaths[url.pathname], await bodyJson(request), now, clock));
   if (request.method === "GET" && url.pathname === "/api/tracker/estimation-model") {
     if (url.search) throw appError("VALIDATION_ERROR", "Model status accepts no query parameters.");

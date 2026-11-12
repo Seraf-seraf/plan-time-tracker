@@ -28,7 +28,7 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
 page.setDefaultTimeout(10000);await page.clock.install({ time: c.now() });
 const requests = [], errors = [];let controlled = false, statusError = false, estimateError = false, processError = false;
 let status = structuredClone(initial.value), estimate, holdPlan = null, heldStarted, releaseHeld, heldFinished;
-let processCount = 0, statusCount = 0, advancingQueue = false;
+let processCount = 0, statusCount = 0, advancingQueue = false, startCount = 0, startError = false, holdStart = false, releaseStart;
 page.on('pageerror', error => errors.push(error.message));
 const json = (route, value, code = 200) => route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify(value) });
 const estimateFor = id => ({ planId: id, isStale: false, serverEstimation: { formatVersion: 1, status: 'AVAILABLE', pointMs: id === PLAN ? 120000 : 420000, metric: 'PLAN_ACTIVE', forecastScope: 'FULL_FROM_FIRST_START', method: { id: 'atlm', version: 'agent-v1' }, modelVersion: 'agent-v1/model-7', modelId: 'model-7', evaluation: { caseCount: 6, maeMs: 30000 }, interval: null, confidence: 'UNKNOWN' } });
@@ -45,6 +45,14 @@ await page.route('**/*', async route => {
     if (processError) return json(route, { error: { message: 'Training service unavailable' } }, 503);
     if (advancingQueue) status.training.progressRevision++;
     return json(route, { processed: true });
+  }
+  if (url.pathname === '/api/tracker/estimation-model/start') {
+    startCount++;assert.equal(request.method(), 'POST');assert.deepEqual(request.postDataJSON(), {});
+    if (controlled) {
+      if (holdStart) { holdStart = false;await new Promise(resolve => { releaseStart = resolve; }); }
+      if (startError) return route.abort('failed');
+      return json(route, status);
+    }
   }
   const match = url.pathname.match(/^\/api\/tracker\/plans\/([^/]+)\/estimate$/);
   if (match && controlled) {
@@ -90,6 +98,10 @@ try {
   await settings().getByText('Почему планы не учитываются', { exact: true }).click();
   assert.match(await settings().locator('details').innerText(), /До первого запуска не сохранены исходные признаки/);
   await refreshStatus();assert.equal(await settings().locator('details').evaluate(node => node.open), true, 'status reads preserve the open explanation');
+  const manual = () => settings().getByRole('button', { name: 'Начать обучение', exact: true });
+  await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
+  assert.equal(startCount, 1);assert.match(await settings().innerText(), /Нужно не менее пяти случаев с прогнозами/);
+  assert.equal((await call(c, '/api/tracker/estimation-model')).value.training.generation, 1, 'real browser request reaches Worker training below five plans');
   await page.screenshot({ path: resolve(artifacts, 'atlm-cold-start.png'), fullPage: true });
 
   controlled = true;status = modelState('COLLECTING_DATA');await open(PLAN);
@@ -121,7 +133,9 @@ try {
   assert.equal(await forecast().getAttribute('data-plan-id'), otherPlan);assert.match(await forecast().innerText(), /Около 7 мин/);assert.doesNotMatch(await forecast().innerText(), /Около 2 мин/);
 
   await page.locator('[data-view="settings"]').click();await refreshStatus();
-  assert.match(await settings().innerText(), /3 новых пригодных планов из 5/);
+  assert.match(await settings().innerText(), /Новых пригодных планов: 3/);
+  assert.match(await settings().innerText(), /Начать обучение можно в любое время/);
+  assert.equal(await settings().getByRole('button', { name: 'Начать обучение', exact: true }).isEnabled(), true);
   status = modelState('RUNNING');status.training.progress = { phase: 'EVALUATION', completedCases: 2, totalCases: 7 };await refreshStatus();
   assert.match(await settings().innerText(), /Модель обучается/);assert.match(await settings().innerText(), /Проверено случаев: 2 из 7/);
   status = modelState('REJECTED');status.lastReason = 'CANDIDATE_MAE_WORSE';await refreshStatus();
@@ -152,6 +166,24 @@ try {
   assert.equal(await settings().getByRole('button', { name: 'Продолжить обработку', exact: true }).isVisible(), true);
   assert.doesNotMatch(await settings().innerText(), /Не удалось продолжить обучение/);
   advancingQueue = false;status = modelState('IDLE');await refreshStatus();
+
+  status = modelState('RETRY_WAIT');status.training.nextAttemptAt = c.now() + 60000;await refreshStatus();
+  await manual().click();await settings().getByText('Запрос принят. Обработка ещё не завершена.', { exact: true }).waitFor();
+  assert.doesNotMatch(await settings().innerText(), /Попытка обучения завершена/, 'a delayed retry remains unfinished');
+  status = modelState('IDLE');await refreshStatus();
+
+  holdStart = true;const startsBefore = startCount;
+  await manual().focus();await page.keyboard.press('Enter');
+  await settings().getByRole('button', { name: 'Запускаем обучение…', exact: true }).waitFor();
+  assert.equal(await settings().getByRole('button', { name: 'Обновить состояние обучения', exact: true }).isDisabled(), true);
+  await settings().getByRole('button', { name: 'Запускаем обучение…', exact: true }).evaluate(button => button.click());
+  assert.equal(startCount, startsBefore + 1, 'duplicate clicks cannot submit another training request');
+  releaseStart();releaseStart = null;await manual().waitFor();assert.equal(await manual().isEnabled(), true);
+  startError = true;await manual().click();await settings().getByText(/Не удалось подтвердить запуск обучения/).waitFor();
+  assert.doesNotMatch(await settings().innerText(), /Попытка обучения завершена/, 'a new attempt cannot retain the previous success message');
+  const failedStarts = startCount;await page.clock.runFor(30000);assert.equal(startCount, failedStarts, 'a lost start response is never retried automatically');
+  startError = false;await refreshStatus();await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
+  assert.doesNotMatch(await settings().innerText(), /Не удалось подтвердить запуск/);
 
   for (const width of [320, 390, 768, 1440]) {
     await page.setViewportSize({ width, height: 1100 });await open(PLAN);
