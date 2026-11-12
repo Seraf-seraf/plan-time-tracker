@@ -41,7 +41,7 @@ test("packaged Worker learns automatically from completed plans and freezes the 
     assert.equal(before.eligibleSampleCount, 0);
 
     let firstId;
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 10; i++) {
       const planId = i === 0 ? PLAN : crypto.randomUUID();
       firstId ??= planId;
       const planned = await plannedAtlm(c, planId);
@@ -53,14 +53,15 @@ test("packaged Worker learns automatically from completed plans and freezes the 
       if (i === 0 || i === 1) {
         const status = await readTool("GetEstimationModelStatus");
         assert.equal(status.eligibleSampleCount, i + 1);
-        assert.equal(status.activeModel, null, "two plans trigger an attempt, not an unsupported model");
+        if(i===0)assert.equal(status.activeModel,null);
+        else {assert.equal(status.activeModel.sampleCount,2);assert.equal(status.activeModel.accuracy,"EXPERIMENTAL");}
       }
     }
 
     const learned = await readTool("GetEstimationModelStatus");
-    assert.equal(learned.eligibleSampleCount, 12);
+    assert.equal(learned.eligibleSampleCount, 10);
     assert.ok(learned.activeModel, JSON.stringify(learned));
-    assert.equal(learned.activeModel.sampleCount, 12, "fit uses accumulated history, not the latest pair");
+    assert.equal(learned.activeModel.sampleCount, 10, "fit uses accumulated history, not the latest pair");
     assert.ok(learned.activeModel.evaluation.caseCount >= 5);
     assert.ok(scheduled > 0, "normal tracker commands actually schedule background processing");
 
@@ -89,7 +90,7 @@ test("packaged Worker learns automatically from completed plans and freezes the 
     const after = await readTool("GetPlanEstimate", { planId: targetId });
     assert.deepEqual(after.serverEstimation, issued.serverEstimation, "execution retains the pre-start prediction exactly");
     const status = await readTool("GetEstimationModelStatus");
-    assert.equal(status.eligibleSampleCount, 13);
+    assert.equal(status.eligibleSampleCount, 11);
     assert.equal(status.newPlansSinceTraining, 1);
 
     const http = await call(c, "/api/tracker/plans/" + targetId + "/estimate");
@@ -97,4 +98,29 @@ test("packaged Worker learns automatically from completed plans and freezes the 
     assert.deepEqual(http.value, after, "HTTP and MCP return the same saved forecast");
     assert.deepEqual(c.db.sqlite.prepare("PRAGMA foreign_key_check").all(), []);
   } finally { c.close(); }
+});
+
+test("packaged public workflow learns all runtime effects and predicts omitted runtime",async()=>{
+  const c=context();try{
+    const built=await import(pathToFileURL(resolve(workerPath)).href+'?runtime-workflow');c.worker=built.createWorker(c.now);
+    const taskFor=(modelId,reasoningEffort,plannedParallelAgents)=>({schemaVersion:'agent-task-v1',profile:{workKind:'MODIFY_MECHANISM',reuseState:'PARTIAL',doneBoundary:'LOCAL_VERIFIED'},outcomes:[{id:'change',description:'Change',evidence:'Fixture'}],changedContracts:[],verificationKinds:['UNIT'],profileEvidence:{workKind:'Change',reuseState:'Partial',doneBoundary:'Test'},runtimeContext:{modelId,reasoningEffort,plannedParallelAgents}});
+    for(const model of ['a','b'])for(const effort of ['low','high'])for(const count of [1,2]){
+      const p=await plannedAtlm(c,crypto.randomUUID(),taskFor(model,effort,count));
+      await completeAtlm(c,p,60000*(10+(model==='b'?10:0)+(effort==='high'?6:0)+2*count));c.advance(1);
+    }
+    const trained=await mcp(c,'StartTraining');assert.equal(trained.value.result.isError,undefined,JSON.stringify(trained.value));
+    const target=await plannedAtlm(c,crypto.randomUUID(),taskFor('b','high',2));
+    const digest=(await mcp(c,'GetAssessment',{planId:target.planId})).value.result.structuredContent.currentRequirementsDigest;
+    const known=await mcp(c,'EstimatePlanTime',{planId:target.planId,expectedRequirementsDigest:digest,agentTask:taskFor('b','high',2)});
+    assert.equal(known.value.result.isError,undefined,JSON.stringify(known.value));assert.equal(known.value.result.structuredContent.pointMs,30*60000);
+    const missing=taskFor(null,null,null);delete missing.runtimeContext;
+    const unknown=await mcp(c,'EstimatePlanTime',{planId:target.planId,expectedRequirementsDigest:digest,agentTask:missing});
+    assert.equal(unknown.value.result.isError,undefined,JSON.stringify(unknown.value));assert.equal(unknown.value.result.structuredContent.pointMs,21*60000);
+    const saved=await atlmAssessment(c,target.planId,missing,{predictionRequest:{method:'ATLM',methodVersion:1}});
+    await ok(c,'RecordAssessment',saved,0);
+    const estimate=(await mcp(c,'GetSavedEstimate',{planId:target.planId})).value.result.structuredContent;
+    assert.equal(estimate.serverEstimation.pointMs,21*60000);
+    const artifact=JSON.parse(c.db.sqlite.prepare("SELECT artifact_json FROM estimation_models WHERE status='ACTIVE'").get().artifact_json);
+    assert(artifact.columns.some(col=>col.field==='modelId'));assert(artifact.columns.some(col=>col.field==='reasoningEffort'));assert(artifact.columns.some(col=>col.kind==='runtimeNumeric'));
+  }finally{c.close();}
 });

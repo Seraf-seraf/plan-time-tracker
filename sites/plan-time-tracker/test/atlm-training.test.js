@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { processEstimationTraining, getEstimationModelStatus, predictWithActiveModel,
   normalizeAgentTaskV1, claimAtlmJob, scheduleAtlmTraining } from "../worker/index.js";
-import { context, plannedAtlm, completeAtlm, atlmTask, command, ok, rows, OWNER } from "./fixtures/tracker-db.mjs";
+import { context, plannedAtlm, completeAtlm, atlmTask, command, ok, mcp, rows, OWNER } from "./fixtures/tracker-db.mjs";
 const features = normalizeAgentTaskV1(atlmTask()).features;
 const drain = c => processEstimationTraining(c.db, OWNER, c.now(), { clock: c.now });
 const status = c => getEstimationModelStatus(c.db, OWNER, c.now());
@@ -73,7 +73,8 @@ test("one to two eligible plans triggers once; receipt replay and excluded plans
     const after = await status(c);
     assert.equal(after.eligibleSampleCount, 2); assert.equal(after.newPlansSinceTraining, 0);
     assert.equal(after.training.generation, 1); assert.equal(after.training.due, false);
-    assert.equal(after.training.status, "COLLECTING_DATA"); assert.equal(after.lastReason, "INSUFFICIENT_EVALUATION_CASES");
+    assert.equal(after.training.status, "IDLE"); assert.equal(after.lastReason, null);
+    assert.equal(after.activeModel.accuracy,"EXPERIMENTAL");
     assert.equal((await command(c, "FinishPlan", { planId: second.planId }, 1, receipt.command_id)).status, 200);
     await drain(c); assert.deepEqual(await status(c), after);
     assert.equal(models(c).length, 1); assert.equal(JSON.parse(models(c)[0].manifest_json).length, 2);
@@ -85,7 +86,7 @@ test("initial and subsequent models use accumulated history and preserve immutab
   try {
     await experience(c, 15); await drain(c);
     const first = await status(c), artifact = models(c).at(-1);
-    assert.equal(first.activeModel.sampleCount, 15); assert.equal(first.activeModel.evaluation.caseCount, 9);
+    assert.equal(first.activeModel.sampleCount, 15); assert.equal(first.activeModel.evaluation.caseCount, 14);
     assert.equal((await predictWithActiveModel(c.db, OWNER, features, c.now())).pointMs, 1000);
     assert.throws(() => c.db.sqlite.prepare("UPDATE estimation_models SET manifest_json='[]' WHERE owner_id=? AND model_id=?").run(OWNER, artifact.model_id), /ATLM_MODEL_IMMUTABLE/);
     await experience(c, 5); await drain(c);
@@ -405,4 +406,41 @@ test("atomic claim cannot bypass backoff when another lease expires after the re
     assert.equal(after.attempts, 1); assert.equal(after.status, "RUNNING");
     assert.equal((await drain(c)).training.status, "RETRY_WAIT");
   } finally { restore?.(); c.close(); }
+});
+
+
+test("early models are persisted at 0/1/4 checks and qualified after five",async()=>{
+  for(const n of [1,2,5,6]){
+    const c=context();try{
+      await experience(c,n);
+      const response=await mcp(c,"StartTraining");assert.equal(response.value.result.isError,undefined,JSON.stringify(response.value));
+      const state=await status(c),model=models(c).at(-1);
+      assert.equal(state.activeModel.sampleCount,n);
+      assert.equal(state.activeModel.evaluation.caseCount,n-1);
+      assert.equal(model.method_version,"agent-v2");assert.equal(model.feature_version,"agent-task-v2");
+      const before=rows(c),prediction=await predictWithActiveModel(c.db,OWNER,features,c.now());
+      assert.equal(prediction.pointMs,1000);
+      assert.equal(prediction.accuracy,n<6?"EXPERIMENTAL":"HISTORICALLY_EVALUATED");
+      assert.equal(prediction.evaluation.qualityConfirmed,n>=6);
+      if(n===1)assert.equal(prediction.evaluation.maeMs,null);
+      assert.deepEqual(rows(c),before,"inference reuses immutable stored artifacts without training or writes");
+    }finally{c.close();}
+  }
+});
+
+test("a checkpoint from another method restarts evaluation under the current lease",async()=>{
+  const c=context();let paused,pending;
+  try{
+    await experience(c,2);
+    paused=pauseOnce(c,snapshotWrite);pending=drain(c);const initial=await paused.reached;
+    c.advance(60001);const lease=await claimAtlmJob(c.db,OWNER,'train',c.now());assert(lease.fence>initial.fence);
+    const old=JSON.parse(lease.snapshot_json);old.methodVersion='agent-v1';old.featureSchemaVersion='agent-task-v1';
+    c.db.sqlite.prepare("UPDATE estimation_jobs SET snapshot_json=?,checkpoint_json=? WHERE owner_id=? AND job_key='train'")
+      .run(JSON.stringify(old),JSON.stringify({phase:'EVALUATE',cases:[{sampleId:'invalid-old-case'}],progressRevision:1}),OWNER);
+    paused.release();await pending;c.advance(60001);await drain(c);c.advance(300000);await drain(c);
+    assert.equal((await status(c)).activeModel.sampleCount,2);
+    const job=trainJob(c);assert.equal(JSON.parse(job.snapshot_json).methodVersion,'agent-v2');
+    assert.equal(JSON.parse(job.checkpoint_json).cases.length,2);
+    assert.equal((await predictWithActiveModel(c.db,OWNER,features,c.now())).pointMs,1000);
+  }finally{paused?.release();if(pending)await pending.catch(()=>{});c.close();}
 });

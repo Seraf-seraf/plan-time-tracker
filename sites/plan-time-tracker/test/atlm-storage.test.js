@@ -185,3 +185,17 @@ test("a new source generation receives its own retry budget after an expired fou
     assert.equal((await persistAtlmSample(c.db, OWNER, refreshed, c.now(), next)).inserted, true);
   } finally { c.close(); }
 });
+
+test("runtime training inputs remain the original facts after a late assessment",async()=>{
+  const c=context();try{
+    const task=atlmTask();task.runtimeContext={modelId:'original-model',reasoningEffort:'high',plannedParallelAgents:2,provenance:'CLIENT_REPORTED'};
+    const plan=await plannedAtlm(c,PLAN,task);
+    await ok(c,'StartPlan',{planId:PLAN},0);
+    const late=atlmTask();late.runtimeContext={modelId:'late-model',reasoningEffort:'max',plannedParallelAgents:9};
+    await ok(c,'RecordAssessment',await atlmAssessment(c,PLAN,late),0);
+    await ok(c,'SetStepStatus',{stepId:plan.step.stepId,status:'RUNNING'},1);c.advance(1000);
+    await ok(c,'SetStepStatus',{stepId:plan.step.stepId,status:'DONE'},2);await ok(c,'FinishPlan',{planId:PLAN},1);
+    const {src}=await save(c);
+    assert.equal(src.features.modelId,'original-model');assert.equal(src.features.reasoningEffort,'high');assert.equal(src.features.plannedParallelAgents,2);
+  }finally{c.close();}
+});

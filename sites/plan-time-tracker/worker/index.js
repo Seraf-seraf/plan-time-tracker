@@ -1099,7 +1099,7 @@ const ATLM_TOOL_SCHEMAS = Object.freeze({
 // It checks the current owner pointer and manifest, not just the immutable artifact ID.
 const ATLM_CURRENT_MODEL_SQL = `SELECT 1 FROM estimation_models m JOIN estimation_owner_state o
   ON o.owner_id=m.owner_id AND o.active_model_id=m.model_id
-  WHERE m.owner_id=? AND m.model_id=? AND m.status='ACTIVE' AND m.method_version='agent-v1' AND m.feature_version='agent-task-v1'
+  WHERE m.owner_id=? AND m.model_id=? AND m.status='ACTIVE' AND m.method_version='${ATLM_METHOD.version}' AND m.feature_version='${ATLM_FEATURE_VERSION}'
     AND NOT EXISTS(SELECT 1 FROM json_each(m.manifest_json) item
       LEFT JOIN estimation_samples s ON s.owner_id=m.owner_id AND s.sequence=CAST(item.value AS INTEGER)
       WHERE s.sequence IS NULL OR s.eligibility<>'ELIGIBLE'
@@ -1894,7 +1894,7 @@ async function readTrackerCapabilities(db,ownerId){return {
       forecastUnits: "ms", forecastMetrics: FORECAST_METRICS, initialExpectedVersion: 0, requirementsDigest: true,
       contextRead: { tool: "GetAssessment", omitAssessmentId: true }, expectedRequirementsDigestRequired: true,
       historyMaxTargets: 20, historyMaxLimit: 100, methodologyControlsExecution: false,
-      atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, featureSchemaVersion: "agent-task-v1", metric: "PLAN_ACTIVE",
+      atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v1", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
         predictionScope: "FULL_FROM_FIRST_START", retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
         calculateTool: "CalculateAtlmEstimate", planEstimateTool: "GetPlanEstimate", modelStatusTool: "GetEstimationModelStatus",
         processTool: "ProcessEstimationTraining", startTrainingTool: "StartEstimationTraining", datasetTool: "GetAtlmDataset", predictionRequest: { method: "ATLM", methodVersion: 1 },
@@ -2647,7 +2647,7 @@ function atlmJobDue(job, nowMs) {
 }
 function atlmPublicEvaluation(evaluation) {
   if (!evaluation) return null;
-  return { caseCount: evaluation.paired?.caseCount ?? 0, coverage: evaluation.metrics?.atlm?.forecastRate ?? 0,
+  return { qualityConfirmed: evaluation.qualityConfirmed === true, caseCount: evaluation.paired?.caseCount ?? 0, coverage: evaluation.metrics?.atlm?.forecastRate ?? 0,
     maeMs: evaluation.paired?.atlm?.maeMs ?? null, medianBaselineMaeMs: evaluation.paired?.median?.maeMs ?? null,
     wapePercent: evaluation.paired?.atlm?.wapePercent ?? null, signedBiasPercent: evaluation.paired?.atlm?.signedBiasPercent ?? null,
     excludedCaseCount: evaluation.excluded?.length ?? 0, selectedCaseCount: evaluation.caseCount ?? 0,
@@ -2655,14 +2655,15 @@ function atlmPublicEvaluation(evaluation) {
 }
 function atlmPublicModel(row) {
   return row ? { modelId: row.model_id, modelVersion: row.model_version, trainedAt: row.activated_at ?? row.created_at,
-    sampleCount: row.sample_count, evaluation: atlmPublicEvaluation(atlmTrainingJson(row.metrics_json)) } : null;
+    sampleCount: row.sample_count, accuracy: atlmTrainingJson(row.metrics_json)?.qualityConfirmed === true ? "HISTORICALLY_EVALUATED" : "EXPERIMENTAL",
+    evaluation: atlmPublicEvaluation(atlmTrainingJson(row.metrics_json)) } : null;
 }
 
 // An immutable artifact is readable only while every manifest source is still current and clean.
 async function atlmReadActiveModel(db, ownerId) {
   return dbFirst(db, `SELECT m.* FROM estimation_models m JOIN estimation_owner_state o
     ON o.owner_id=m.owner_id AND o.active_model_id=m.model_id
-    WHERE m.owner_id=? AND m.status='ACTIVE' AND m.method_version='agent-v1' AND m.feature_version='agent-task-v1'
+    WHERE m.owner_id=? AND m.status='ACTIVE' AND m.method_version='${ATLM_METHOD.version}' AND m.feature_version='${ATLM_FEATURE_VERSION}'
     AND NOT EXISTS(SELECT 1 FROM json_each(m.manifest_json) item
       LEFT JOIN estimation_samples s ON s.owner_id=m.owner_id AND s.sequence=CAST(item.value AS INTEGER)
       WHERE s.sequence IS NULL OR s.eligibility<>'ELIGIBLE'
@@ -2684,7 +2685,8 @@ export async function predictWithActiveModel(db, ownerId, features, nowMs) {
   catch { throw appError("SOURCE_UNAVAILABLE", "Сохранённая модель ATLM повреждена.", 503, { reason: "INVALID_ARTIFACT" }); }
   if (prediction.reason === "INVALID_ARTIFACT") throw appError("SOURCE_UNAVAILABLE", "Сохранённая модель ATLM повреждена.", 503, { reason: "INVALID_ARTIFACT" });
   const metadata = { modelId: model.model_id, modelVersion: model.model_version, sampleCount: model.sample_count,
-    evaluation: atlmPublicEvaluation(atlmTrainingJson(model.metrics_json)), accuracy: "HISTORICALLY_EVALUATED" };
+    evaluation: atlmPublicEvaluation(atlmTrainingJson(model.metrics_json)),
+    accuracy: atlmTrainingJson(model.metrics_json)?.qualityConfirmed === true ? "HISTORICALLY_EVALUATED" : "EXPERIMENTAL" };
   if (prediction.status !== "AVAILABLE") return { ...unavailable(prediction.reason), ...metadata,
     ...(prediction.missingFields ? { missingFields: prediction.missingFields } : {}) };
   return { status: "AVAILABLE", pointMs: prediction.pointMs, ...metadata, unavailableReason: null };
@@ -2717,7 +2719,7 @@ export async function getEstimationModelStatus(db, ownerId, nowMs) {
   else if (pending.length || triggerDue) status = "QUEUED";
   const nextAttemptAt = Math.min(...[...(trainPending && train?.next_attempt_at > nowMs ? [train.next_attempt_at] : []),
     ...pending.filter(job => job.status === "RETRY_WAIT" && job.next_attempt_at > nowMs).map(job => job.next_attempt_at)]);
-  return { method: { id: "atlm", version: "agent-v1" }, featureSchemaVersion: "agent-task-v1", metric: "PLAN_ACTIVE",
+  return { method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v1", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
     forecastScope: "FULL_FROM_FIRST_START", retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
     datasetRevision: state?.dataset_revision ?? 0, eligibleSampleCount: counts?.eligible ?? 0,
     excludedSampleCount: (counts?.total ?? 0) - (counts?.eligible ?? 0), newPlansSinceTraining: newPlans,
@@ -2791,10 +2793,10 @@ async function atlmSnapshot(db, ownerId, job, clock) {
   const manifest = limited ? [] : sampleRows.map(row => row.sequence);
   const rows = limited ? [] : sampleRows.map(row => ({ sampleId: String(row.sequence), planId: row.plan_id,
     capturedAt: row.captured_at, sourceAvailableAt: row.source_available_at, features: atlmTrainingJson(row.features_json), actualMs: row.actual_ms }));
-  const snapshot = { formatVersion: 1, generation: job.generation, modelId: "atlm-" + job.generation,
+  const snapshot = { formatVersion: 1, methodVersion: ATLM_METHOD.version, featureSchemaVersion: ATLM_FEATURE_VERSION, generation: job.generation, modelId: "atlm-" + job.generation,
     modelVersion: job.generation, trainCutoff: nowMs, datasetRevision: state.dataset_revision,
     newSampleCount: state.new_sample_count, newSampleSequence: sampleRows.reduce((max, row) => Math.max(max, row.sequence), 0),
-    activePointer: state.active_model_id, incumbentId: previous?.status === "ACTIVE" ? previous.model_id : null,
+    activePointer: state.active_model_id, incumbentId: previous?.status === "ACTIVE" && previous.method_version === ATLM_METHOD.version && previous.feature_version === ATLM_FEATURE_VERSION ? previous.model_id : null,
     forcedRetrain: Boolean(state.forced_retrain), manifest, resourceLimitReached: limited,
     selection: limited ? null : selectAtlmEvaluationCases(rows, { protocolVersion: 1, cutoff: nowMs }) };
   if (!limited && (snapshot.selection.status !== "AVAILABLE" || snapshot.selection.eligibleCount !== rows.length)) {
@@ -2838,10 +2840,10 @@ async function atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, resu
   const digest = result.artifact?.datasetDigest || "sha256:" + await hashCommandInput({ manifest: snapshot.manifest, datasetRevision: snapshot.datasetRevision });
   const statements = [
     db.prepare(`INSERT OR IGNORE INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,
-      train_cutoff,metrics_json,sample_count,reason,created_at)
-      SELECT ?,?,?,?,?,?,?,?,?,?,?,? WHERE ${finalGuard}`).bind(ownerId, snapshot.modelId, snapshot.modelVersion, modelStatus,
+      train_cutoff,metrics_json,sample_count,reason,created_at,method_version,feature_version)
+      SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ${finalGuard}`).bind(ownerId, snapshot.modelId, snapshot.modelVersion, modelStatus,
       result.artifact ? JSON.stringify(result.artifact) : null, JSON.stringify(snapshot.manifest), digest, snapshot.trainCutoff,
-      result.evaluation ? JSON.stringify(result.evaluation) : null, snapshot.manifest.length, result.reason, nowMs, ...guardValues),
+      result.evaluation ? JSON.stringify(result.evaluation) : null, snapshot.manifest.length, result.reason, nowMs, ATLM_METHOD.version, ATLM_FEATURE_VERSION, ...guardValues),
   ];
   const candidateGuard = `${finalGuard} AND EXISTS(SELECT 1 FROM estimation_models WHERE owner_id=? AND model_id=? AND status=?)`;
   const candidateValues = [...guardValues, ownerId, snapshot.modelId, modelStatus];
@@ -2882,11 +2884,11 @@ async function atlmSupersedeSnapshot(db, ownerId, job, snapshot, nowMs) {
   // Keep the obsolete manifest as an immutable receipt, then allocate another generation.
   await db.batch([
     db.prepare(`INSERT OR IGNORE INTO estimation_models(owner_id,model_id,model_version,status,manifest_json,dataset_digest,
-      train_cutoff,sample_count,reason,created_at)
-      SELECT ?,?,?,'REJECTED',?,?,?,?, 'SNAPSHOT_INVALIDATED',? WHERE ${guard}`)
+      train_cutoff,sample_count,reason,created_at,method_version,feature_version)
+      SELECT ?,?,?,'REJECTED',?,?,?,?, 'SNAPSHOT_INVALIDATED',?,?,? WHERE ${guard}`)
       .bind(ownerId, snapshot.modelId, snapshot.modelVersion, JSON.stringify(snapshot.manifest),
         "sha256:" + await hashCommandInput({ manifest: snapshot.manifest, datasetRevision: snapshot.datasetRevision }),
-        snapshot.trainCutoff, snapshot.manifest.length, nowMs, ...values),
+        snapshot.trainCutoff, snapshot.manifest.length, nowMs, ATLM_METHOD.version, ATLM_FEATURE_VERSION, ...values),
     db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,generation=generation+1,status='QUEUED',
       lease_until=NULL,attempts=0,next_attempt_at=0,snapshot_json=NULL,checkpoint_json=NULL,last_error=NULL,updated_at=?
       WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`)
@@ -2960,7 +2962,7 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
         continue;
       }
       let snapshot = atlmTrainingJson(job.snapshot_json), checkpoint = atlmTrainingJson(job.checkpoint_json), rows;
-      if (!snapshot) {
+      if (!snapshot || snapshot.methodVersion !== ATLM_METHOD.version || snapshot.featureSchemaVersion !== ATLM_FEATURE_VERSION) {
         const initial = await atlmSnapshot(db, ownerId, job, clock);
         if (!initial) { await atlmCheckpoint(db, ownerId, job, { phase: "SNAPSHOT", cases: [], progressRevision: (checkpoint?.progressRevision ?? 0) + 1 }, clock(), { release: true }); break; }
         ({ snapshot, checkpoint, rows } = initial);
@@ -2992,14 +2994,20 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
       const evaluation = summarizeAtlmEvaluation(checkpoint.cases, snapshot.selection);
       const initialReady = evaluation.paired?.caseCount >= 5;
       const initialGood = initialReady && evaluation.paired.atlm.maeMs <= evaluation.paired.median.maeMs;
-      let rejection = !initialReady ? "INSUFFICIENT_EVALUATION_CASES" : !initialGood ? "MEDIAN_BASELINE_BETTER" : null;
+      let rejection = initialReady && !initialGood ? "MEDIAN_BASELINE_BETTER" : null;
       const incumbent = snapshot.incumbentId ? await dbFirst(db, `SELECT m.*,(SELECT MAX(s.source_available_at) FROM estimation_samples s
         WHERE s.owner_id=m.owner_id AND s.sequence IN (SELECT value FROM json_each(m.manifest_json))) AS latest_source_available_at
         FROM estimation_models m WHERE m.owner_id=? AND m.model_id=?`, ownerId, snapshot.incumbentId) : null;
+      evaluation.qualityConfirmed = false;
       if (!rejection) {
         const comparison = atlmCompareIncumbent(evaluation, incumbent);
         evaluation.incumbentComparison = comparison.comparison;
-        if (!comparison.accepted) rejection = comparison.reason;
+        if (initialReady) {
+          if (!comparison.accepted) rejection = comparison.reason;
+          else evaluation.qualityConfirmed = true;
+        } else if (incumbent && atlmTrainingJson(incumbent.metrics_json)?.qualityConfirmed === true) {
+          rejection = "INSUFFICIENT_INCUMBENT_CASES";
+        }
       }
       if (rejection) {
         await atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, { activate: false,

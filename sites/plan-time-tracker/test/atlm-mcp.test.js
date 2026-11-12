@@ -50,7 +50,7 @@ test("all ATLM tools share strict discovery/runtime schemas and declare read-onl
     const schema = listing.find(t => t.name === "SaveTaskAssessment").inputSchema.properties.payload;
     assert.deepEqual(schema.properties.predictionRequest.properties.method.enum, ["ATLM"]); assert.equal(schema.properties.serverEstimation, undefined);
     const atlm = value(await mcp(c, "GetTrackerInfo")).assessments.atlm;
-    assert.equal(atlm.featureSchemaVersion, "agent-task-v1"); assert.equal(atlm.metric, "PLAN_ACTIVE");
+    assert.equal(atlm.featureSchemaVersion, "agent-task-v2"); assert.equal(atlm.inputSchemaVersion,"agent-task-v1"); assert.equal(atlm.metric, "PLAN_ACTIVE");
     assert.equal(atlm.predictionScope, "FULL_FROM_FIRST_START"); assert.equal(atlm.retrainEveryNewPlans, 2);
     assert.equal(atlm.limits.datasetMaxLimit, 100);
   } finally { c.close(); }
@@ -231,7 +231,7 @@ test("a corrupt stored model is a service error, never an unavailable forecast",
   const c = context();
   try {
     await plannedAtlm(c);
-    c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at) VALUES(?,'corrupt-model',1,'ACTIVE','{}','[]','invalid',?,0,?)").run(OWNER, c.now(), c.now());
+    c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at,method_version,feature_version) VALUES(?,'corrupt-model',1,'ACTIVE','{}','[]','invalid',?,0,?,'agent-v2','agent-task-v2')").run(OWNER, c.now(), c.now());
     c.db.sqlite.prepare("INSERT INTO estimation_owner_state(owner_id,active_model_id) VALUES(?,'corrupt-model')").run(OWNER);
     const args = await argsFor(c), failure = await mcp(c, "EstimatePlanTime", args);
     assert.equal(failure.value.result.isError, true); assert.equal(failure.value.result.structuredContent.code, "SOURCE_UNAVAILABLE");
@@ -261,7 +261,7 @@ test("only successful commands schedule background processing; read tools and fa
   } finally { await Promise.allSettled(background); c.close(); }
 });
 
-test("manual training starts below the automatic threshold and reports insufficient data", async () => {
+test("manual training below the automatic threshold activates a clearly experimental model", async () => {
   const c = context();
   try {
     const tools = (await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" })).value.result.tools;
@@ -273,9 +273,11 @@ test("manual training starts below the automatic threshold and reports insuffici
     assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM estimation_models WHERE owner_id=?").get(OWNER).n, 0);
     const result = value(await mcp(c, "StartTraining"));
     assert.equal(result.eligibleSampleCount, 1);
-    assert.equal(result.activeModel, null);
+    assert.equal(result.activeModel.accuracy, "EXPERIMENTAL");
+    assert.equal(result.activeModel.evaluation.caseCount,0);
+    assert.equal(result.activeModel.evaluation.maeMs,null);
     assert.equal(result.training.generation, 1);
-    assert.ok(result.lastReason);
+    assert.equal(result.lastReason,null);
     assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM estimation_models WHERE owner_id=?").get(OWNER).n, 1);
   } finally { c.close(); }
 });
@@ -292,7 +294,7 @@ test("web manual training shares the MCP path below threshold and enforces reque
     assert.equal(forbidden.status, 403);assert.deepEqual(rows(c), before);
     const first = await call(c, path, {});
     assert.equal(first.status, 200);assert.equal(first.value.eligibleSampleCount, 1);
-    assert.equal(first.value.training.generation, 1);assert.equal(first.value.activeModel, null);assert.ok(first.value.lastReason);
+    assert.equal(first.value.training.generation, 1);assert.equal(first.value.activeModel.accuracy,"EXPERIMENTAL");assert.equal(first.value.lastReason,null);
     const second = await call(c, path, {});
     assert.equal(second.status, 200);assert.equal(second.value.training.generation, 2);
     const isolated = await call(c, path, {}, "other-owner");
