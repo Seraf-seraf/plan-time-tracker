@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { context, OWNER, PLAN, running, call } from './fixtures/tracker-db.mjs';
+import { context, OWNER, PLAN, running, call, ok } from './fixtures/tracker-db.mjs';
 
 const modulePath = process.env.PLAYWRIGHT_MODULE || 'playwright';
 const { chromium } = await import(modulePath.startsWith('/') ? pathToFileURL(modulePath).href : modulePath);
@@ -196,6 +196,16 @@ try {
     assert.equal(await settings().getByRole('button', { name: 'Обновить состояние обучения', exact: true }).evaluate(node => node === document.activeElement), true);
     await page.screenshot({ path: resolve(artifacts, `atlm-settings-${width}.png`), fullPage: true });
   }
+  // Completion removes the working forecast instead of requesting its frozen history.
+  const completedStep = c.db.sqlite.prepare('SELECT step_id FROM plan_steps WHERE plan_id=?').get(otherPlan).step_id;
+  await ok(c, 'SetStepStatus', { stepId: completedStep, status: 'DONE' }, 2);
+  await ok(c, 'FinishPlan', { planId: otherPlan }, 1);
+  await page.reload();await page.locator('#plans[data-loaded="true"]').waitFor({ state: 'attached' });
+  const estimateReads = requests.filter(item => item.path.endsWith('/' + otherPlan + '/estimate')).length;
+  await page.locator('[data-plan-id="' + otherPlan + '"] .plan-open').first().click();
+  await page.waitForFunction(id => document.querySelector('#planDetail')?.dataset.planId === id, otherPlan);
+  assert.equal(await forecast().count(), 0, 'completed plans have no working forecast plaque');
+  assert.equal(requests.filter(item => item.path.endsWith('/' + otherPlan + '/estimate')).length, estimateReads);
   assert.deepEqual(errors, []);
   console.log('ATLM UI: real cold start and queue recovery; saved/unknown/stale forecasts; rejection, errors and retry; late responses; bounded recovery; keyboard and 320/390/768/1440 layouts passed.');
   console.log('Screenshots: ' + artifacts);
