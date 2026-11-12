@@ -133,6 +133,10 @@ try {
   assert.match(baselineText,/особенности новой задачи не учитываются/);assert.match(baselineText,/sampleCount=7, p=9/);
   assert.doesNotMatch(baselineText,/Проверено прогнозов|Средняя ошибка|Качество проверено/);
   estimate.serverEstimation.pointMs=0;await refreshPlan();assert.match(await forecast().innerText(),/Около 0 мин/);
+  estimate.isStale=true;estimate.staleReasons=['BASELINE_SOURCE_CHANGED'];await refreshPlan();
+  assert.match(await forecast().innerText(),/История завершённых планов изменилась/);
+  assert.doesNotMatch(await forecast().innerText(),/изменился объём задачи или исходные данные модели/);
+
 
   estimate=estimateFor(PLAN);await refreshPlan();assert.doesNotMatch(await forecast().innerText(),/Качество не подтверждено/);
 

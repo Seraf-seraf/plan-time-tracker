@@ -2638,7 +2638,7 @@ const UI_ATLM = String.raw`(()=>{
       if(data.forecastAvailability?.reason==="UNSUPPORTED_FORECAST_SCOPE")body.append(make("p",diagnosticText(data.forecastAvailability.diagnostics),"atlm-note"));
       if(planRoot.dataset.planStatus==="PLANNED"&&data.forecastAvailability?.canRefreshSaved!==false)
         body.append(make("p","Кнопка перечитывает сохранённые данные. Для нового расчёта агент сохраняет оценку исходных признаков.","atlm-note"));
-      if(data.isStale)body.append(make("p","Оценка устарела: изменился объём задачи или исходные данные модели. Сохранённое значение показано для истории.","atlm-stale"));
+      if(data.isStale)body.append(make("p",data.staleReasons?.includes("BASELINE_SOURCE_CHANGED")?"История завершённых планов изменилась; сохранённая медиана показана как историческая оценка.":"Оценка устарела: изменился объём задачи или исходные данные модели. Сохранённое значение показано для истории.","atlm-stale"));
     }catch(error){if(token!==planToken||planRoot.dataset.planId!==planId||error.name==="AbortError")return;body.replaceChildren(make("p","Не удалось загрузить прогноз. "+error.message,"error"));}
     finally{if(token===planToken&&panel.isConnected){refresh.disabled=false;panel.removeAttribute("aria-busy");}}
   }
