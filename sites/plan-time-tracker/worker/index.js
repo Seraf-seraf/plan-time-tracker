@@ -1264,7 +1264,7 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
   const scopeDiagnostics = row.deleted_at !== null ? atlmDiagnostics("PLAN_DELETED") : !canRefreshSaved
     ? atlmDiagnostics("UNSUPPORTED_FORECAST_SCOPE",{status:row.status,firstStartedAt:row.first_started_at}) : null;
   let diagnostics = null;
-  if(row.forecast_json!==null)diagnostics=serverEstimation.fallback?.atlmDiagnostics??serverEstimation.diagnostics??null;
+  if(row.first_started_at!==null)diagnostics=serverEstimation?.fallback?.atlmDiagnostics??serverEstimation?.diagnostics??(!row.assessment_json?atlmDiagnostics("MISSING_FEATURES"):null);
   else if(!row.assessment_json) diagnostics = atlmDiagnostics("MISSING_FEATURES");
   else {
     const assessment = JSON.parse(row.assessment_json);

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readAtlmSampleSource } from "../worker/index.js";
-import { context, call, command, ok, mcp, rows, atlmTask, atlmAssessment, plannedAtlm, completeAtlm, envelope, OWNER, PLAN } from "./fixtures/tracker-db.mjs";
+import { context, call, command, ok, mcp, rows, atlmTask, atlmAssessment, plannedAtlm, completeAtlm, envelope, migrations, migration, OWNER, PLAN } from "./fixtures/tracker-db.mjs";
 const request = { method: "ATLM", methodVersion: 1 };
 const value = r => { assert.equal(r.value.result.isError, undefined, JSON.stringify(r.value)); return r.value.result.structuredContent; };
 async function argsFor(c, planId = PLAN, agentTask = atlmTask()) {
@@ -615,5 +615,21 @@ test("a technical model failure is explicit on current read and cannot hide a fr
   assert.equal(frozen.serverEstimation.pointMs,null);assert.equal(frozen.diagnostics.code,"SOURCE_UNAVAILABLE");
   await ok(c,"PausePlan",{planId:PLAN},1);
   assert.deepEqual(value(await mcp(c,"GetSavedEstimate",{planId:PLAN})).serverEstimation,frozen.serverEstimation);
+ }finally{c.close();}
+});
+
+test("legacy first-start input remains readable after migration despite a broken current model",async()=>{
+ const c=context(migrations.indexOf("0024_current_plan_forecast.sql"));try{
+  await plannedAtlm(c);
+  const assessment=await atlmAssessment(c,PLAN,atlmTask(),{predictionRequest:request});await ok(c,"RecordAssessment",assessment,0);
+  const recorded=value(await mcp(c,"GetTaskAssessment",{planId:PLAN,assessmentId:assessment.assessmentId})).assessment.serverEstimation;
+  await ok(c,"StartPlan",{planId:PLAN},0);c.db.sqlite.exec(migration("0024_current_plan_forecast.sql"));
+  assert.equal(c.db.sqlite.prepare("SELECT forecast_json FROM plan_estimation_inputs WHERE plan_id=?").get(PLAN).forecast_json,null);
+  c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at,method_version,feature_version) VALUES(?,'corrupt-model',1,'ACTIVE','{}','[]','invalid',?,0,?,'agent-v2','agent-task-v2')").run(OWNER,c.now(),c.now());
+  c.db.sqlite.prepare("UPDATE estimation_owner_state SET active_model_id='corrupt-model' WHERE owner_id=?").run(OWNER);
+  const before=rows(c),frozen=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+  assert.equal(frozen.source,"FROZEN_INPUT");assert.deepEqual(frozen.serverEstimation,recorded);assert.deepEqual(rows(c),before);
+  await ok(c,"PausePlan",{planId:PLAN},1);
+  assert.deepEqual(value(await mcp(c,"GetSavedEstimate",{planId:PLAN})).serverEstimation,recorded);
  }finally{c.close();}
 });
