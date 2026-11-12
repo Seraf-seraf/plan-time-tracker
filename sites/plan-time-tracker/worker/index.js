@@ -1963,7 +1963,7 @@ function renderPagedList(list,items,pageSize,page,kind,emptyText) {
   page=Math.min(Math.max(0,page),lastPage);
   if(kind==="plans")planPage=page;else recentPage=page;
   list.replaceChildren();
-  if(!items.length){const empty=document.createElement("p");empty.className="muted";empty.textContent=emptyText;list.append(empty);}
+  if(!items.length&&emptyText){const empty=document.createElement("p");empty.className="muted";empty.textContent=emptyText;list.append(empty);}
   else items.slice(page*pageSize,(page+1)*pageSize).forEach(plan=>{
     const row=card(plan),period=kind==="plans"&&(periodPlans?.get(plan.planId)||(includeRunningNow&&plan.status==="RUNNING"?{activeInPeriodMs:0}:null));
     if(period){
@@ -1985,6 +1985,7 @@ function renderPagedList(list,items,pageSize,page,kind,emptyText) {
     next.onclick=()=>{if(kind==="plans"){planPage++;renderPlanList();}else{recentPage++;renderRecentList();}};
     controls.append(previous,indicator,next);pager.append(summary,controls);list.after(pager);
   }
+  pager.hidden=kind==="recent"&&!items.length;
   pager.querySelector(".pager-summary").textContent=items.length?(page*pageSize+1)+"–"+Math.min((page+1)*pageSize,items.length)+" из "+items.length:"Нет планов";
   pager.querySelector(".pager-page").textContent=(page+1)+" / "+(lastPage+1);
   const arrows=pager.querySelectorAll("button");arrows[0].disabled=page===0;arrows[1].disabled=page===lastPage;
@@ -1995,7 +1996,7 @@ function renderPlanList(){
 }
 function renderRecentList(){
   const otherPlans=plans.filter(plan=>plan.status!=="RUNNING");
-  renderPagedList(q("#recent"),otherPlans,RECENT_PAGE_SIZE,recentPage,"recent","");
+  renderPagedList(q("#recent"),otherPlans,RECENT_PAGE_SIZE,recentPage,"recent",plans.length?"Остальные планы появятся здесь.":"Планов пока нет.");
 }
 window.addEventListener("plan-time-tracker:period-plans",event=>{
   periodPlans=new Map(event.detail.rows.map(plan=>[plan.planId,plan]));
