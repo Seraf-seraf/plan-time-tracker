@@ -339,6 +339,21 @@ test("active public names expose the reduced model and preserve command receipts
     assert.equal(cap.assessments.atlm.calculateTool, "EstimatePlanTime");
     assert.equal(cap.assessments.atlm.startTrainingTool, "StartTraining");
     assert.equal(cap.assessments.recordTool, "SaveTaskAssessment");
+    assert.deepEqual(cap.assessments.atlm.runtimeContext.environmentId, {
+      optional:true,type:["string","null"],closedSet:true,values:["local","cloud_workspace"],
+      unknownValue:null,
+      description:"Допустимые значения: local, cloud_workspace; null означает неизвестную среду."
+    });
+    const environmentTool=listing.find(item=>item.name==="EstimatePlanTime");
+    const environmentSchema=environmentTool.inputSchema.properties.agentTask.properties.runtimeContext.properties.environmentId;
+    assert.deepEqual(environmentSchema.type,["string","null"]);
+    assert.deepEqual(environmentSchema.enum,["local","cloud_workspace",null]);
+    assert.match(environmentSchema.description,/local, cloud_workspace или null/);
+    const saveSchema=listing.find(item=>item.name==="SaveTaskAssessment").inputSchema;
+    const savedEnvironmentSchema=saveSchema.properties.payload.properties.context.properties.agentTask.properties.runtimeContext.properties.environmentId;
+    assert.deepEqual(savedEnvironmentSchema.type,["string","null"]);
+    assert.deepEqual(savedEnvironmentSchema.enum,["local","cloud_workspace",null]);
+    assert.match(savedEnvironmentSchema.description,/local, cloud_workspace или null/);
   } finally { c.close(); }
 });
 

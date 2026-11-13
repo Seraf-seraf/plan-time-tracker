@@ -50,6 +50,13 @@ test("RecordAssessment enforces schema and persists normalized facts without cha
     assert.equal(read.assessment.context.agentTask.outcomes.length, 1);
     const invalid = await atlmAssessment(c); invalid.context.agentTask.contractCount = 42;
     assert.equal((await command(c, "RecordAssessment", invalid, 0)).status, 400);
+    const environmentTask=atlmTask();environmentTask.runtimeContext={environmentId:"cloud_workspace"};
+    const environmentAssessment=await atlmAssessment(c,PLAN,environmentTask);
+    await ok(c,"RecordAssessment",environmentAssessment,0);
+    const environmentRead=(await mcp(c,"GetAssessment",{planId:PLAN,assessmentId:environmentAssessment.assessmentId})).value.result.structuredContent;
+    assert.equal(environmentRead.assessment.context.agentTask.runtimeContext.environmentId,"cloud_workspace");
+    const invalidEnvironmentTask=atlmTask();invalidEnvironmentTask.runtimeContext={environmentId:"local workspace"};
+    assert.equal((await command(c,"RecordAssessment",await atlmAssessment(c,PLAN,invalidEnvironmentTask),0)).status,400);
     const neutral = await atlmAssessment(c, PLAN, undefined, { context: { legacy: true } });
     await ok(c, "RecordAssessment", neutral, 0);
     const knownUnknown = atlmTask(); knownUnknown.outcomes = null;
@@ -75,4 +82,17 @@ test("runtime inputs are optional and retain unknown without inventing an agent 
   const normalized=normalizeAgentTaskV1(input);
   assert.equal(normalized.features.modelId,"model-a");assert.equal(normalized.features.reasoningEffort,"max");assert.equal(normalized.features.plannedParallelAgents,3);
   for(const count of [0,-1,1.5,"2"]){input.runtimeContext.plannedParallelAgents=count;assert.throws(()=>normalizeAgentTaskV1(input),e=>e.code==="VALIDATION_ERROR");}
+});
+
+test("environmentId accepts only the closed enum or null", () => {
+  const input=atlmTask();
+  input.runtimeContext={environmentId:null};
+  for(const value of ["local","cloud_workspace",null]){
+    input.runtimeContext.environmentId=value;
+    assert.equal(normalizeAgentTaskV1(input).agentTask.runtimeContext.environmentId,value);
+  }
+  for(const value of ["runtime-worker-17","local workspace","cloud container"," local ","",{name:"runtime"},"x".repeat(129)]){
+    input.runtimeContext.environmentId=value;
+    assert.throws(()=>normalizeAgentTaskV1(input),e=>e.code==="VALIDATION_ERROR");
+  }
 });

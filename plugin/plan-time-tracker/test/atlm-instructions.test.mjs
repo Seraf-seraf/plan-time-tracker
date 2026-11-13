@@ -22,7 +22,7 @@ test('delivered skills give one pre-start ATLM workflow with current-state steps
     assert.match(text, /agent-v3-hybrid/);assert.match(text, /OLS/);assert.match(text, /ridge/);
     assert.match(text, /hybrid.usedEngine/);assert.match(text, /historical-median/);
   }
-  for (const field of ['schemaVersion', 'agent-task-v1', 'profileEvidence', 'runtimeContext', 'plannedParallelAgents', 'CLIENT_REPORTED', 'changedContracts', 'verificationKinds', 'predictionRequest', 'expectedRequirementsDigest', 'GetCommandResult']) assert(primary.includes(field), field);
+  for (const field of ['schemaVersion', 'agent-task-v1', 'profileEvidence', 'runtimeContext', 'environmentId', 'local', 'cloud_workspace', 'null используйте', 'plannedParallelAgents', 'CLIENT_REPORTED', 'changedContracts', 'verificationKinds', 'predictionRequest', 'expectedRequirementsDigest', 'GetCommandResult']) assert(primary.includes(field), field);
   assert.match(primary, /UNKNOWN\/null/);assert.match(primary, /не передавай эти счётчики самостоятельно/);
   assert.match(primary, /Не угадывай модель агента или reasoning effort/);
   assert.match(primary, /lowerMs\/upperMs=null/);assert.match(primary, /не называй точку P50\/P80/);

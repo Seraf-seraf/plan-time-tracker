@@ -9,6 +9,7 @@ const WRITE_COMMANDS = new Set(["CreatePlan", "StartPlan", "PausePlan", "ResumeP
 const TRACKER_COMMANDS = new Set(["SetStepStatus", "RecordAssessment"]);
 const TRACKER_VERSIONED_COMMANDS = new Set(["SetStepStatus"]);
 const TRACKER_READ_TOOLS = new Set(["GetTrackerCapabilities", "GetPlanExecutionSnapshot", "GetCommandReceipt", "GetAssessment", "GetEstimationHistory", "CalculateAtlmEstimate", "GetPlanEstimate", "GetEstimationModelStatus", "GetAtlmDataset"]);
+const ENVIRONMENT_IDS = Object.freeze(["local", "cloud_workspace"]);
 const UI_TIME_ZONES = [{ value: "Europe/Moscow", label: "Москва (UTC+3)" }, { value: "Asia/Omsk", label: "Омск (UTC+6)" }];
 export function resolveUiTimeZone(value) { return UI_TIME_ZONES.some((option) => option.value === value) ? value : "Asia/Omsk"; }
 
@@ -1250,7 +1251,9 @@ export const AGENT_TASK_SCHEMA = {
     verificationKinds: { type: ["array", "null"], maxItems: 20, items: { enum: ["BUILD_STATIC", "UNIT", "INTEGRATION", "UI_E2E", "DEPLOY_SMOKE"] } },
     profileEvidence: { type: "object", additionalProperties: false, required: [...ESTIMATE_PROFILE_FIELDS], properties: Object.fromEntries(ESTIMATE_PROFILE_FIELDS.map(key => [key, { type: "string", minLength: 1, maxLength: 400 }])) },
     runtimeContext: { type: ["object", "null"], additionalProperties: false, properties: {
-      ...Object.fromEntries(["modelId", "reasoningEffort", "environmentId"].map(key => [key, { type: ["string", "null"], minLength: 0, maxLength: 128 }])),
+      ...Object.fromEntries(["modelId", "reasoningEffort"].map(key => [key, { type: ["string", "null"], minLength: 0, maxLength: 128 }])),
+      environmentId: { type: ["string", "null"], enum: [...ENVIRONMENT_IDS, null],
+        description: "Допустимые значения: local, cloud_workspace или null, если среда неизвестна." },
       plannedParallelAgents: { type: ["integer", "null"], minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, provenance: { enum: ["CLIENT_REPORTED", "UNKNOWN"] },
     } },
   },
@@ -2404,6 +2407,9 @@ async function readTrackerCapabilities(db,ownerId){return {
       historyMaxTargets: 20, historyMaxLimit: 100, methodologyControlsExecution: false,
       atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v1", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
         policyVersion: ATLM_POLICY_VERSION, engines: ["OLS", "RIDGE"],
+        runtimeContext: { environmentId: { optional: true, type: ["string", "null"], closedSet: true,
+          values: [...ENVIRONMENT_IDS], unknownValue: null,
+          description: "Допустимые значения: local, cloud_workspace; null означает неизвестную среду." } },
         predictionScope: "FULL_FROM_FIRST_START", plannedForecastMode:"CURRENT_READ_ONLY", firstStartForecast:"FROZEN_SNAPSHOT", earlyForecastMethod:{...HISTORICAL_MEDIAN_METHOD}, retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
         calculateTool: "CalculateAtlmEstimate", planEstimateTool: "GetPlanEstimate", modelStatusTool: "GetEstimationModelStatus",
         processTool: "ProcessEstimationTraining", startTrainingTool: "StartEstimationTraining", datasetTool: "GetAtlmDataset", predictionRequest: { method: "ATLM", methodVersion: 1 },
