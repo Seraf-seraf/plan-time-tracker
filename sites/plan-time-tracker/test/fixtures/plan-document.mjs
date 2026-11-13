@@ -14,6 +14,13 @@ export const planText = `# Исправить чтение плана
 | --- | --- | --- |
 | 1 | Сохранить план целиком | Нет |
 | 2 | Проверить статусы | Результат этапа 1 |
+| \`OutboxHandlerRegistry::register\` | Длинный контракт с описанием | \`OutboxProcessor::processBatch\` |
+
+\`Seraf-seraf/dvoryanin/563db6c7aee3914ef90c48718b67485ed678\`
+
+\`\`\`
+OutboxHandlerRegistry::register(OutboxProcessor::processBatch)
+\`\`\`
 
 ## Этап 1. Сохранить план целиком
 

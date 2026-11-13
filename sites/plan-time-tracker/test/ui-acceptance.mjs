@@ -47,6 +47,17 @@ try {
       assert.equal(await page.locator('[data-view="' + view + '"]').getAttribute("aria-current"), "page");
       assert.equal(await page.locator('#view-' + view).isVisible(), true);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, view + " overflows at " + width);
+      if (width <= 390 && (view === "overview" || view === "plans")) {
+        const panel = page.locator('#view-' + view + ' .period-filter');
+        const bounds = await panel.evaluate(node => {
+          const panelRect = node.getBoundingClientRect();
+          return [panelRect.left, panelRect.right, ...Array.from(node.querySelectorAll('.toolbar, .field, input, select, .metrics, .metric, button'), child => {
+            const rect = child.getBoundingClientRect();
+            return Math.max(panelRect.left - rect.left, rect.right - panelRect.right);
+          })];
+        });
+        assert(bounds[0] >= 0 && bounds[1] <= width && bounds.slice(2).every(overflow => overflow <= 1), view + ' filter content fits at ' + width);
+      }
     }
     widths.push(width);
     await page.screenshot({ path: resolve(artifacts, "settings-" + width + ".png"), fullPage: true });

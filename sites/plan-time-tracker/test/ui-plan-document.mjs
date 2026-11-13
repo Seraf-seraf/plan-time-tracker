@@ -156,7 +156,13 @@ try {
       };
     });
     assert.equal(sizes.overflow, false, JSON.stringify(sizes));
-    for(const header of await page.locator(".plan-prose th").all())assert.equal(await header.evaluate(node=>getComputedStyle(node).whiteSpace),"nowrap");
+    if (width <= 390) {
+      const clipped = await page.locator('#planDetail').evaluate(root => [...root.querySelectorAll('h2,h3,h4,p,pre,table,th,td,button')].filter(node => {
+        const rect = node.getBoundingClientRect();
+        return rect.width && (rect.left < -1 || rect.right > innerWidth + 1 || node.scrollWidth > node.clientWidth + 1);
+      }).map(node => ({tag: node.tagName, text: node.textContent.slice(0, 60)})));
+      assert.deepEqual(clipped, [], JSON.stringify(clipped));
+    }
     assert(
       sizes.h1 > sizes.h2 &&
         sizes.h2 > sizes.h3 &&
