@@ -22,8 +22,6 @@ description: Сохранить исходный план и текущие ст
 
 Применяйте соседний assess-task. Через GetTrackerInfo найдите `assessments.atlm`, прочитайте GetTaskAssessment без assessmentId и сохраните currentRequirementsDigest до анализа задачи. SaveTaskAssessment передаёт исходные факты `context.agentTask` и `predictionRequest:{method:"ATLM",methodVersion:1}`. Сервер возвращает `serverEstimation`; агент не задаёт веса, коэффициенты или длительности примеров. Гибрид agent-v3-hybrid сравнивает OLS и ridge по более ранним результатам; фактически использованный решатель находится в serverEstimation.hybrid.usedEngine. historical-median — отдельный ориентир, проверяйте method и не называйте медиану обученной ATLM. Выбор ветви, lambda и исходные значения агент не подгоняет.
 
-`runtimeContext.environmentId` принимает только `local`, `cloud_workspace` или `null`; null используйте для неизвестной или неподтверждённой среды. Не подменяйте значения enum описаниями «локальный workspace» или «облачный контейнер».
-
 Прогноз показывает полное активное время плана PLAN_ACTIVE от первого StartPlan. UNKNOWN/null и отсутствие модели не мешают выполнять разрешённую работу. Для текущего read-only пересчёта PLANNED по последним сохранённым признакам и текущей истории используйте GetSavedEstimate; recordedEstimation — исходная сохранённая оценка, после первого запуска возвращается frozen-снимок; GetTrainingStatus показывает состояние данных и модели. ContinueTraining продолжает ограниченную серверную обработку, StartTraining вызывается только по просьбе пользователя запустить обучение. Исходный снимок после первого запуска не заменяется поздними оценками.
 
 ## Выполнить работу и обновить статус этапа
