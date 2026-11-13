@@ -2257,6 +2257,8 @@ export async function executeCommand(db, identity, envelope, channel, nowMs) {
 
 const PLAN_STATUSES = ["PLANNED", "RUNNING", "PAUSED", "COMPLETED"];
 const MAX_PLAN_PAGE_SIZE = 100;
+const PLAN_LIST_ORDER = "isCompleted ASC, registeredAt DESC, planId DESC";
+const PLAN_COMPLETION_GROUP = "CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END";
 
 async function listPlans(db, ownerId, nowMs, filter = {}) {
   if (!filter || typeof filter !== "object" || Array.isArray(filter) || Object.keys(filter).some(key => !["statuses", "limit", "cursor", "deleted"].includes(key))) {
@@ -2274,17 +2276,19 @@ async function listPlans(db, ownerId, nowMs, filter = {}) {
   if (filter.cursor !== undefined) {
     let cursor;
     try { cursor = JSON.parse(filter.cursor); } catch {}
-    if (typeof filter.cursor !== "string" || filter.cursor.length > 200 || !Array.isArray(cursor) || cursor.length !== 2 || !Number.isSafeInteger(cursor[0]) || cursor[0] < 0 || !UUID.test(cursor[1] || "")) {
+    if (typeof filter.cursor !== "string" || filter.cursor.length > 200 || !Array.isArray(cursor) || cursor.length !== 3
+      || !Number.isInteger(cursor[0]) || (cursor[0] !== 0 && cursor[0] !== 1)
+      || !Number.isSafeInteger(cursor[1]) || cursor[1] < 0 || !UUID.test(cursor[2] || "")) {
       throw appError("VALIDATION_ERROR", "Некорректный cursor списка планов.");
     }
-    clauses.push("(registered_at < ? OR (registered_at = ? AND plan_id < ?))");
-    values.push(cursor[0], cursor[0], cursor[1]);
+    clauses.push("(" + PLAN_COMPLETION_GROUP + " > ? OR (" + PLAN_COMPLETION_GROUP + " = ? AND (registered_at < ? OR (registered_at = ? AND plan_id < ?))))");
+    values.push(cursor[0], cursor[0], cursor[1], cursor[1], cursor[2]);
   }
-  const rows = await dbAll(db, "SELECT * FROM plans WHERE " + clauses.join(" AND ") + " ORDER BY registered_at DESC, plan_id DESC LIMIT ?", ...values, limit + 1);
+  const rows = await dbAll(db, "SELECT * FROM plans WHERE " + clauses.join(" AND ") + " ORDER BY " + PLAN_COMPLETION_GROUP + " ASC, registered_at DESC, plan_id DESC LIMIT ?", ...values, limit + 1);
   const page = rows.slice(0, limit), last = page.at(-1);
   return {
     plans: await Promise.all(page.map(row => planSummary(db, ownerId, row, nowMs))),
-    nextCursor: rows.length > limit ? JSON.stringify([last.registered_at, last.plan_id]) : null,
+    nextCursor: rows.length > limit ? JSON.stringify([last.status === "COMPLETED" ? 1 : 0, last.registered_at, last.plan_id]) : null,
     serverNow: nowMs,
   };
 }
@@ -2409,7 +2413,7 @@ async function readTrackerCapabilities(db,ownerId){return {
  planDocuments:{available:true,format:"markdown",createField:"planText",maxLength:60000,stageHeadings:"## Этап 1. Название",statusTool:"SetStepStatus",statuses:["PENDING","RUNNING","BLOCKED","FAILED","DONE"],preservesOriginal:true},
  steps:{model:"current-state",statusHistory:false,versionRequired:true,timing:{available:true,unit:"ms",startStatus:"RUNNING",excludesPlanPauses:true,historyBackfilled:false}},
  planDeletion:{softDelete:true,deleteTool:"DeletePlan",restoreTool:"RestorePlan",deletedFilter:"deleted",restoreStartsTimer:false},
- parallelPlans:true,planList:{tool:"ListPlans",statuses:PLAN_STATUSES,defaultLimit:50,maxLimit:MAX_PLAN_PAGE_SIZE,order:"registeredAt DESC, planId DESC",deletedDefault:false},
+ parallelPlans:true,planList:{tool:"ListPlans",statuses:PLAN_STATUSES,defaultLimit:50,maxLimit:MAX_PLAN_PAGE_SIZE,order:PLAN_LIST_ORDER,deletedDefault:false},
  analytics:{totalActiveMs:"union of owner intervals",activeByDay:"union by local day",sumPlanActiveMs:"sum of per-plan intervals"},exportFormatVersion:2
 };}
 async function readPlanExecutionSnapshot(db,ownerId,planId,nowMs){

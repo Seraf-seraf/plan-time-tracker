@@ -71,6 +71,13 @@ try {
   assert.equal(recentFirst.length, 4);assert.equal(recentSecond.length, 4);
   assert.equal(recentFirst.some(id => recentSecond.includes(id)), false);
   await previous("recent").click();assert.deepEqual(await ids("#recent [data-plan-id]"), recentFirst);
+  const allRecent = [...recentFirst];
+  while (await next("recent").isEnabled()) {
+    await next("recent").click();
+    allRecent.push(...await ids("#recent [data-plan-id]"));
+  }
+  assert.deepEqual(allRecent.slice(-2), [finished, old], "completed plans are last in the secondary list too");
+  while (await previous("recent").isEnabled()) await previous("recent").click();
   await page.screenshot({ path: resolve(artifacts, "overview-desktop.png"), fullPage: true });
 
   await page.locator('[data-view="plans"]').click();
@@ -88,6 +95,7 @@ try {
   assert.equal(allRows.length, 25);
   assert.equal(new Set(allRows).size, allRows.length, "each matching plan appears exactly once");
   assert(allRows.includes(active) && allRows.includes(paused) && allRows.includes(finished));
+  assert.deepEqual(allRows.slice(-2), [finished, old], "completed plans remain last across API and client pagination");
   assert.equal(await next("plans").isDisabled(), true);
   await previous("plans").click();assert.equal(await next("plans").isEnabled(), true);
 
