@@ -2551,6 +2551,7 @@ button,input,textarea,select{font-size:var(--text-md);line-height:1.5}input:not(
 .document-plan+.plan-metadata{margin-top:24px}.plan-metadata .form{margin-top:16px}.modalbox{max-width:760px}.modalbox textarea#description{min-height:260px}
 @media(max-width:600px){.step-status-form{grid-template-columns:minmax(0,1fr)}.tracker-card-toggle{display:grid;grid-template-columns:minmax(0,1fr) auto}.tracker-card-toggle>.tracker-card-status{grid-column:1;grid-row:2}.document-plan .tracker-card{padding:20px 0}.tracker-actions button{min-height:44px}}
 @media(max-width:600px){#view-detail{grid-template-columns:minmax(0,1fr)}#view-detail>.panel,#planDetail,.document-plan,.document-plan .tracker-list,.document-plan .tracker-card,.document-plan .tracker-card-body{min-width:0;max-width:100%}.plan-table-scroll{overflow:visible}.plan-prose table{table-layout:fixed}.plan-prose :is(th,td){padding:8px 4px;white-space:normal;overflow-wrap:anywhere;word-break:break-word}.plan-prose pre{white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;overflow-x:visible}}
+@media(max-width:600px){.document-plan .tracker-collapse-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.tracker-collapse-actions>button{min-width:0;white-space:normal;overflow-wrap:anywhere}}
 `;
 
 const UI_ANALYTICS_CSS = String.raw`
