@@ -416,10 +416,18 @@ export function scoreEstimateCases(cases) {
   };
 }
 
-// ATLM agent-v2: optional runtime effects, early fits, automatic identity/log/sqrt transformations and ordinary least
-// squares. Runtime has no ML service or random state. All preprocessing belongs
-// to the training prefix; callers supply server-validated frozen observations.
-const ATLM_METHOD = Object.freeze({ id: "atlm", version: "agent-v2" });
+// agent-v2 OLS remains independently reproducible. agent-v3-hybrid adds ridge
+// and chronological selection. Every preprocessing fit and decision belongs to
+// the observed training prefix; inference has no ML service or random state.
+const ATLM_OLS_METHOD = Object.freeze({ id: "atlm", version: "agent-v2" });
+const ATLM_METHOD = Object.freeze({ id: "atlm", version: "agent-v3-hybrid" });
+const ATLM_RIDGE_METHOD = Object.freeze({ id: "atlm-ridge", version: "1" });
+const ATLM_RIDGE_LAMBDA = 1;
+const ATLM_MS_PER_MINUTE = 60000;
+const ATLM_HYBRID_METHOD = ATLM_METHOD;
+const ATLM_POLICY_VERSION = 1;
+const ATLM_MIN_COMPARISONS = 5;
+const ATLM_MAE_TIE_MS = 1;
 const ATLM_FEATURE_VERSION = "agent-task-v2";
 const ATLM_MAX_COLUMNS = 64;
 const ATLM_RUNTIME_CATEGORIES = Object.freeze(["modelId", "reasoningEffort"]);
@@ -573,7 +581,7 @@ function atlmQr(matrix, target) {
     scales.push(norm);
     if (norm > 0) for (let i = 0; i < n; i++) a[i][j] /= norm;
   }
-  for (let k = 0; k < p; k++) {
+  for (let k = 0; k < Math.min(n, p); k++) {
     let pivot = k, largest = -1;
     for (let j = k; j < p; j++) {
       let norm = 0;
@@ -620,7 +628,7 @@ function atlmFreeze(value) {
   return value;
 }
 
-export async function fitAtlm(rows) {
+export async function fitAtlmOls(rows) {
   const problem = atlmDatasetProblem(rows);
   if (problem) return problem;
   const sorted = atlmSortedRows(rows), n = sorted.length;
@@ -649,7 +657,7 @@ export async function fitAtlm(rows) {
   if (solved.rank !== p) return atlmUnavailable("RANK_DEFICIENT", { sampleCount: n, p, rank: solved.rank });
   if (!solved.coefficients.every(Number.isFinite)) return atlmUnavailable("NUMERICAL_FAILURE", { sampleCount: n });
   const artifact = atlmFreeze({
-    formatVersion: 1, method: { ...ATLM_METHOD }, featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
+    formatVersion: 1, method: { ...ATLM_OLS_METHOD }, featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
     n, p, rank: solved.rank, residualDegreesOfFreedom, levels, transforms, runtime, columns, coefficients: solved.coefficients,
     constantPredictors, manifest: sorted.map(({ sampleId, planId }) => ({ sampleId, planId })),
     datasetDigest: "sha256:" + await hashCommandInput(sorted),
@@ -658,9 +666,9 @@ export async function fitAtlm(rows) {
   return { status: "AVAILABLE", artifact };
 }
 
-function atlmArtifactValid(artifact) {
-  if (!isPlainRecord(artifact) || artifact.formatVersion !== 1 || artifact.method?.id !== ATLM_METHOD.id
-    || artifact.method?.version !== ATLM_METHOD.version || artifact.featureSchemaVersion !== ATLM_FEATURE_VERSION
+function atlmOlsArtifactValid(artifact) {
+  if (!isPlainRecord(artifact) || artifact.formatVersion !== 1 || artifact.method?.id !== ATLM_OLS_METHOD.id
+    || artifact.method?.version !== ATLM_OLS_METHOD.version || artifact.featureSchemaVersion !== ATLM_FEATURE_VERSION
     || artifact.metric !== "PLAN_ACTIVE" || !isNonnegativeSafeInteger(artifact.n) || artifact.n > ATLM_MAX_ROWS
     || !Number.isInteger(artifact.p) || artifact.p < 1 || artifact.p > ATLM_MAX_COLUMNS || artifact.n - artifact.p < 0 || artifact.rank !== artifact.p
     || artifact.residualDegreesOfFreedom !== artifact.n - artifact.p || !isSnapshotDigest(artifact.datasetDigest)
@@ -695,8 +703,8 @@ function atlmArtifactValid(artifact) {
   return true;
 }
 
-export function predictAtlm(artifact, features) {
-  if (!atlmArtifactValid(artifact)) return atlmUnavailable("INVALID_ARTIFACT");
+export function predictAtlmOls(artifact, features) {
+  if (!atlmOlsArtifactValid(artifact)) return atlmUnavailable("INVALID_ARTIFACT");
   const problem = atlmFeatureProblem(features);
   if (problem) return problem;
   const unsupportedFields=ESTIMATE_PROFILE_FIELDS.filter(field => !artifact.levels[field].includes(features[field]));
@@ -710,6 +718,107 @@ export function predictAtlm(artifact, features) {
   const pointMs = Math.round(minutes * 60000);
   return isNonnegativeSafeInteger(pointMs) ? { status: "AVAILABLE", pointMs, reason: null } : atlmUnavailable("INVALID_PREDICTION");
 }
+
+function atlmRidgeColumns(levels, runtime) {
+  const columns = [{ kind: "intercept" }];
+  for (const field of ESTIMATE_PROFILE_FIELDS) for (const level of levels[field]) columns.push({ kind: "category", field, level });
+  for (const field of ATLM_NUMERIC_FIELDS) columns.push({ kind: "numeric", field });
+  for (const field of ATLM_RUNTIME_CATEGORIES) for (const level of runtime.categories[field].levels) columns.push({ kind: "runtimeCategory", field, level });
+  columns.push({ kind: "runtimeNumeric", field: "plannedParallelAgents" }, { kind: "runtimeMissing", field: "plannedParallelAgents" });
+  return columns;
+}
+
+function atlmManifestValid(manifest, n) {
+  if (!Array.isArray(manifest) || manifest.length !== n) return false;
+  const samples = new Set(), plans = new Set();
+  for (const item of manifest) {
+    if (!atlmExactKeys(item, ["sampleId", "planId"]) || !atlmValidId(item.sampleId) || !atlmValidId(item.planId)
+      || samples.has(item.sampleId) || plans.has(item.planId)) return false;
+    samples.add(item.sampleId); plans.add(item.planId);
+  }
+  return true;
+}
+
+function atlmRidgeArtifactValid(a) {
+  if (!isPlainRecord(a) || a.formatVersion !== 1 || a.kind !== "RIDGE" || a.method?.id !== ATLM_RIDGE_METHOD.id
+    || a.method.version !== ATLM_RIDGE_METHOD.version || a.featureSchemaVersion !== ATLM_FEATURE_VERSION || a.metric !== "PLAN_ACTIVE"
+    || !Number.isSafeInteger(a.n) || a.n < 1 || a.n > ATLM_MAX_ROWS || !Number.isInteger(a.p) || a.p < 1 || a.p > ATLM_MAX_COLUMNS
+    || !Number.isInteger(a.rank) || a.rank < 1 || a.rank > Math.min(a.n, a.p)
+    || a.lambda !== ATLM_RIDGE_LAMBDA || a.objective !== "mean-square-plus-l2" || !isSnapshotDigest(a.datasetDigest)
+    || !atlmRuntimeValid(a.runtime, a.n) || !atlmExactKeys(a.levels, ESTIMATE_PROFILE_FIELDS)
+    || !atlmExactKeys(a.transforms, [...ATLM_NUMERIC_FIELDS, "target"]) || !Object.values(a.transforms).every(t => ATLM_TRANSFORMS.includes(t))
+    || !atlmManifestValid(a.manifest, a.n) || a.engine?.version !== "householder-qr-ridge-v1") return false;
+  for (const field of ESTIMATE_PROFILE_FIELDS) {
+    const levels = a.levels[field];
+    if (!Array.isArray(levels) || !levels.length || canonical(levels) !== canonical(ATLM_CATEGORY_LEVELS[field].filter(v => levels.includes(v)))) return false;
+  }
+  const columns = atlmRidgeColumns(a.levels, a.runtime);
+  if (canonical(a.columns) !== canonical(columns) || a.p !== columns.length) return false;
+  for (const field of ["centers", "scales", "coefficients"]) {
+    if (!Array.isArray(a[field]) || a[field].length !== a.p || !a[field].every(Number.isFinite)) return false;
+  }
+  return a.centers[0] === 0 && a.scales[0] === 1 && a.scales.every((value, i) => value > 0
+    && (["numeric", "runtimeNumeric"].includes(columns[i].kind) || value === 1));
+}
+
+export async function fitAtlmRidge(rows) {
+  const problem = atlmDatasetProblem(rows);
+  if (problem) return problem;
+  const sorted = atlmSortedRows(rows), n = sorted.length;
+  if (!n) return atlmUnavailable("INSUFFICIENT_DATA", { sampleCount: 0 });
+  for (const row of sorted) { const missing = atlmFeatureProblem(row.features); if (missing) return missing; }
+  const levels = {}, transforms = {};
+  for (const field of ESTIMATE_PROFILE_FIELDS) levels[field] = ATLM_CATEGORY_LEVELS[field].filter(value => sorted.some(row => row.features[field] === value));
+  for (const field of ATLM_NUMERIC_FIELDS) transforms[field] = atlmChooseTransform(sorted.map(row => row.features[field]));
+  const target = sorted.map(row => row.actualMs / ATLM_MS_PER_MINUTE);
+  transforms.target = atlmChooseTransform(target);
+  const runtime = atlmFitRuntime(sorted), columns = atlmRidgeColumns(levels, runtime), p = columns.length;
+  if (p > ATLM_MAX_COLUMNS) return atlmUnavailable("MODEL_CAPACITY_LIMIT", { sampleCount: n, p, limit: ATLM_MAX_COLUMNS });
+  const matrix = sorted.map(row => atlmDesignRow(row.features, columns, transforms, runtime));
+  const centers = [], scales = [];
+  for (let j = 0; j < p; j++) {
+    const values = matrix.map(row => row[j]), constant = values.every(v => v === values[0]);
+    const center = j === 0 ? 0 : constant ? values[0] : atlmSum(values) / n;
+    const numeric = ["numeric", "runtimeNumeric"].includes(columns[j].kind);
+    const scale = j === 0 || !numeric || constant ? 1 : Math.sqrt(atlmSum(values.map(v => (v - center) ** 2)) / n);
+    centers.push(center); scales.push(scale > 0 ? scale : 1);
+  }
+  const standardized = matrix.map(row => row.map((value, j) => (value - centers[j]) / scales[j]));
+  const augmented = standardized.slice(), response = target.map(value => atlmTransform(transforms.target, value));
+  for (let j = 1; j < p; j++) {
+    const penalty = Array(p).fill(0); penalty[j] = Math.sqrt(n * ATLM_RIDGE_LAMBDA);
+    augmented.push(penalty); response.push(0);
+  }
+  const solved = atlmQr(augmented, response), raw = atlmQr(matrix, Array(n).fill(0));
+  if (!solved.coefficients?.every(Number.isFinite)) return atlmUnavailable("NUMERICAL_FAILURE", { sampleCount: n, p, rank: raw.rank });
+  const artifact = atlmFreeze({
+    formatVersion: 1, kind: "RIDGE", method: { ...ATLM_RIDGE_METHOD }, featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
+    n, p, rank: raw.rank, lambda: ATLM_RIDGE_LAMBDA, objective: "mean-square-plus-l2",
+    levels, transforms, runtime, columns, centers, scales, coefficients: solved.coefficients,
+    manifest: sorted.map(({ sampleId, planId }) => ({ sampleId, planId })), datasetDigest: "sha256:" + await hashCommandInput(sorted),
+    engine: { id: "ECMAScript-binary64", version: "householder-qr-ridge-v1", rankTolerance: raw.rankTolerance },
+  });
+  return { status: "AVAILABLE", artifact };
+}
+
+export function predictAtlmRidge(artifact, features) {
+  if (!atlmRidgeArtifactValid(artifact)) return atlmUnavailable("INVALID_ARTIFACT");
+  const problem = atlmFeatureProblem(features);
+  if (problem) return problem;
+  const unsupportedFields = ESTIMATE_PROFILE_FIELDS.filter(field => !artifact.levels[field].includes(features[field]));
+  if (unsupportedFields.length) return atlmUnavailable("UNSUPPORTED_CATEGORY", { unsupportedFields });
+  const design = atlmDesignRow(features, artifact.columns, artifact.transforms, artifact.runtime)
+    .map((value, i) => (value - artifact.centers[i]) / artifact.scales[i]);
+  const value = atlmSum(design.map((x, i) => x * artifact.coefficients[i]));
+  const minutes = artifact.transforms.target === "identity" ? value : artifact.transforms.target === "log" ? Math.exp(value) : value < 0 ? NaN : value ** 2;
+  const pointMs = Math.round(minutes * ATLM_MS_PER_MINUTE);
+  return design.every(Number.isFinite) && minutes >= 0 && isNonnegativeSafeInteger(pointMs)
+    ? { status: "AVAILABLE", pointMs, reason: null } : atlmUnavailable("INVALID_PREDICTION");
+}
+
+export async function fitAtlm(rows, options) { return fitHybridAtlm(rows, options); }
+export function predictAtlm(artifact, features) { return artifact?.kind === "HYBRID" ? predictHybridAtlm(artifact, features) : predictAtlmOls(artifact, features); }
+function atlmArtifactValid(artifact) { return artifact?.kind === "HYBRID" ? atlmHybridArtifactValid(artifact) : atlmOlsArtifactValid(artifact); }
 
 function atlmEvaluationOptions(options) {
   if (!isPlainRecord(options) || Object.keys(options).some(key => !["protocolVersion", "cutoff"].includes(key))
@@ -738,8 +847,8 @@ export async function evaluateAtlmCase(rows, sampleId, options = {}) {
   const target = rows.find(row => row.sampleId === sampleId);
   const train = atlmSortedRows(rows.filter(row => row.planId !== target.planId
     && row.sourceAvailableAt < target.capturedAt && !atlmFeatureProblem(row.features)));
-  const fit = await fitAtlm(train);
-  const atlm = fit.status === "AVAILABLE" ? predictAtlm(fit.artifact, target.features) : atlmUnavailable(fit.reason);
+  const fit = await fitAtlmOls(train);
+  const atlm = fit.status === "AVAILABLE" ? predictAtlmOls(fit.artifact, target.features) : atlmUnavailable(fit.reason);
   const pointMs = median(train.map(row => row.actualMs));
   return { sampleId: target.sampleId, planId: target.planId, capturedAt: target.capturedAt,
     sourceAvailableAt: target.sourceAvailableAt, features: { ...target.features }, actualMs: target.actualMs,
@@ -766,7 +875,7 @@ export function summarizeAtlmEvaluation(cases, selection) {
   const metrics = { atlm: atlmScore(ordered, "atlm"), median: atlmScore(ordered, "median") };
   const paired = { caseCount: pairedCases.length, caseSampleIds: pairedCases.map(item => item.sampleId),
     atlm: atlmScore(pairedCases, "atlm"), median: atlmScore(pairedCases, "median") };
-  return { status: "AVAILABLE", formatVersion: 1, protocolVersion: 1, method: { ...ATLM_METHOD }, metric: "PLAN_ACTIVE",
+  return { status: "AVAILABLE", formatVersion: 1, protocolVersion: 1, method: { ...ATLM_OLS_METHOD }, metric: "PLAN_ACTIVE",
     cutoff: selection.cutoff, inputCount: selection.inputCount, eligibleCount: selection.eligibleCount, excluded: selection.excluded,
     caseCount: ordered.length, cases: ordered, metrics, paired,
     candidateReady: paired.caseCount >= 5 && paired.atlm.maeMs <= paired.median.maeMs };
@@ -777,6 +886,230 @@ export async function evaluateAtlmChronologically(rows, options = {}) {
   const cases = [];
   for (const sampleId of selection.caseSampleIds) cases.push(await evaluateAtlmCase(rows, sampleId, options));
   return summarizeAtlmEvaluation(cases, selection);
+}
+
+function atlmTrainingRow(row) {
+  return { sampleId: row.sampleId, planId: row.planId, capturedAt: row.capturedAt,
+    sourceAvailableAt: row.sourceAvailableAt, features: row.features, actualMs: row.actualMs };
+}
+
+function atlmHybridJournalProblem(journal) {
+  if (!Array.isArray(journal)) return atlmUnavailable("INVALID_DATASET");
+  const ids = new Set();
+  for (const row of journal) {
+    if (!isPlainRecord(row) || !atlmValidId(row.planId) || typeof row.sampleId !== "string"
+      || !Number.isSafeInteger(Number(row.sampleId)) || Number(row.sampleId) < 1 || String(Number(row.sampleId)) !== row.sampleId
+      || ids.has(row.sampleId) || !["ELIGIBLE", "EXCLUDED"].includes(row.eligibility)
+      || !isNonnegativeSafeInteger(row.observedAt) || !isNonnegativeSafeInteger(row.sourceAvailableAt)
+      || row.observedAt < row.sourceAvailableAt) return atlmUnavailable("INVALID_DATASET");
+    if (row.eligibility === "ELIGIBLE" && (atlmDatasetProblem([atlmTrainingRow(row)]) || atlmFeatureProblem(row.features))) return atlmUnavailable("INVALID_DATASET");
+    ids.add(row.sampleId);
+  }
+  return null;
+}
+
+// Choose the last observed version BEFORE applying eligibility. A later exclusion
+// must never resurrect an older eligible version; a future version is invisible.
+export function selectHybridHistory(journal, cutoff, { inclusive = false, excludePlanId = null } = {}) {
+  const latest = new Map(), before = value => inclusive ? value <= cutoff : value < cutoff;
+  for (const row of journal) {
+    if (!before(row.observedAt)) continue;
+    const previous = latest.get(row.planId);
+    if (!previous || Number(row.sampleId) > Number(previous.sampleId)) latest.set(row.planId, row);
+  }
+  return atlmSortedRows([...latest.values()].filter(row => row.planId !== excludePlanId && row.eligibility === "ELIGIBLE"
+    && before(row.sourceAvailableAt)).map(atlmTrainingRow));
+}
+
+function atlmHybridTargets(rows) {
+  return rows.slice().sort((a, b) => a.capturedAt - b.capturedAt || atlmCompareId(a.planId, b.planId)).slice(-ATLM_MAX_EVALUATION_CASES);
+}
+
+export function selectHybridEvaluationCases(journal, options = {}) {
+  if (!isPlainRecord(options) || Object.keys(options).some(key => !["cutoff", "protocolVersion"].includes(key))
+    || (options.protocolVersion !== undefined && options.protocolVersion !== 2)) return atlmUnavailable("INVALID_PROTOCOL");
+  const cutoff = options.cutoff ?? Number.MAX_SAFE_INTEGER;
+  const problem = atlmHybridJournalProblem(journal);
+  if (problem) return problem;
+  if (!isNonnegativeSafeInteger(cutoff)) return atlmUnavailable("INVALID_PROTOCOL");
+  const rows = selectHybridHistory(journal, cutoff, { inclusive: true });
+  if (rows.length > ATLM_MAX_ROWS) return atlmUnavailable("DATASET_LIMIT_REACHED", { sampleCount: rows.length, limit: ATLM_MAX_ROWS });
+  return { status: "AVAILABLE", protocolVersion: 2, cutoff, inputCount: rows.length, eligibleCount: rows.length,
+    journalVersionCount: journal.length, caseSampleIds: atlmHybridTargets(rows).map(row => row.sampleId), excluded: [] };
+}
+
+async function atlmFitCandidates(rows) {
+  return { ols: await fitAtlmOls(rows), ridge: await fitAtlmRidge(rows) };
+}
+
+function atlmFitDiagnostic(fit) {
+  const source = fit.artifact || fit;
+  return { status: fit.status, reason: fit.reason ?? null,
+    sampleCount: source.n ?? source.sampleCount ?? 0,
+    ...(source.p === undefined ? {} : { p: source.p }), ...(source.rank === undefined ? {} : { rank: source.rank }) };
+}
+
+function atlmStrategyPrediction(base, engine) {
+  const order = engine === "OLS" ? ["ols", "ridge"] : engine === "RIDGE" ? ["ridge"] : [];
+  for (const name of order) if (base[name].status === "AVAILABLE") return { ...base[name],
+    hybrid: { policyVersion: ATLM_POLICY_VERSION, selectedEngine: engine, usedEngine: name.toUpperCase(),
+      fallbackReason: name.toUpperCase() === engine ? null : base.ols.reason } };
+  const failed = order.length ? base[order.at(-1)] : null;
+  return { ...(failed || atlmUnavailable("MEDIAN_BASELINE_NOT_WORSE")),
+    hybrid: { policyVersion: ATLM_POLICY_VERSION, selectedEngine: engine, usedEngine: null, fallbackReason: failed?.reason ?? null } };
+}
+
+export function selectHybridEngine(candidates, cases) {
+  const comparable = cases.filter(c => c.median.status === "AVAILABLE")
+    .sort((a, b) => a.capturedAt - b.capturedAt || atlmCompareId(a.planId, b.planId)).slice(-ATLM_MAX_EVALUATION_CASES);
+  const scores = { median: atlmScore(comparable, "median").maeMs }, ownPredictionCounts = {};
+  const qualified = [];
+  for (const engine of ["RIDGE", "OLS"]) {
+    const name = engine.toLowerCase();
+    ownPredictionCounts[name] = comparable.filter(c => c[name].status === "AVAILABLE").length;
+    const scored = comparable.map(c => { const prediction = atlmStrategyPrediction(c, engine); return { ...c,
+      strategy: prediction.status === "AVAILABLE" ? prediction : c.median }; });
+    scores[name] = atlmScore(scored, "strategy").maeMs;
+    if (candidates[name].status === "AVAILABLE" && ownPredictionCounts[name] >= ATLM_MIN_COMPARISONS) qualified.push(engine);
+  }
+  let selectedEngine = "MEDIAN", reason = "MEDIAN_BASELINE_NOT_WORSE";
+  if (qualified.length) {
+    const eligible = ["MEDIAN", ...qualified], best = Math.min(...eligible.map(engine => scores[engine.toLowerCase()]));
+    selectedEngine = eligible.find(engine => scores[engine.toLowerCase()] <= best + ATLM_MAE_TIE_MS);
+    if (selectedEngine !== "MEDIAN") reason = "LOWEST_HISTORICAL_MAE";
+  } else {
+    selectedEngine = candidates.ridge.status === "AVAILABLE" ? "RIDGE" : candidates.ols.status === "AVAILABLE" ? "OLS" : "MEDIAN";
+    reason = selectedEngine === "MEDIAN" ? "NO_MODEL_AVAILABLE" : "EARLY_EXPERIMENTAL";
+  }
+  return { policyVersion: ATLM_POLICY_VERSION, selectedEngine, reason, caseCount: comparable.length,
+    ownPredictionCounts, scores, qualified: qualified.includes(selectedEngine) };
+}
+
+export async function evaluateHybridBaseCase(train, target) {
+  const candidates = await atlmFitCandidates(train);
+  const prediction = (name, predict) => candidates[name].status === "AVAILABLE"
+    ? predict(candidates[name].artifact, target.features) : atlmUnavailable(candidates[name].reason);
+  const pointMs = train.length > ATLM_MAX_ROWS ? null : median(train.map(row => row.actualMs));
+  return { ...atlmTrainingRow(target), trainSampleCount: train.length,
+    trainDatasetDigest: "sha256:" + await hashCommandInput(atlmSortedRows(train)),
+    fits: { ols: atlmFitDiagnostic(candidates.ols), ridge: atlmFitDiagnostic(candidates.ridge) },
+    ols: prediction("ols", predictAtlmOls), ridge: prediction("ridge", predictAtlmRidge),
+    median: pointMs === null ? atlmUnavailable(train.length > ATLM_MAX_ROWS ? "DATASET_LIMIT_REACHED" : "INSUFFICIENT_DATA")
+      : { status: "AVAILABLE", pointMs, reason: null } };
+}
+
+export function summarizeHybridCase(target, history, baseCases) {
+  const base = baseCases[target.sampleId];
+  const prior = atlmHybridTargets(history).map(row => baseCases[row.sampleId]);
+  if (!base || prior.some(c => !c)) return atlmUnavailable("INCOMPLETE_EVALUATION");
+  const decision = selectHybridEngine(base.fits, prior), atlm = atlmStrategyPrediction(base, decision.selectedEngine);
+  return { ...base, decision, atlm, prediction: atlm.status === "AVAILABLE" ? atlm : base.median };
+}
+
+export function summarizeHybridAtlmEvaluation(cases, selection) {
+  if (selection?.status !== "AVAILABLE") return selection || atlmUnavailable("INVALID_EVALUATION");
+  if (!Array.isArray(cases) || cases.length !== selection.caseSampleIds.length || new Set(cases.map(c => c.sampleId)).size !== cases.length
+    || cases.some(c => !selection.caseSampleIds.includes(c.sampleId) || !isNonnegativeSafeInteger(c.actualMs)
+      || ["atlm", "median", "prediction", "ols", "ridge"].some(name => !c[name] || (c[name].pointMs !== null && !isNonnegativeSafeInteger(c[name].pointMs))))) return atlmUnavailable("INCOMPLETE_EVALUATION");
+  const ordered = selection.caseSampleIds.map(id => cases.find(c => c.sampleId === id));
+  const comparable = ordered.filter(c => c.median.status === "AVAILABLE");
+  const pairedCases = comparable.filter(c => c.atlm.status === "AVAILABLE");
+  const metrics = { atlm: atlmScore(ordered, "atlm"), median: atlmScore(comparable, "median"),
+    operational: atlmScore(comparable, "prediction"), ols: atlmScore(ordered, "ols"), ridge: atlmScore(ordered, "ridge") };
+  const paired = { caseCount: pairedCases.length, caseSampleIds: pairedCases.map(c => c.sampleId),
+    atlm: atlmScore(pairedCases, "atlm"), median: atlmScore(pairedCases, "median") };
+  const profileGroupCount = new Set(comparable.map(c => canonical(Object.fromEntries(
+    [...ESTIMATE_PROFILE_FIELDS, ...ATLM_NUMERIC_FIELDS].map(field => [field, c.features[field]]))))).size;
+  return { status: "AVAILABLE", formatVersion: 1, protocolVersion: 2, policyVersion: ATLM_POLICY_VERSION,
+    method: { ...ATLM_HYBRID_METHOD }, metric: "PLAN_ACTIVE", metricsScope: "FULL_POLICY",
+    cutoff: selection.cutoff, inputCount: selection.inputCount, eligibleCount: selection.eligibleCount,
+    excluded: selection.excluded, caseCount: ordered.length, cases: ordered, metrics, paired, profileGroupCount,
+    candidateReady: paired.caseCount >= ATLM_MIN_COMPARISONS && metrics.operational.maeMs !== null
+      && metrics.operational.scoredCount === metrics.median.scoredCount && metrics.operational.maeMs <= metrics.median.maeMs };
+}
+
+export async function evaluateHybridAtlmChronologically(journal, options = {}) {
+  const selection = selectHybridEvaluationCases(journal, options);
+  if (selection.status !== "AVAILABLE") return selection;
+  const current = selectHybridHistory(journal, selection.cutoff, { inclusive: true });
+  const baseCases = {}, cases = [];
+  for (const id of selection.caseSampleIds) {
+    const target = current.find(row => row.sampleId === id);
+    const history = selectHybridHistory(journal, target.capturedAt, { excludePlanId: target.planId });
+    for (const q of [...atlmHybridTargets(history), target]) {
+      if (!baseCases[q.sampleId]) baseCases[q.sampleId] = await evaluateHybridBaseCase(
+        selectHybridHistory(journal, q.capturedAt, { excludePlanId: q.planId }), q);
+    }
+    cases.push(summarizeHybridCase(target, history, baseCases));
+  }
+  return summarizeHybridAtlmEvaluation(cases, selection);
+}
+
+function atlmSelectionValid(selection) {
+  if (!atlmExactKeys(selection, ["policyVersion", "selectedEngine", "reason", "caseCount", "ownPredictionCounts", "scores", "qualified"])
+    || selection.policyVersion !== ATLM_POLICY_VERSION || !["OLS", "RIDGE", "MEDIAN"].includes(selection.selectedEngine)
+    || !["EARLY_EXPERIMENTAL", "LOWEST_HISTORICAL_MAE", "MEDIAN_BASELINE_NOT_WORSE", "NO_MODEL_AVAILABLE"].includes(selection.reason)
+    || !Number.isInteger(selection.caseCount) || selection.caseCount < 0 || selection.caseCount > ATLM_MAX_EVALUATION_CASES
+    || !atlmExactKeys(selection.ownPredictionCounts, ["ols", "ridge"]) || !atlmExactKeys(selection.scores, ["median", "ols", "ridge"])
+    || !Object.values(selection.ownPredictionCounts).every(n => Number.isInteger(n) && n >= 0 && n <= selection.caseCount)
+    || !Object.values(selection.scores).every(value => selection.caseCount === 0 ? value === null : Number.isFinite(value) && value >= 0)
+    || typeof selection.qualified !== "boolean") return false;
+  return !selection.qualified || selection.ownPredictionCounts[selection.selectedEngine.toLowerCase()] >= ATLM_MIN_COMPARISONS;
+}
+
+function atlmHybridArtifactValid(a) {
+  if (!isPlainRecord(a) || a.formatVersion !== 2 || a.kind !== "HYBRID" || a.method?.id !== ATLM_HYBRID_METHOD.id
+    || a.method.version !== ATLM_HYBRID_METHOD.version || a.featureSchemaVersion !== ATLM_FEATURE_VERSION || a.metric !== "PLAN_ACTIVE"
+    || a.policyVersion !== ATLM_POLICY_VERSION || !["OLS", "RIDGE"].includes(a.selectedEngine)
+    || !Number.isSafeInteger(a.n) || a.n < 1 || a.n > ATLM_MAX_ROWS || !atlmManifestValid(a.manifest, a.n)
+    || !isSnapshotDigest(a.datasetDigest) || !isNonnegativeSafeInteger(a.trainCutoff)
+    || !atlmExactKeys(a.candidates, ["ols", "ridge"]) || !atlmSelectionValid(a.selection)
+    || a.selection.policyVersion !== ATLM_POLICY_VERSION || a.selection.selectedEngine !== a.selectedEngine) return false;
+  for (const [name, validate] of [["ols", atlmOlsArtifactValid], ["ridge", atlmRidgeArtifactValid]]) {
+    const fit = a.candidates[name];
+    if (!isPlainRecord(fit) || !["AVAILABLE", "UNAVAILABLE"].includes(fit.status)) return false;
+    if (fit.status === "UNAVAILABLE" && (typeof fit.reason !== "string" || !fit.reason || fit.reason.length > 128)) return false;
+    if (fit.status === "AVAILABLE" && (!validate(fit.artifact) || fit.artifact.n !== a.n
+      || fit.artifact.datasetDigest !== a.datasetDigest || canonical(fit.artifact.manifest) !== canonical(a.manifest))) return false;
+  }
+  const selected = a.candidates[a.selectedEngine.toLowerCase()];
+  return selected.status === "AVAILABLE" && a.p === selected.artifact.p && a.rank === selected.artifact.rank;
+}
+
+export async function fitHybridAtlm(rows, { selection = null, candidates = null, cutoff = null } = {}) {
+  const problem = atlmDatasetProblem(rows);
+  if (problem) return problem;
+  const sorted = atlmSortedRows(rows);
+  candidates ||= await atlmFitCandidates(sorted);
+  selection ||= selectHybridEngine(candidates, []);
+  if (!atlmSelectionValid(selection)) return atlmUnavailable("INVALID_PROTOCOL");
+  const diagnostics = { ols: atlmFitDiagnostic(candidates.ols), ridge: atlmFitDiagnostic(candidates.ridge) };
+  if (selection.selectedEngine === "MEDIAN") {
+    const reason = candidates.ridge.status === "AVAILABLE" || candidates.ols.status === "AVAILABLE" ? "MEDIAN_BASELINE_NOT_WORSE"
+      : candidates.ridge.reason || candidates.ols.reason;
+    return atlmUnavailable(reason, { sampleCount: rows.length, candidates: diagnostics, selection });
+  }
+  const chosen = candidates[selection.selectedEngine.toLowerCase()];
+  if (chosen.status !== "AVAILABLE") return atlmUnavailable(chosen.reason, { candidates: diagnostics, selection });
+  const artifact = atlmFreeze({ formatVersion: 2, kind: "HYBRID", method: { ...ATLM_HYBRID_METHOD },
+    featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE", policyVersion: ATLM_POLICY_VERSION,
+    selectedEngine: selection.selectedEngine, selection, n: sorted.length, p: chosen.artifact.p, rank: chosen.artifact.rank,
+    manifest: sorted.map(({ sampleId, planId }) => ({ sampleId, planId })), datasetDigest: "sha256:" + await hashCommandInput(sorted),
+    trainCutoff: cutoff ?? Math.max(0, ...sorted.map(row => row.sourceAvailableAt)), candidates });
+  return atlmHybridArtifactValid(artifact) ? { status: "AVAILABLE", artifact, candidates: diagnostics, selection }
+    : atlmUnavailable("INVALID_ARTIFACT");
+}
+
+export function predictHybridAtlm(artifact, features) {
+  if (!atlmHybridArtifactValid(artifact)) return atlmUnavailable("INVALID_ARTIFACT");
+  const problem = atlmFeatureProblem(features);
+  if (problem) return problem;
+  const base = {};
+  for (const [name, predict] of [["ols", predictAtlmOls], ["ridge", predictAtlmRidge]]) {
+    const fit = artifact.candidates[name];
+    base[name] = fit.status === "AVAILABLE" ? predict(fit.artifact, features) : atlmUnavailable(fit.reason);
+  }
+  return atlmStrategyPrediction(base, artifact.selectedEngine);
 }
 
 function dbFirst(db, sql, ...args) { return db.prepare(sql).bind(...args).first(); }
@@ -1031,8 +1364,10 @@ export async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
   if (!safeTime(sourceAvailableAt)) throw appError("INVALID_ESTIMATION_SOURCE", "ATLM source timestamps are invalid.", 500);
   const originalPrediction = row.forecast_json !== null ? JSON.parse(row.forecast_json) : row.assessment_json ? JSON.parse(row.assessment_json).serverEstimation : null;
   const issuedPrediction = reasons.length === 0 && originalPrediction?.status === "AVAILABLE"
-    && typeof originalPrediction.modelId === "string" && Number.isSafeInteger(originalPrediction.pointMs) && originalPrediction.pointMs >= 0
-    ? { modelId: originalPrediction.modelId, pointMs: originalPrediction.pointMs, actualMs, errorMs: originalPrediction.pointMs - actualMs } : null;
+    && Number.isSafeInteger(originalPrediction.pointMs) && originalPrediction.pointMs >= 0
+    ? { method: originalPrediction.method, modelId: originalPrediction.modelId ?? null, modelVersion: originalPrediction.modelVersion ?? null,
+      calculatedAt: originalPrediction.calculatedAt, pointMs: originalPrediction.pointMs, actualMs, errorMs: originalPrediction.pointMs - actualMs,
+      ...(originalPrediction.hybrid ? { hybrid: originalPrediction.hybrid } : {}) } : null;
   const source = { planId, issuedPrediction, inputAssessmentSequence: row.input_assessment_sequence ?? null,
     eligibility: reasons.length ? "EXCLUDED" : "ELIGIBLE", reasons, features, actualMs,
     capturedAt: row.forecast_json !== null ? row.first_started_at : row.captured_at ?? null, sourceAvailableAt, observedAt: nowMs, sourceGeneration: row.source_generation };
@@ -1101,7 +1436,7 @@ const ATLM_TOOL_SCHEMAS = Object.freeze({
 // It checks the current owner pointer and manifest, not just the immutable artifact ID.
 const ATLM_CURRENT_MODEL_SQL = `SELECT 1 FROM estimation_models m JOIN estimation_owner_state o
   ON o.owner_id=m.owner_id AND o.active_model_id=m.model_id
-  WHERE m.owner_id=? AND m.model_id=? AND m.status='ACTIVE' AND m.method_version='${ATLM_METHOD.version}' AND m.feature_version='${ATLM_FEATURE_VERSION}'
+  WHERE m.owner_id=? AND m.model_id=? AND m.status='ACTIVE' AND m.method_version IN ('${ATLM_OLS_METHOD.version}','${ATLM_METHOD.version}') AND m.feature_version='${ATLM_FEATURE_VERSION}'
     AND NOT EXISTS(SELECT 1 FROM json_each(m.manifest_json) item
       LEFT JOIN estimation_samples s ON s.owner_id=m.owner_id AND s.sequence=CAST(item.value AS INTEGER)
       WHERE s.sequence IS NULL OR s.eligibility<>'ELIGIBLE'
@@ -1119,7 +1454,8 @@ async function atlmPlanContext(db, ownerId, planId) {
 const HISTORICAL_MEDIAN_METHOD=Object.freeze({id:"historical-median",version:"1"});
 function canUseHistoricalMedian(prediction){
   const allowed=new Set(["COLLECTING_DATA","TRAINING_NOT_STARTED","TRAINING_IN_PROGRESS","INSUFFICIENT_DATA","RANK_DEFICIENT",
-    "UNSUPPORTED_CATEGORY","MODEL_INVALIDATED","INSUFFICIENT_INCUMBENT_CASES","INSUFFICIENT_EVALUATION_CASES"]);
+    "UNSUPPORTED_CATEGORY","MODEL_INVALIDATED","INSUFFICIENT_INCUMBENT_CASES","INSUFFICIENT_EVALUATION_CASES",
+    "INVALID_PREDICTION","MEDIAN_BASELINE_NOT_WORSE"]);
   const diagnostic=prediction.diagnostics;
   return prediction.status==="UNAVAILABLE" && allowed.has(diagnostic?.code||prediction.unavailableReason)
     && (!diagnostic?.cause || allowed.has(diagnostic.cause.code));
@@ -1165,7 +1501,7 @@ async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
     requirementsDigest: target.requirementsDigest, featureDigest: "sha256:" + await hashCommandInput(normalized.features), calculatedAt: nowMs,
     sampleCount: prediction.sampleCount ?? 0, evaluation: prediction.evaluation ?? null,
     accuracy: prediction.accuracy ?? "NOT_VALIDATED", interval: null, confidence: "UNKNOWN",
-    unavailableReason: prediction.unavailableReason ?? null, diagnostics:prediction.diagnostics ?? null, ...(prediction.fallback?{fallback:prediction.fallback}:{}), ...(prediction.missingFields ? { missingFields: prediction.missingFields } : {}) };
+    unavailableReason: prediction.unavailableReason ?? null, diagnostics:prediction.diagnostics ?? null, ...(prediction.fallback?{fallback:prediction.fallback}:{}), ...(prediction.hybrid?{hybrid:prediction.hybrid}:{}), ...(prediction.missingFields ? { missingFields: prediction.missingFields } : {}) };
 }
 
 // Read inputs and source generation together; optimistic retries keep a multi-read
@@ -1278,7 +1614,8 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
         if(model){
           const artifact=atlmTrainingJson(model.artifact_json);
           if(!atlmArtifactValid(artifact))throw appError("SOURCE_UNAVAILABLE","Сохранённая модель ATLM повреждена.",503,{reason:"INVALID_ARTIFACT"});
-          const unsupportedFields=ESTIMATE_PROFILE_FIELDS.filter(field=>!artifact.levels[field].includes(normalized.features[field]));
+          const activeLevels=artifact.kind==="HYBRID"?artifact.candidates[artifact.selectedEngine.toLowerCase()].artifact.levels:artifact.levels;
+          const unsupportedFields=ESTIMATE_PROFILE_FIELDS.filter(field=>!activeLevels[field].includes(normalized.features[field]));
           if(unsupportedFields.length)diagnostics=atlmDiagnostics("UNSUPPORTED_CATEGORY",{unsupportedFields});
         }
       }
@@ -2062,6 +2399,7 @@ async function readTrackerCapabilities(db,ownerId){return {
       contextRead: { tool: "GetAssessment", omitAssessmentId: true }, expectedRequirementsDigestRequired: true,
       historyMaxTargets: 20, historyMaxLimit: 100, methodologyControlsExecution: false,
       atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v1", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
+        policyVersion: ATLM_POLICY_VERSION, engines: ["OLS", "RIDGE"],
         predictionScope: "FULL_FROM_FIRST_START", plannedForecastMode:"CURRENT_READ_ONLY", firstStartForecast:"FROZEN_SNAPSHOT", earlyForecastMethod:{...HISTORICAL_MEDIAN_METHOD}, retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
         calculateTool: "CalculateAtlmEstimate", planEstimateTool: "GetPlanEstimate", modelStatusTool: "GetEstimationModelStatus",
         processTool: "ProcessEstimationTraining", startTrainingTool: "StartEstimationTraining", datasetTool: "GetAtlmDataset", predictionRequest: { method: "ATLM", methodVersion: 1 },
@@ -2587,7 +2925,7 @@ const UI_ATLM = String.raw`(()=>{
   const button=(text,action)=>{const el=make("button",text);el.type="button";el.addEventListener("click",action);return el;};
   const minutes=value=>new Intl.NumberFormat("ru-RU",{maximumFractionDigits:1}).format(value/60000)+" мин";
   const count=value=>Number.isSafeInteger(value)&&value>=0?value:0;
-  const reasons={COLLECTING_DATA:"Пока недостаточно проверенных завершённых планов.",INCOMPLETE_FEATURES:"Для прогноза не хватает исходных сведений о задаче.",UNSUPPORTED_CATEGORY:"В накопленной истории ещё нет опыта для этого вида задачи.",MODEL_INVALIDATED:"Исходные данные модели изменились; требуется пересборка.",INVALID_PREDICTION:"Модель не смогла получить корректную оценку.",UNSUPPORTED_FORECAST_SCOPE:"Прогноз доступен для полного плана до первого запуска.",DATASET_LIMIT_REACHED:"Накопленные данные сохранены, но превышен текущий предел обучения.",RANK_DEFICIENT:"Данных пока недостаточно для независимой оценки влияния признаков.",MODEL_CAPACITY_LIMIT:"Превышен ресурсный предел числа коэффициентов модели. История сохранена.",INSUFFICIENT_DATA:"Пока недостаточно пригодных данных для обучения и проверки.",INSUFFICIENT_VALIDATION:"Пока недостаточно случаев для проверки новой модели.",INSUFFICIENT_EVALUATION_CASES:"В последней попытке не хватило проверочных сравнений. Новая версия допускает ранний прогноз с неподтверждённым качеством.",INSUFFICIENT_INCUMBENT_CASES:"Для замены действующей модели недостаточно независимых сравнений с ней.",MEDIAN_BASELINE_BETTER:"Новая модель ошибается сильнее обычной медианы прошлых длительностей.",CANDIDATE_COVERAGE_WORSE:"Новая модель даёт прогноз для меньшей доли задач, чем действующая.",CANDIDATE_MAE_WORSE:"Средняя ошибка новой модели выше, чем у действующей.",SNAPSHOT_INVALIDATED:"Исходные данные изменились; подготовлена новая попытка обучения.",LEASE_EXPIRED:"Предыдущая обработка не завершилась вовремя; её состояние сохранено.",TRAINING_EXECUTION_FAILED:"Во время обучения произошёл технический сбой.",SOURCE_UNAVAILABLE:"Источник данных временно недоступен.",INVALID_ESTIMATION_SOURCE:"Сохранённый источник оценки не удалось проверить.",AVAILABLE:"Модель успешно обучена.",
+  const reasons={COLLECTING_DATA:"Пока недостаточно проверенных завершённых планов.",INCOMPLETE_FEATURES:"Для прогноза не хватает исходных сведений о задаче.",UNSUPPORTED_CATEGORY:"В накопленной истории ещё нет опыта для этого вида задачи.",MODEL_INVALIDATED:"Исходные данные модели изменились; требуется пересборка.",INVALID_PREDICTION:"Модель не смогла получить корректную оценку.",UNSUPPORTED_FORECAST_SCOPE:"Прогноз доступен для полного плана до первого запуска.",DATASET_LIMIT_REACHED:"Накопленные данные сохранены, но превышен текущий предел обучения.",RANK_DEFICIENT:"Данных пока недостаточно для независимой оценки влияния признаков.",MODEL_CAPACITY_LIMIT:"Превышен ресурсный предел числа коэффициентов модели. История сохранена.",INSUFFICIENT_DATA:"Пока недостаточно пригодных данных для обучения и проверки.",INSUFFICIENT_VALIDATION:"Пока недостаточно случаев для проверки новой модели.",INSUFFICIENT_EVALUATION_CASES:"В последней попытке не хватило проверочных сравнений. Новая версия допускает ранний прогноз с неподтверждённым качеством.",INSUFFICIENT_INCUMBENT_CASES:"Для замены действующей модели недостаточно независимых сравнений с ней.",MEDIAN_BASELINE_BETTER:"Новая модель ошибается сильнее обычной медианы прошлых длительностей.",MEDIAN_BASELINE_NOT_WORSE:"Медиана прошлых длительностей не хуже проверенных обучаемых способов. Новая обученная модель не активирована.",CANDIDATE_COVERAGE_WORSE:"Новая модель даёт прогноз для меньшей доли задач, чем действующая.",CANDIDATE_MAE_WORSE:"Средняя ошибка новой модели выше, чем у действующей.",SNAPSHOT_INVALIDATED:"Исходные данные изменились; подготовлена новая попытка обучения.",LEASE_EXPIRED:"Предыдущая обработка не завершилась вовремя; её состояние сохранено.",TRAINING_EXECUTION_FAILED:"Во время обучения произошёл технический сбой.",SOURCE_UNAVAILABLE:"Источник данных временно недоступен.",INVALID_ESTIMATION_SOURCE:"Сохранённый источник оценки не удалось проверить.",AVAILABLE:"Модель успешно обучена.",
     MISSING_FEATURES:"До первого запуска не сохранены исходные признаки.",INVALID_FEATURES:"Исходные признаки не соответствуют схеме.",PLAN_DELETED:"План удалён.",PLAN_NOT_COMPLETED:"План ещё не завершён.",RESULT_NOT_VERIFIED:"Результат и обязательные проверки не подтверждены.",SCOPE_CHANGED:"После начала изменился объём задачи.",INCOMPLETE_MEASUREMENT:"Нет полного подтверждённого измерения активного времени."};
   const statuses={IDLE:"Ожидание новых планов",QUEUED:"Обучение в очереди",RUNNING:"Модель обучается",RETRY_WAIT:"Ожидание повторной попытки",COLLECTING_DATA:"Накапливаем опыт",REJECTED:"Новая модель не прошла проверку",FAILED:"Не удалось завершить обучение"};
   const style=make("style");style.textContent=".atlm-panel{min-width:0;overflow-wrap:anywhere}.atlm-panel p{margin:9px 0}.atlm-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.atlm-heading h2,.atlm-heading h3{margin:0}.atlm-panel button{min-height:42px;white-space:normal}.atlm-controls{display:flex;gap:8px;flex-wrap:wrap}.atlm-point{font-size:1.35rem;font-weight:700;color:var(--ink)}.atlm-plan-estimate{margin:18px 0;padding:16px;border:1px solid var(--line-strong,var(--line));border-radius:var(--radius,10px);background:var(--paper-3,var(--panel))}.atlm-note{color:var(--ink-2,var(--muted));font-size:.9rem}.atlm-stale{border-left:3px solid var(--amber,var(--amber));padding-left:10px}@media(max-width:390px){.atlm-heading{align-items:flex-start}.atlm-controls{width:100%}.atlm-controls button{flex:1 1 100%}}";document.head.append(style);
@@ -2635,15 +2973,26 @@ const UI_ATLM = String.raw`(()=>{
   }
   function reasonText(reason){return reasons[reason]||"Расчёт недоступен. Причина: "+String(reason)+".";}
   function diagnosticText(value){return typeof value?.message==="string"?value.message:null;}
+  function forecastMethodLabel(model){
+    if(model.method?.id==="historical-median")return "Ориентир — медиана прошлых задач";
+    const engine=model.hybrid?.usedEngine||model.hybrid?.selectedEngine;
+    if(engine==="RIDGE")return "ATLM — ridge";
+    if(engine==="OLS"||model.method?.version==="agent-v2")return "ATLM — обычная регрессия";
+    return "ATLM";
+  }
   function appendQuality(target,model){
     const evaluation=model.evaluation,n=model.sampleCount,k=evaluation?.caseCount;
     target.append(make("p",Number.isSafeInteger(n)&&n>=1?"В обучении использовано планов: "+n+".":"Размер обучающей выборки не сохранён.","atlm-note"));
     target.append(make("p",Number.isSafeInteger(k)&&k>=0?"Проверено прогнозов: "+k+".":"Число проверенных прогнозов не сохранено.","atlm-note"));
-    const confirmed=model.accuracy==="HISTORICALLY_EVALUATED"&&Number.isSafeInteger(k)&&k>=5&&evaluation?.qualityConfirmed!==false;
+    const fullPolicy=evaluation?.metricsScope==="FULL_POLICY";
+    if(fullPolicy&&Number.isSafeInteger(evaluation.modelCaseCount)&&Number.isSafeInteger(k))target.append(make("p","В сравнениях обученная модель использована: "+evaluation.modelCaseCount+" из "+k+".","atlm-note"));
+    const confirmed=model.accuracy==="HISTORICALLY_EVALUATED"&&Number.isSafeInteger(k)&&k>=5&&evaluation?.qualityConfirmed!==false&&(!fullPolicy||evaluation.modelCaseCount>=5);
     const quality=make("p",null,"atlm-note atlm-quality");
     quality.append(make("strong",confirmed?"Качество проверено на прошлых задачах.":"Качество не подтверждено."));target.append(quality);
-    if(Number.isSafeInteger(k)&&k>0&&Number.isFinite(evaluation?.maeMs)&&evaluation.maeMs>=0)target.append(make("p","Средняя ошибка прошлых проверок: "+minutes(evaluation.maeMs)+". Это не гарантия длительности.","atlm-note"));
+    if(Number.isSafeInteger(k)&&k>0&&Number.isFinite(evaluation?.maeMs)&&evaluation.maeMs>=0)target.append(make("p",(fullPolicy?"Средняя ошибка гибрида с запасным прогнозом: ":"Средняя ошибка прошлых проверок: ")+minutes(evaluation.maeMs)+". Это не гарантия длительности.","atlm-note"));
     else target.append(make("p","Ошибка пока не оценена.","atlm-note"));
+    if(fullPolicy&&Number.isFinite(evaluation.medianBaselineMaeMs))target.append(make("p","Ошибка медианы на тех же задачах: "+minutes(evaluation.medianBaselineMaeMs)+".","atlm-note"));
+    if(fullPolicy&&Number.isSafeInteger(evaluation.profileGroupCount))target.append(make("p","Разных профилей задач: "+evaluation.profileGroupCount+". Похожие задачи ограничивают выводы о качестве на другой работе.","atlm-note"));
   }
   function showStatus(data){
     if(!data.training||!statuses[data.training.status]||![data.newPlansSinceTraining,data.eligibleSampleCount,data.excludedSampleCount].every(value=>Number.isSafeInteger(value)&&value>=0)||!Number.isSafeInteger(data.retrainEveryNewPlans)||data.retrainEveryNewPlans<1||typeof data.training.due!=="boolean"||!Object.hasOwn(data,"activeModel")||(data.activeModel!==null&&(!Number.isSafeInteger(data.activeModel.sampleCount)||data.activeModel.sampleCount<1)))throw new Error("Не удалось прочитать состояние обучения.");
@@ -2658,20 +3007,26 @@ const UI_ATLM = String.raw`(()=>{
       for(const item of data.exclusionReasons)if(typeof item.reason==="string"&&Number.isSafeInteger(item.count)&&item.count>0)list.append(make("li",reasonText(item.reason)+" Планов: "+item.count+"."));
       disclosure.append(list,make("p","У одного плана может быть несколько причин.","atlm-note"));statusBody.append(disclosure);
     }
-    if(data.activeModel){statusBody.append(make("p","Действующая модель: "+String(data.activeModel.modelVersion||data.activeModel.modelId)+".","atlm-note"));appendQuality(statusBody,data.activeModel);}
+    if(data.activeModel){statusBody.append(make("p","Действующая модель: "+String(data.activeModel.modelVersion||data.activeModel.modelId)+".","atlm-note"),make("p",forecastMethodLabel(data.activeModel),"atlm-note"));appendQuality(statusBody,data.activeModel);}
     if(data.training.status==="REJECTED"&&data.activeModel)statusBody.append(make("p","Предыдущая пригодная модель продолжает давать прогнозы.","atlm-note"));
     if(data.training.progress&&Number.isSafeInteger(data.training.progress.totalCases)&&data.training.progress.totalCases>0)statusBody.append(make("p","Обработано примеров: "+count(data.training.progress.completedCases)+" из "+data.training.progress.totalCases+".","atlm-note"));
     if(data.training.status==="RETRY_WAIT"&&Number.isFinite(data.training.nextAttemptAt))statusBody.append(make("p","Повторная попытка не раньше "+new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short",timeZone:document.querySelector("#tz")?.value||"UTC"}).format(new Date(data.training.nextAttemptAt))+".","atlm-note"));
     const reason=data.lastError||data.lastReason;
     if(data.lastAttempt){
-      statusBody.append(make("p","Последняя завершённая попытка: "+(diagnosticText(data.lastAttempt)||reasonText(data.lastAttempt.code)),"atlm-note"));
+      statusBody.append(make("p","Последняя завершённая попытка: "+(data.lastAttempt.candidates?reasonText(data.lastAttempt.code):diagnosticText(data.lastAttempt)||reasonText(data.lastAttempt.code)),"atlm-note"));
       const facts=data.lastAttempt;
-      statusBody.append(make("p","Снимок попытки: datasetRevision="+String(facts.datasetRevision)+", generation="+String(facts.generation)+". Текущие пригодные планы показаны отдельно выше.","atlm-note"));
+      const technical=make("details",null,"atlm-candidates");technical.append(make("summary","Подробности последней попытки"));
+      technical.append(make("p",diagnosticText(facts)||reasonText(facts.code),"atlm-note"));
+      for(const [name,label] of [["ols","Обычная регрессия"],["ridge","Ridge"]]){
+        const candidate=facts.candidates?.[name];if(!candidate)continue;
+        technical.append(make("p",label+": "+(candidate.status==="AVAILABLE"?"рассчитана":reasonText(candidate.reason))+". sampleCount="+candidate.sampleCount+(Number.isInteger(candidate.p)?", p="+candidate.p:"")+(Number.isInteger(candidate.rank)?", rank="+candidate.rank:"")+".","atlm-note"));
+      }
+      technical.append(make("p","Снимок попытки: datasetRevision="+String(facts.datasetRevision)+", generation="+String(facts.generation)+". Текущие пригодные планы показаны отдельно выше.","atlm-note"));statusBody.append(technical);
     }
     if(reason&&(!data.lastAttempt||data.lastAttempt.code!==reason))
       statusBody.append(make("p",reasonText(reason)+" Подробные параметры этой причины не сохранены.",data.lastError?"error":"atlm-note"));
     if(lastProcessFailure)statusBody.append(make("p",lastProcessFailure,"error atlm-process-feedback"));
-    const method=make("details",null,"atlm-method");method.open=methodOpen;method.append(make("summary","Кто рассчитывает прогноз"),make("p","Агент передаёт исходные сведения о задаче. Сервер трекера обучает модель ATLM и рассчитывает полное активное время плана. До первого запуска интерфейс рассчитывает текущий прогноз по сохранённым признакам и актуальной истории. При первом запуске оценка фиксируется. Ранний прогноз доступен до пяти проверочных сравнений с пометкой «Качество не подтверждено». Размер обучения и число проверок показаны отдельно. Модель хранится на сервере; новый прогноз использует готовые коэффициенты без повторного обучения. До готовности ATLM при наличии пригодной истории сервер выдаёт отдельно обозначенный ранний ориентир по общей медиане завершённых планов. Это приблизительная оценка, которая не учитывает особенности новой задачи.","atlm-note"));statusBody.append(method);updateControls();
+    const method=make("details",null,"atlm-method");method.open=methodOpen;method.append(make("summary","Кто рассчитывает прогноз"),make("p","Агент передаёт исходные сведения о задаче. Сервер трекера учится на измеренном времени завершённых задач и сравнивает обычную регрессию, ridge и медиану на прошлых результатах. Полный ранг позволяет рассчитать обычную регрессию, но не даёт ей приоритета. Ridge ограничивает большие поправки и работает при совпадающих признаках. Выбор проверяется целиком без использования будущих результатов. Сервер рассчитывает полное активное время плана. До первого запуска интерфейс рассчитывает текущий прогноз по сохранённым признакам и актуальной истории. При первом запуске оценка фиксируется. Ранний прогноз доступен до пяти проверочных сравнений с пометкой «Качество не подтверждено». Размер обучения и число проверок показаны отдельно. Модель хранится на сервере; новый прогноз использует готовые коэффициенты без повторного обучения. До готовности ATLM при наличии пригодной истории сервер выдаёт отдельно обозначенный ранний ориентир по общей медиане завершённых планов. Это приблизительная оценка, которая не учитывает особенности новой задачи.","atlm-note"));statusBody.append(method);updateControls();
   }
   function queueKey(data){const t=data.training;return JSON.stringify([data.datasetRevision,t.generation,t.progressRevision,t.pendingRefreshCount,t.nextAttemptAt]);}
   function schedulePoll(){clearTimeout(pollTimer);if(pollsLeft>0){pollsLeft--;pollTimer=setTimeout(()=>loadStatus(true),750);}}
@@ -2720,6 +3075,8 @@ const UI_ATLM = String.raw`(()=>{
       if(estimate==null){body.append(make("p","Исходная оценка до запуска не сохранена.","atlm-note"));}
       else if(estimate.status==="AVAILABLE"&&Number.isFinite(estimate.pointMs)&&estimate.pointMs>=0){
         body.append(make("p","Около "+minutes(estimate.pointMs),"atlm-point"));
+        body.append(make("p",forecastMethodLabel(estimate),"atlm-note atlm-method-label"));
+        if(estimate.hybrid?.usedEngine==="RIDGE")body.append(make("p","Ridge позволяет учиться, когда признаки в истории совпадают. Способ прогноза выбирается по ошибкам на прошлых задачах.","atlm-note"));
         body.append(make("p","Полное активное время от первого запуска. Паузы исключены; подготовка оценки до запуска не входит.","atlm-note"));
         if(estimate.modelVersion||estimate.modelId)body.append(make("p","Модель: "+String(estimate.modelVersion||estimate.modelId)+".","atlm-note"));
         if(estimate.method?.id==="historical-median"){
@@ -2876,6 +3233,7 @@ function atlmDiagnostics(code, facts = {}) {
     TRAINING_EXECUTION_FAILED:"Во время обучения произошёл технический сбой.",
     LEASE_EXPIRED:"Попытка обучения не завершилась в отведённое время.",
     MEDIAN_BASELINE_BETTER:"Новая модель ошибается сильнее медианы прошлых длительностей.",
+    MEDIAN_BASELINE_NOT_WORSE:"Медиана прошлых длительностей не хуже проверенных обучаемых способов. Новая обученная модель не активирована.",
     CANDIDATE_MAE_WORSE:"Средняя ошибка новой модели выше, чем у действующей.",
     CANDIDATE_COVERAGE_WORSE:"Новая модель оценивает меньшую долю задач, чем действующая.",
     INSUFFICIENT_INCUMBENT_CASES:"Недостаточно проверочных сравнений для замены действующей модели.",
@@ -2888,7 +3246,10 @@ function atlmDiagnostics(code, facts = {}) {
   return {code,message,parameters};
 }
 function atlmAttemptDiagnostics(result, snapshot, job, nowMs) {
-  return {...atlmDiagnostics(result.reason || "AVAILABLE", {...result.details,status:undefined}),
+  const candidates = result.details?.candidates;
+  return {...atlmDiagnostics(result.reason || "AVAILABLE", {...result.details?.artifact,...result.details,status:undefined}),
+    ...(candidates ? { candidates: Object.fromEntries(["ols", "ridge"].map(name => [name, atlmFitDiagnostic(candidates[name])])) } : {}),
+    ...(result.details?.selection ? { selection: result.details.selection } : {}),
     methodVersion:ATLM_METHOD.version,featureSchemaVersion:ATLM_FEATURE_VERSION,
     datasetRevision:snapshot?.datasetRevision ?? null,generation:job.generation,completedAt:nowMs};
 }
@@ -2909,6 +3270,16 @@ function atlmStatusDiagnostics(status) {
 
 function atlmPublicEvaluation(evaluation) {
   if (!evaluation) return null;
+  if (evaluation.protocolVersion === 2) {
+    const operational = evaluation.metrics?.operational;
+    return { qualityConfirmed: evaluation.qualityConfirmed === true, metricsScope: "FULL_POLICY",
+      caseCount: operational?.scoredCount ?? 0, modelCaseCount: evaluation.paired?.caseCount ?? 0,
+      coverage: evaluation.metrics?.atlm?.forecastRate ?? 0, operationalCoverage: operational?.forecastRate ?? 0,
+      maeMs: operational?.maeMs ?? null, medianBaselineMaeMs: evaluation.metrics?.median?.maeMs ?? null,
+      wapePercent: operational?.wapePercent ?? null, signedBiasPercent: operational?.signedBiasPercent ?? null,
+      profileGroupCount: evaluation.profileGroupCount ?? 0, excludedCaseCount: evaluation.excluded?.length ?? 0,
+      selectedCaseCount: evaluation.caseCount ?? 0, cutoff: evaluation.cutoff ?? null, protocolVersion: 2 };
+  }
   return { qualityConfirmed: evaluation.qualityConfirmed === true, caseCount: evaluation.paired?.caseCount ?? 0, coverage: evaluation.metrics?.atlm?.forecastRate ?? 0,
     maeMs: evaluation.paired?.atlm?.maeMs ?? null, medianBaselineMaeMs: evaluation.paired?.median?.maeMs ?? null,
     wapePercent: evaluation.paired?.atlm?.wapePercent ?? null, signedBiasPercent: evaluation.paired?.atlm?.signedBiasPercent ?? null,
@@ -2916,7 +3287,10 @@ function atlmPublicEvaluation(evaluation) {
     cutoff: evaluation.cutoff ?? null, protocolVersion: evaluation.protocolVersion ?? 1 };
 }
 function atlmPublicModel(row) {
+  const artifact = row ? atlmTrainingJson(row.artifact_json) : null;
   return row ? { modelId: row.model_id, modelVersion: row.model_version, trainedAt: row.activated_at ?? row.created_at,
+    method: artifact?.method ?? null,
+    ...(artifact?.kind === "HYBRID" ? { hybrid: { policyVersion: artifact.policyVersion, selectedEngine: artifact.selectedEngine } } : {}),
     sampleCount: row.sample_count, accuracy: atlmTrainingJson(row.metrics_json)?.qualityConfirmed === true ? "HISTORICALLY_EVALUATED" : "EXPERIMENTAL",
     evaluation: atlmPublicEvaluation(atlmTrainingJson(row.metrics_json)) } : null;
 }
@@ -2925,7 +3299,7 @@ function atlmPublicModel(row) {
 async function atlmReadActiveModel(db, ownerId) {
   return dbFirst(db, `SELECT m.* FROM estimation_models m JOIN estimation_owner_state o
     ON o.owner_id=m.owner_id AND o.active_model_id=m.model_id
-    WHERE m.owner_id=? AND m.status='ACTIVE' AND m.method_version='${ATLM_METHOD.version}' AND m.feature_version='${ATLM_FEATURE_VERSION}'
+    WHERE m.owner_id=? AND m.status='ACTIVE' AND m.method_version IN ('${ATLM_OLS_METHOD.version}','${ATLM_METHOD.version}') AND m.feature_version='${ATLM_FEATURE_VERSION}'
     AND NOT EXISTS(SELECT 1 FROM json_each(m.manifest_json) item
       LEFT JOIN estimation_samples s ON s.owner_id=m.owner_id AND s.sequence=CAST(item.value AS INTEGER)
       WHERE s.sequence IS NULL OR s.eligibility<>'ELIGIBLE'
@@ -2952,7 +3326,8 @@ export async function predictWithActiveModel(db, ownerId, features, nowMs) {
     accuracy: atlmTrainingJson(model.metrics_json)?.qualityConfirmed === true ? "HISTORICALLY_EVALUATED" : "EXPERIMENTAL" };
   if (prediction.status !== "AVAILABLE") return { ...unavailable(prediction.reason), ...metadata, diagnostics:atlmDiagnostics(prediction.reason,prediction),
     ...(prediction.missingFields ? { missingFields: prediction.missingFields } : {}) };
-  return { status: "AVAILABLE", pointMs: prediction.pointMs, ...metadata, unavailableReason: null };
+  return { status: "AVAILABLE", pointMs: prediction.pointMs, ...metadata, unavailableReason: null,
+    method:atlmTrainingJson(model.artifact_json).method,...(prediction.hybrid?{hybrid:prediction.hybrid}:{}) };
 }
 
 export async function getEstimationModelStatus(db, ownerId, nowMs) {
@@ -3035,6 +3410,16 @@ async function atlmManifestRows(db, ownerId, manifest) {
   return rows.map(row => ({ sampleId: String(row.sequence), planId: row.plan_id, capturedAt: row.captured_at,
     sourceAvailableAt: row.source_available_at, features: atlmTrainingJson(row.features_json), actualMs: row.actual_ms }));
 }
+
+async function atlmHistoricalRows(db, ownerId, snapshot, cutoff, excludePlanId) {
+  const rows = await dbAll(db, `SELECT s.* FROM estimation_samples s WHERE s.owner_id=? AND s.sequence<=?
+    AND s.observed_at<? AND s.sequence=(SELECT MAX(v.sequence) FROM estimation_samples v
+      WHERE v.owner_id=s.owner_id AND v.plan_id=s.plan_id AND v.sequence<=? AND v.observed_at<?)
+    AND s.eligibility='ELIGIBLE' AND s.source_available_at<? AND s.plan_id<>?
+    ORDER BY s.plan_id,s.sequence LIMIT ?`, ownerId, snapshot.historyThroughSequence, cutoff,
+    snapshot.historyThroughSequence, cutoff, cutoff, excludePlanId, ATLM_MAX_ROWS + 1);
+  return rows.map(row => atlmTrainingRow(atlmSampleView(row)));
+}
 function atlmSourceValiditySql(owner = "j.owner_id", manifest = "json_extract(j.snapshot_json,'$.manifest')") {
   return `NOT EXISTS(SELECT 1 FROM json_each(${manifest}) member
     LEFT JOIN estimation_samples s ON s.owner_id=${owner} AND s.sequence=CAST(member.value AS INTEGER)
@@ -3048,6 +3433,7 @@ async function atlmSnapshot(db, ownerId, job, clock) {
     db.prepare("SELECT * FROM estimation_owner_state WHERE owner_id=?").bind(ownerId),
     db.prepare(`SELECT s.* FROM estimation_samples s WHERE s.owner_id=? AND ${ATLM_LATEST_SAMPLE_SQL} AND s.eligibility='ELIGIBLE' ORDER BY s.sequence LIMIT ?`).bind(ownerId, ATLM_TRAINING_LIMIT + 1),
     db.prepare("SELECT * FROM estimation_models WHERE owner_id=? AND model_id=(SELECT active_model_id FROM estimation_owner_state WHERE owner_id=?)").bind(ownerId, ownerId),
+    db.prepare("SELECT COALESCE(MAX(sequence),0) AS through_sequence FROM estimation_samples WHERE owner_id=?").bind(ownerId),
   ]);
   const state = values[0].results[0], sampleRows = values[1].results, previous = values[2].results[0];
   const nowMs = clock();
@@ -3058,14 +3444,17 @@ async function atlmSnapshot(db, ownerId, job, clock) {
     capturedAt: row.captured_at, sourceAvailableAt: row.source_available_at, features: atlmTrainingJson(row.features_json), actualMs: row.actual_ms }));
   const snapshot = { formatVersion: 1, methodVersion: ATLM_METHOD.version, featureSchemaVersion: ATLM_FEATURE_VERSION, generation: job.generation, modelId: "atlm-" + job.generation,
     modelVersion: job.generation, trainCutoff: nowMs, datasetRevision: state.dataset_revision,
+    historyThroughSequence: values[3].results[0].through_sequence,
     newSampleCount: state.new_sample_count, newSampleSequence: sampleRows.reduce((max, row) => Math.max(max, row.sequence), 0),
-    activePointer: state.active_model_id, incumbentId: previous?.status === "ACTIVE" && previous.method_version === ATLM_METHOD.version && previous.feature_version === ATLM_FEATURE_VERSION ? previous.model_id : null,
+    activePointer: state.active_model_id, incumbentId: previous?.status === "ACTIVE" && [ATLM_METHOD.version, ATLM_OLS_METHOD.version].includes(previous.method_version)
+      && previous.feature_version === ATLM_FEATURE_VERSION ? previous.model_id : null,
     forcedRetrain: Boolean(state.forced_retrain), manifest, resourceLimitReached: limited,
-    selection: limited ? null : selectAtlmEvaluationCases(rows, { protocolVersion: 1, cutoff: nowMs }) };
+    selection: limited ? null : { status: "AVAILABLE", protocolVersion: 2, cutoff: nowMs, inputCount: rows.length,
+      eligibleCount: rows.length, caseSampleIds: atlmHybridTargets(rows).map(row => row.sampleId), excluded: [] } };
   if (!limited && (snapshot.selection.status !== "AVAILABLE" || snapshot.selection.eligibleCount !== rows.length)) {
     throw appError("INVALID_ESTIMATION_SOURCE", "ATLM eligible snapshot contains invalid sources.", 500);
   }
-  const checkpoint = { phase: limited ? "LIMIT" : "EVALUATE", cases: [], progressRevision: 1 };
+  const checkpoint = { phase: limited ? "LIMIT" : "EVALUATE", cases: [], baseCases: {}, progressRevision: 1 };
   const saved = await dbFirst(db, `UPDATE estimation_jobs SET snapshot_json=?,checkpoint_json=?,updated_at=?
     WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?
       AND EXISTS(SELECT 1 FROM estimation_owner_state WHERE owner_id=? AND dataset_revision=?)
@@ -3081,9 +3470,15 @@ function atlmCompareIncumbent(evaluation, incumbent) {
   const seenPlans = new Set((artifact.manifest || []).map(row => row.planId));
   const cases = evaluation.cases.filter(c => !seenPlans.has(c.planId) && c.capturedAt >= incumbent.train_cutoff
     && c.capturedAt > incumbent.latest_source_available_at);
-  const pairs = cases.map(c => ({ candidate: c.atlm, incumbent: predictAtlm(artifact, c.features), actualMs: c.actualMs }));
-  const candidateCount = pairs.filter(p => p.candidate.status === "AVAILABLE").length;
-  const incumbentCount = pairs.filter(p => p.incumbent.status === "AVAILABLE").length;
+  const pairs = cases.map(c => {
+    const own = predictAtlm(artifact, c.features);
+    if (own.reason === "INVALID_ARTIFACT") throw appError("SOURCE_UNAVAILABLE", "Сохранённая модель ATLM повреждена.", 503);
+    const fallback = ["UNSUPPORTED_CATEGORY", "INVALID_PREDICTION"].includes(own.reason) ? c.median : own;
+    return { candidate: c.prediction ?? c.atlm, incumbent: own.status === "AVAILABLE" ? own : fallback,
+      candidateOwn: c.atlm.status === "AVAILABLE", incumbentOwn: own.status === "AVAILABLE", actualMs: c.actualMs };
+  });
+  const candidateCount = pairs.filter(p => p.candidateOwn).length;
+  const incumbentCount = pairs.filter(p => p.incumbentOwn).length;
   const common = pairs.filter(p => p.candidate.status === "AVAILABLE" && p.incumbent.status === "AVAILABLE");
   const mae = key => common.length ? common.reduce((sum, p) => sum + Math.abs(p[key].pointMs - p.actualMs), 0) / common.length : null;
   const comparison = { caseCount: cases.length, commonCaseCount: common.length,
@@ -3225,7 +3620,8 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
         continue;
       }
       let snapshot = atlmTrainingJson(job.snapshot_json), checkpoint = atlmTrainingJson(job.checkpoint_json), rows;
-      if (!snapshot || snapshot.methodVersion !== ATLM_METHOD.version || snapshot.featureSchemaVersion !== ATLM_FEATURE_VERSION) {
+      if (!snapshot || snapshot.methodVersion !== ATLM_METHOD.version || snapshot.featureSchemaVersion !== ATLM_FEATURE_VERSION
+        || snapshot.selection?.protocolVersion !== 2 || !checkpoint?.baseCases) {
         const initial = await atlmSnapshot(db, ownerId, job, clock);
         if (!initial) { await atlmCheckpoint(db, ownerId, job, { phase: "SNAPSHOT", cases: [], progressRevision: (checkpoint?.progressRevision ?? 0) + 1 }, clock(), { release: true }); break; }
         ({ snapshot, checkpoint, rows } = initial);
@@ -3244,20 +3640,41 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
       }
       let lostLease = false;
       while (checkpoint.cases.length < snapshot.selection.caseSampleIds.length && budget()) {
-        const result = await evaluateAtlmCase(rows, snapshot.selection.caseSampleIds[checkpoint.cases.length], { protocolVersion: 1, cutoff: snapshot.trainCutoff });
+        const target = rows.find(row => row.sampleId === snapshot.selection.caseSampleIds[checkpoint.cases.length]);
+        const history = await atlmHistoricalRows(db, ownerId, snapshot, target.capturedAt, target.planId);
+        const required = [...atlmHybridTargets(history), target];
+        for (const q of required) {
+          if (checkpoint.baseCases[q.sampleId]) continue;
+          if (!budget()) break;
+          const train = await atlmHistoricalRows(db, ownerId, snapshot, q.capturedAt, q.planId);
+          const base = await evaluateHybridBaseCase(train, q);
+          checkpoint = { ...checkpoint, phase: "BASE_CASE", baseCases: { ...checkpoint.baseCases, [q.sampleId]: base },
+            progressRevision: checkpoint.progressRevision + 1 };
+          if (!await atlmCheckpoint(db, ownerId, job, checkpoint, clock())) { lostLease = true; break; }
+        }
+        if (lostLease || !budget() || required.some(q => !checkpoint.baseCases[q.sampleId])) break;
+        const result = summarizeHybridCase(target, history, checkpoint.baseCases);
+        if (result.status === "UNAVAILABLE") throw appError("INVALID_ESTIMATION_SOURCE", "Incomplete hybrid evaluation checkpoint.", 500);
         checkpoint = { ...checkpoint, phase: "EVALUATE", cases: [...checkpoint.cases, result], progressRevision: checkpoint.progressRevision + 1 };
-        const saved = await atlmCheckpoint(db, ownerId, job, checkpoint, clock());
-        if (!saved) { lostLease = true; break; }
+        if (!await atlmCheckpoint(db, ownerId, job, checkpoint, clock())) { lostLease = true; break; }
       }
       if (lostLease) break;
       if (!budget() || checkpoint.cases.length < snapshot.selection.caseSampleIds.length) {
         await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true });
         break;
       }
-      const evaluation = summarizeAtlmEvaluation(checkpoint.cases, snapshot.selection);
-      const initialReady = evaluation.paired?.caseCount >= 5;
-      const initialGood = initialReady && evaluation.paired.atlm.maeMs <= evaluation.paired.median.maeMs;
-      let rejection = initialReady && !initialGood ? "MEDIAN_BASELINE_BETTER" : null;
+      const evaluation = summarizeHybridAtlmEvaluation(checkpoint.cases, snapshot.selection);
+      if (evaluation.status !== "AVAILABLE") throw appError("INVALID_ESTIMATION_SOURCE", "Invalid hybrid evaluation.", 500);
+      checkpoint = { ...checkpoint, phase: "FIT", progressRevision: checkpoint.progressRevision + 1 };
+      if (!await atlmCheckpoint(db, ownerId, job, checkpoint, clock())) break;
+      if (!budget()) { await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true }); break; }
+      const candidates = await atlmFitCandidates(rows);
+      const selection = selectHybridEngine(candidates, snapshot.selection.caseSampleIds.map(id => checkpoint.baseCases[id]));
+      const fitted = await fitAtlm(rows, { candidates, selection, cutoff: snapshot.trainCutoff });
+      evaluation.selection = selection;
+      const initialReady = evaluation.paired.caseCount >= ATLM_MIN_COMPARISONS;
+      let rejection = fitted.status !== "AVAILABLE" ? fitted.reason
+        : initialReady && !evaluation.candidateReady ? "MEDIAN_BASELINE_BETTER" : null;
       const incumbent = snapshot.incumbentId ? await dbFirst(db, `SELECT m.*,(SELECT MAX(s.source_available_at) FROM estimation_samples s
         WHERE s.owner_id=m.owner_id AND s.sequence IN (SELECT value FROM json_each(m.manifest_json))) AS latest_source_available_at
         FROM estimation_models m WHERE m.owner_id=? AND m.model_id=?`, ownerId, snapshot.incumbentId) : null;
@@ -3274,15 +3691,12 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
       }
       if (rejection) {
         await atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, { activate: false,
-          status: rejection.startsWith("INSUFFICIENT_") ? "COLLECTING_DATA" : "REJECTED", reason: rejection, details:{sampleCount:rows.length}, artifact: null, evaluation }, clock());
+          status: rejection.startsWith("INSUFFICIENT_") ? "COLLECTING_DATA" : "REJECTED", reason: rejection,
+          details: { ...fitted, sampleCount: rows.length }, artifact: null, evaluation }, clock());
         continue;
       }
-      checkpoint = { ...checkpoint, phase: "FIT", progressRevision: checkpoint.progressRevision + 1 };
-      if (!await atlmCheckpoint(db, ownerId, job, checkpoint, clock())) break;
-      if (!budget()) { await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true }); break; }
-      const fitted = await fitAtlm(rows);
-      const final = { activate: fitted.status === "AVAILABLE", status: fitted.status === "AVAILABLE" ? "IDLE" : "COLLECTING_DATA",
-        artifact: fitted.artifact || null, reason: fitted.reason || null, details:{...fitted,sampleCount:rows.length}, evaluation };
+      const final = { activate: true, status: "IDLE", artifact: fitted.artifact,
+        reason: null, details: { ...fitted, sampleCount: rows.length }, evaluation };
       if (!await atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, final, clock())) {
         // A changed source invalidates this snapshot. A new generation captures current facts.
         await atlmSupersedeSnapshot(db, ownerId, job, snapshot, clock());

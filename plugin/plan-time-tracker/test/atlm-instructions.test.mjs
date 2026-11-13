@@ -19,6 +19,8 @@ test('delivered skills give one pre-start ATLM workflow with current-state steps
   for (const text of [primary, track, embedded]) {
     assert.match(text, /assessments\.atlm/);assert.match(text, /StartPlan/);
     assert.match(text, /ContinueTraining/);assert.match(text, /serverEstimation/);
+    assert.match(text, /agent-v3-hybrid/);assert.match(text, /OLS/);assert.match(text, /ridge/);
+    assert.match(text, /hybrid.usedEngine/);assert.match(text, /historical-median/);
   }
   for (const field of ['schemaVersion', 'agent-task-v1', 'profileEvidence', 'runtimeContext', 'plannedParallelAgents', 'CLIENT_REPORTED', 'changedContracts', 'verificationKinds', 'predictionRequest', 'expectedRequirementsDigest', 'GetCommandResult']) assert(primary.includes(field), field);
   assert.match(primary, /UNKNOWN\/null/);assert.match(primary, /не передавай эти счётчики самостоятельно/);
@@ -36,6 +38,8 @@ test('instruction names and immutable input fields are available through real MC
   try {
     const capability = (await invoke(c, 'GetTrackerInfo')).assessments.atlm;
     assert(capability);assert.equal(capability.retrainEveryNewPlans, 2);assert.equal(capability.featureSchemaVersion,'agent-task-v2');assert.equal(capability.inputSchemaVersion,'agent-task-v1');
+    assert.equal(capability.method.version,'agent-v3-hybrid');assert.equal(capability.policyVersion,1);
+    assert.deepEqual(capability.engines,['OLS','RIDGE']);
     const declared = JSON.stringify(capability);assert.match(declared, /agent-task-v1/);assert.match(declared, /PLAN_ACTIVE/);assert.match(declared, /FULL_FROM_FIRST_START/);
     const listing = (await call(c, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' })).value.result.tools;
     for (const name of tools) {

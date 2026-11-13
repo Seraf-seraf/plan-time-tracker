@@ -13,3 +13,7 @@ Steps содержат `{stepId,ordinal,title,content,status,version,createdAt,u
 FinishExceptions содержат reason и recordedAt. Старые попытки, результаты и проверки отдельного механизма исполнения, журнал событий и история смены статусов в экспорт не входят. Формат 1 не поддерживается.
 
 Коллекции читаются одним SQL snapshot. ExportedAt фиксируется после его чтения; параллельное изменение не смешивает строки из разных состояний. Экспорт — пользовательский отчёт, а не полный backup внутренних очередей и артефактов обучения.
+
+В assessment.serverEstimation сохраняются исходный method и необязательные поля гибрида: hybrid={policyVersion,selectedEngine,usedEngine,fallbackReason}, evaluation.metricsScope=FULL_POLICY, caseCount/modelCaseCount, coverage/operationalCoverage и сопоставимые ошибки. Исторические оценки agent-v2 и historical-median не пересчитываются новым алгоритмом. Добавление необязательных полей не меняет formatVersion=2 отчёта.
+
+Отчёт не является архивом estimation_samples, очереди и артефактов моделей. Для проверки протокола 2 нужен полный журнал GetTrainingData, описанный в [ATLM](atlm.md#локальная-проверка-экспорта). Новые issuedPrediction этого журнала допускают modelId=null у медианы и не подменяют measured actualMs.

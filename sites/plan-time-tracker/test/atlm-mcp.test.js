@@ -158,13 +158,16 @@ test("a trained forecast stays frozen, yields prospective error, and becomes sta
     await ok(c, "RecordAssessment", payload, 0);
     const before = value(await mcp(c, "GetSavedEstimate", { planId: PLAN }));
     assert.equal(before.serverEstimation.status, "AVAILABLE"); assert.equal(before.serverEstimation.pointMs, 1000);
-    assert.equal(before.serverEstimation.accuracy, "HISTORICALLY_EVALUATED"); assert.ok(before.serverEstimation.evaluation.caseCount >= 5);
+    assert.equal(before.serverEstimation.accuracy, "EXPERIMENTAL");
+    assert.equal(before.serverEstimation.evaluation.caseCount, 0, "late ingestion cannot invent past model checks");
     assert.equal(before.serverEstimation.interval, null); assert.equal(before.serverEstimation.confidence, "UNKNOWN");
     await completeAtlm(c, p, 1200); await ok(c, "RecordAssessment", await atlmAssessment(c), 0);
     const frozen = value(await mcp(c, "GetSavedEstimate", { planId: PLAN }));
     assert.equal(frozen.assessmentId, payload.assessmentId); assert.deepEqual(frozen.serverEstimation, before.serverEstimation);
     const source = await readAtlmSampleSource(c.db, OWNER, PLAN, c.now());
-    assert.deepEqual(source.issuedPrediction, { modelId: before.serverEstimation.modelId, pointMs: 1000, actualMs: 1200, errorMs: -200 });
+    assert.deepEqual(source.issuedPrediction, { method: before.serverEstimation.method, modelId: before.serverEstimation.modelId,
+      modelVersion: before.serverEstimation.modelVersion, calculatedAt: before.serverEstimation.calculatedAt,
+      pointMs: 1000, actualMs: 1200, errorMs: -200, hybrid: before.serverEstimation.hybrid });
     await ok(c, "UpdatePlanMetadata", { planId: PLAN, title: "Temporary scope change" }, 2);
     await ok(c, "UpdatePlanMetadata", { planId: PLAN, title: "ATLM synthetic feature" }, 3);
     assert.ok(value(await mcp(c, "GetSavedEstimate", { planId: PLAN })).staleReasons.includes("SCOPE_CHANGED"));
@@ -425,7 +428,8 @@ test("saved availability checks actual model categories and successful training 
 async function baselineHistory(c,durations){
  const plans=[];
  for(let i=0;i<durations.length;i++){
-  const task=atlmTask();task.profile.workKind=["MODIFY_MECHANISM","CREATE_MECHANISM","INVESTIGATE","MIXED"][i%4];task.profile.reuseState=["PARTIAL","ABSENT","READY"][i%3];
+  // Keep the target's MODIFY category unseen: rank deficiency alone no longer forces a median.
+  const task=atlmTask();task.profile.workKind=["MIXED","CREATE_MECHANISM","INVESTIGATE","MIXED"][i%4];task.profile.reuseState=["PARTIAL","ABSENT","READY"][i%3];
   const p=await plannedAtlm(c,crypto.randomUUID(),task);await completeAtlm(c,p,durations[i]);c.advance(1);plans.push(p);
  }
  await process(c);return plans;
@@ -437,7 +441,7 @@ test("early historical median returns real odd/even durations, persists honestly
   const p=value(await mcp(c,"EstimatePlanTime",args));
   assert.equal(p.status,"AVAILABLE");assert.equal(p.method.id,"historical-median");assert.equal(p.pointMs,5000);
   assert.equal(p.modelId,null);assert.equal(p.sampleCount,3);assert.equal(p.accuracy,"HISTORICAL_BASELINE");
-  assert.equal(p.interval,null);assert.equal(p.confidence,"UNKNOWN");assert.equal(p.fallback.atlmUnavailableReason,"COLLECTING_DATA");
+  assert.equal(p.interval,null);assert.equal(p.confidence,"UNKNOWN");assert.equal(p.fallback.atlmUnavailableReason,"UNSUPPORTED_CATEGORY");
   assert.deepEqual(rows(c),before);
   const payload=await atlmAssessment(c,PLAN,atlmTask(),{predictionRequest:request});
   await ok(c,"RecordAssessment",payload,0);
@@ -471,6 +475,20 @@ test("baseline source change racing assessment write is receipted and cannot sav
   assert.equal(r.status,409);assert.equal(r.value.error.code,"ATLM_MODEL_CHANGED");
   assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM assessment_revisions WHERE assessment_id=?").get(payload.assessmentId).n,0);
  }finally{restore?.();c.close();}
+});
+
+test("a frozen median is audited against the actual duration without a modelId",async()=>{
+  const c=context();try{
+    await baselineHistory(c,[1000,5000,9000]);const target=await plannedAtlm(c);
+    await ok(c,'RecordAssessment',await atlmAssessment(c,PLAN,atlmTask(),{predictionRequest:request}),0);
+    const issued=value(await mcp(c,'GetSavedEstimate',{planId:PLAN})).serverEstimation;
+    await completeAtlm(c,target,1000);
+    const source=await readAtlmSampleSource(c.db,OWNER,PLAN,c.now());
+    assert.equal(source.eligibility,'ELIGIBLE');assert.equal(source.actualMs,1000);
+    assert.equal(source.issuedPrediction.method.id,'historical-median');assert.equal(source.issuedPrediction.modelId,null);
+    assert.equal(source.issuedPrediction.pointMs,5000);assert.equal(source.issuedPrediction.errorMs,4000);
+    assert.deepEqual(value(await mcp(c,'GetSavedEstimate',{planId:PLAN})).serverEstimation,issued);
+  }finally{c.close();}
 });
 test("early median respects owner isolation, genuine zero and incomplete inputs",async()=>{
  const c=context();try{

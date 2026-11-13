@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { fitAtlm, predictAtlm, evaluateAtlmChronologically, selectAtlmEvaluationCases, evaluateAtlmCase, summarizeAtlmEvaluation } from "../worker/index.js";
+import { fitAtlmOls as fitAtlm, predictAtlmOls as predictAtlm, evaluateAtlmChronologically, selectAtlmEvaluationCases, evaluateAtlmCase, summarizeAtlmEvaluation } from "../worker/index.js";
 
 const features = { workKind: "MODIFY_MECHANISM", reuseState: "PARTIAL", doneBoundary: "LOCAL_VERIFIED", outcomeCount: 1, contractCount: 0, verificationKindCount: 1 };
 const rows = (n = 40) => Array.from({ length: n }, (_, i) => ({ sampleId: `sample-${String(i).padStart(3, "0")}`, planId: `plan-${String(i).padStart(3, "0")}`, capturedAt: i * 10000, sourceAvailableAt: i * 10000 + 5000, features: { ...features }, actualMs: 60000 }));

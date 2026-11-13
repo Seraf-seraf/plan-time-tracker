@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,readdirSync} from 'node:fs';
 import {resolve} from 'node:path';
-import {context,ok,call,command,mcp,running,rows,PLAN,OWNER,migrations,atlmTask} from './fixtures/tracker-db.mjs';
+import {context,ok,call,command,mcp,running,rows,PLAN,OWNER,migrations,atlmTask,plannedAtlm} from './fixtures/tracker-db.mjs';
 import {getEstimationModelStatus,predictWithActiveModel,normalizeAgentTaskV1,readAtlmSampleSource} from '../worker/index.js';
 
 const retiredTables=['step_attempts','tracker_sessions','tracker_journal','tracker_owner_state','tracker_plan_config','step_results','step_checks','step_acceptances','step_source_snapshots','step_source_checks','step_result_snapshots','step_snapshot_checks','plan_events','plan_document_sections','repositories','commits'];
@@ -124,8 +124,11 @@ for(const [name,paths] of chains)test(`${name} populated migration deletes the o
   const status=await getEstimationModelStatus(c.db,fixture.owner,c.now());assert.equal(status.activeModel,null);assert.equal(status.eligibleSampleCount,15);
   assert.equal((await predictWithActiveModel(c.db,fixture.owner,normalizeAgentTaskV1(atlmTask()).features,c.now())).unavailableReason,'MODEL_INVALIDATED');
   const retrained=await mcp(c,'StartTraining',{},fixture.owner);assert.equal(retrained.value.result.isError,undefined,JSON.stringify(retrained.value));
-  assert.equal(retrained.value.result.structuredContent.activeModel.sampleCount,15);
-  assert.equal((await predictWithActiveModel(c.db,fixture.owner,normalizeAgentTaskV1(atlmTask()).features,c.now())).pointMs,1000);
+  assert.equal(retrained.value.result.structuredContent.activeModel,null);
+  assert.equal(retrained.value.result.structuredContent.lastReason,'MEDIAN_BASELINE_NOT_WORSE','unchanged constant history ties the median');
+  const next=await plannedAtlm(c,crypto.randomUUID());
+  const preview=(await mcp(c,'EstimatePlanTime',{planId:next.planId,expectedRequirementsDigest:next.assessment.expectedRequirementsDigest,agentTask:atlmTask()},fixture.owner)).value.result.structuredContent;
+  assert.equal(preview.method.id,'historical-median');assert.equal(preview.pointMs,1000);
   const completed=before.plans.find(p=>p.status==='COMPLETED'),source=await readAtlmSampleSource(c.db,fixture.owner,completed.plan_id,c.now());assert.equal(source.eligibility,'ELIGIBLE');assert.equal(source.actualMs,1000);
   const current=(await call(c,`/api/tracker/plans/${fixture.runningPlanId}/execution`)).value;assert.equal(current.plan.status,'RUNNING');assert.equal(current.steps[0].status,'RUNNING');assert.equal(current.steps[0].content,'Original expected result');
   c.advance(25);await ok(c,'SetStepStatus',{stepId:current.steps[0].step_id,status:'DONE'},current.steps[0].version);await ok(c,'FinishPlan',{planId:fixture.runningPlanId},current.plan.version);

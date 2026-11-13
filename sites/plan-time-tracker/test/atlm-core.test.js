@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fitAtlm, predictAtlm } from "../worker/index.js";
+import { fitAtlmOls as fitAtlm, predictAtlmOls as predictAtlm } from "../worker/index.js";
 
 const reference = JSON.parse(readFileSync(new URL("./fixtures/atlm-reference.json", import.meta.url), "utf8"));
 const features = (changes = {}) => ({ workKind: "MODIFY_MECHANISM", reuseState: "PARTIAL", doneBoundary: "LOCAL_VERIFIED", outcomeCount: 1, contractCount: 0, verificationKindCount: 1, ...changes });

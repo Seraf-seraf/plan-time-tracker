@@ -61,8 +61,9 @@ test("packaged Worker learns automatically from completed plans and freezes the 
     const learned = await readTool("GetEstimationModelStatus");
     assert.equal(learned.eligibleSampleCount, 10);
     assert.ok(learned.activeModel, JSON.stringify(learned));
-    assert.equal(learned.activeModel.sampleCount, 10, "fit uses accumulated history, not the latest pair");
-    assert.ok(learned.activeModel.evaluation.caseCount >= 5);
+    assert.equal(learned.activeModel.sampleCount, 4, "a tie with the median keeps the prior experimental artifact");
+    assert.equal(learned.lastAttempt.parameters.sampleCount, 10, "the new attempt still fits all accumulated history");
+    assert.equal(learned.lastReason, 'MEDIAN_BASELINE_NOT_WORSE');
     assert.ok(scheduled > 0, "normal tracker commands actually schedule background processing");
 
     const historical = await readTool("GetPlanEstimate", { planId: firstId });
@@ -112,7 +113,9 @@ test("packaged public workflow learns all runtime effects and predicts omitted r
     const target=await plannedAtlm(c,crypto.randomUUID(),taskFor('b','high',2));
     const digest=(await mcp(c,'GetAssessment',{planId:target.planId})).value.result.structuredContent.currentRequirementsDigest;
     const known=await mcp(c,'EstimatePlanTime',{planId:target.planId,expectedRequirementsDigest:digest,agentTask:taskFor('b','high',2)});
-    assert.equal(known.value.result.isError,undefined,JSON.stringify(known.value));assert.equal(known.value.result.structuredContent.pointMs,30*60000);
+    assert.equal(known.value.result.isError,undefined,JSON.stringify(known.value));
+    assert.equal(known.value.result.structuredContent.hybrid.usedEngine,'RIDGE');
+    assert.equal(known.value.result.structuredContent.pointMs,1450000, 'ridge shrinks the existing fixture effects with lambda=1');
     const missing=taskFor(null,null,null);delete missing.runtimeContext;
     const unknown=await mcp(c,'EstimatePlanTime',{planId:target.planId,expectedRequirementsDigest:digest,agentTask:missing});
     assert.equal(unknown.value.result.isError,undefined,JSON.stringify(unknown.value));assert.equal(unknown.value.result.structuredContent.pointMs,21*60000);
@@ -121,6 +124,7 @@ test("packaged public workflow learns all runtime effects and predicts omitted r
     const estimate=(await mcp(c,'GetSavedEstimate',{planId:target.planId})).value.result.structuredContent;
     assert.equal(estimate.serverEstimation.pointMs,21*60000);
     const artifact=JSON.parse(c.db.sqlite.prepare("SELECT artifact_json FROM estimation_models WHERE status='ACTIVE'").get().artifact_json);
-    assert(artifact.columns.some(col=>col.field==='modelId'));assert(artifact.columns.some(col=>col.field==='reasoningEffort'));assert(artifact.columns.some(col=>col.kind==='runtimeNumeric'));
+    const selected=artifact.candidates[artifact.selectedEngine.toLowerCase()].artifact;
+    assert(selected.columns.some(col=>col.field==='modelId'));assert(selected.columns.some(col=>col.field==='reasoningEffort'));assert(selected.columns.some(col=>col.kind==='runtimeNumeric'));
   }finally{c.close();}
 });

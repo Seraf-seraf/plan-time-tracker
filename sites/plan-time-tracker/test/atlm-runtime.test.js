@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fitAtlm, predictAtlm, evaluateAtlmCase } from '../worker/index.js';
+import { fitAtlmOls as fitAtlm, predictAtlmOls as predictAtlm, evaluateAtlmCase } from '../worker/index.js';
 
 const base = { workKind:'MODIFY_MECHANISM', reuseState:'PARTIAL', doneBoundary:'LOCAL_VERIFIED', outcomeCount:1, contractCount:0, verificationKindCount:1 };
 const f = (modelId=null, reasoningEffort=null, plannedParallelAgents=null) => ({...base,modelId,reasoningEffort,plannedParallelAgents});

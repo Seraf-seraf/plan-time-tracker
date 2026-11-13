@@ -103,7 +103,9 @@ try {
   await refreshStatus();assert.equal(await settings().locator('.atlm-exclusions').evaluate(node => node.open), true, 'status reads preserve the open explanation');
   const manual = () => settings().getByRole('button', { name: 'Начать обучение', exact: true });
   await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
-  assert.equal(startCount, 1);assert.match(await settings().innerText(), /Недостаточно данных для расчёта коэффициентов модели/);
+  assert.equal(startCount, 1);assert.match(await settings().innerText(), /Пока недостаточно пригодных данных/);
+  await settings().getByText('Подробности последней попытки',{exact:true}).click();
+  assert.match(await settings().innerText(), /Недостаточно данных для расчёта коэффициентов модели/);
   assert.equal((await call(c, '/api/tracker/estimation-model')).value.training.generation, 1, 'real browser request reaches Worker training below two plans');
   await page.screenshot({ path: resolve(artifacts, 'atlm-cold-start.png'), fullPage: true });
 
@@ -118,6 +120,23 @@ try {
   await page.keyboard.press('Enter');await keyboardRequest;
   await page.waitForFunction(() => !document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy'));
 
+  for(const engine of ['RIDGE','OLS']){
+    estimate=estimateFor(PLAN);estimate.serverEstimation.method={id:'atlm',version:'agent-v3-hybrid'};
+    estimate.serverEstimation.hybrid={policyVersion:1,selectedEngine:'OLS',usedEngine:engine,fallbackReason:engine==='RIDGE'?'INVALID_PREDICTION':null};
+    estimate.serverEstimation.evaluation={qualityConfirmed:true,metricsScope:'FULL_POLICY',caseCount:20,modelCaseCount:15,
+      maeMs:60000,medianBaselineMaeMs:120000,profileGroupCount:6};
+    await refreshPlan();const text=await forecast().innerText();
+    assert(text.includes(engine==='RIDGE'?'ATLM — ridge':'ATLM — обычная регрессия'));
+    assert.match(text,/Средняя ошибка гибрида с запасным прогнозом: 1 мин/);
+    assert.match(text,/Ошибка медианы на тех же задачах: 2 мин/);
+    assert.match(text,/обученная модель использована: 15 из 20/);
+    assert.match(text,/Похожие задачи ограничивают выводы/);
+    for(const width of [320,1440]){
+      await page.setViewportSize({width,height:1100});
+      assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+      await page.screenshot({path:resolve(artifacts,'atlm-hybrid-'+engine.toLowerCase()+'-'+width+'.png'),fullPage:true});
+    }
+  }
   for(const k of [0,1,4]) {
     estimate=estimateFor(PLAN);estimate.serverEstimation.accuracy='EXPERIMENTAL';estimate.serverEstimation.sampleCount=k+1;
     estimate.serverEstimation.evaluation={qualityConfirmed:false,caseCount:k,maeMs:k?0:null};
@@ -190,6 +209,13 @@ try {
   assert.equal(await settings().getByRole('button', { name: 'Начать обучение', exact: true }).isEnabled(), true);
   status=modelState('IDLE');status.activeModel.sampleCount=2;status.activeModel.accuracy='EXPERIMENTAL';status.activeModel.evaluation={qualityConfirmed:false,caseCount:0,maeMs:null};await refreshStatus();
   assert.match(await settings().innerText(),/В обучении использовано планов: 2\./);assert.match(await settings().innerText(),/Всего пригодных планов: 23/);assert.match(await settings().innerText(),/Проверено прогнозов: 0/);assert.match(await settings().innerText(),/Ошибка пока не оценена/);
+  status=modelState('IDLE');status.activeModel.hybrid={policyVersion:1,selectedEngine:'RIDGE'};
+  status.lastAttempt={code:'AVAILABLE',message:'Модель успешно обучена. sampleCount=25, p=27, rank=17.',datasetRevision:263,generation:26,
+    candidates:{ols:{status:'UNAVAILABLE',reason:'RANK_DEFICIENT',sampleCount:25,p:22,rank:17},ridge:{status:'AVAILABLE',sampleCount:25,p:27,rank:17}}};
+  await refreshStatus();assert.match(await settings().innerText(),/ATLM — ridge/);
+  assert.doesNotMatch(await settings().innerText(),/sampleCount=25/, 'technical details start collapsed');
+  await settings().getByText('Подробности последней попытки',{exact:true}).click();
+  assert.match(await settings().innerText(),/p=22, rank=17/);assert.match(await settings().innerText(),/Ridge: рассчитана/);
   status = modelState('RUNNING');status.training.progress = { phase: 'EVALUATION', completedCases: 2, totalCases: 7 };await refreshStatus();
   assert.match(await settings().innerText(), /Модель обучается/);assert.match(await settings().innerText(), /Обработано примеров: 2 из 7/);
   status = modelState('REJECTED');status.lastReason = 'CANDIDATE_MAE_WORSE';await refreshStatus();
