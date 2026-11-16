@@ -8,6 +8,7 @@ import {
   mcp,
   PLAN,
   migrations,
+  migration,
   running,
   result,
   rows,
@@ -324,4 +325,75 @@ test("stable stage IDs and fenced examples retain their source and assessment me
   } finally {
     c.close();
   }
+});
+
+test("large plans with more than 100 stages survive HTTP and MCP creation, reading, replay and export", async () => {
+  const text = "# Большой план\n" + "Подробности плана. ".repeat(9000) + "\n" + Array.from({length: 120}, (_, i) => `## Этап ${i + 1}. Проверка\nСодержимое ${i + 1}\n`).join("");
+  assert(text.length > 60000);
+  assert(Buffer.byteLength(text) > 128 * 1024);
+  for (const viaMcp of [false, true]) {
+    const c = context();
+    try {
+      const args = {schemaVersion:1,commandId:crypto.randomUUID(),payload:{planId:PLAN,title:"Большой план",planText:text,planCreatedAt:{precision:"dateOnly",on:"2026-11-16",timeZone:"UTC"}}};
+      const send = () => viaMcp ? mcp(c,"CreatePlan",args) : call(c,"/api/commands",{...args,commandType:"CreatePlan"});
+      const first = await send();
+      assert.equal(first.status,200,JSON.stringify(first.value));
+      assert.equal(viaMcp ? first.value.result.isError : first.value.error,undefined,JSON.stringify(first.value));
+      const again = await send();
+      assert.equal(viaMcp ? again.value.result.structuredContent.replayed : again.value.replayed,true);
+      assert.equal((await call(c,"/api/plans/"+PLAN)).value.plan.planText,text);
+      const steps = (await progress(c)).steps;
+      assert.equal(steps.length,120);
+      assert.equal(steps.at(-1).title,"Этап 120. Проверка");
+      const target = JSON.parse(c.db.sqlite.prepare("SELECT requirements_json FROM assessment_targets WHERE step_id=?").get(steps.at(-1).step_id).requirements_json);
+      assert.deepEqual(target,{plan:{title:"Большой план",planText:text},step:{stepId:steps.at(-1).step_id,title:steps.at(-1).title,content:steps.at(-1).content}});
+      const report = (await call(c,"/api/export")).value;
+      assert.equal(report.plans[0].planText,text);
+      assert.equal(report.plans[0].steps.length,120);
+      const receipt = c.db.sqlite.prepare("SELECT payload_json FROM command_receipts WHERE command_id=?").get(args.commandId).payload_json;
+      assert(Buffer.byteLength(receipt) < 2 * 1024 * 1024,"receipt must not repeat the complete document for every stage");
+      await ok(c,"UpdatePlanMetadata",{planId:PLAN,title:"Переименованный большой план"},0);
+      const updated = JSON.parse(c.db.sqlite.prepare("SELECT requirements_json FROM assessment_targets WHERE step_id=?").get(steps.at(-1).step_id).requirements_json);
+      assert.equal(updated.plan.title,"Переименованный большой план");
+      assert.equal(updated.plan.planText,text);
+      const metadataReceipt=c.db.sqlite.prepare("SELECT payload_json FROM command_receipts WHERE command_type='UpdatePlanMetadata'").get().payload_json;
+      assert(Buffer.byteLength(metadataReceipt)<2000,"renaming must not duplicate stage requirements in the receipt");
+      assert.deepEqual(c.db.sqlite.prepare("PRAGMA foreign_key_check").all(),[]);
+    } finally { c.close(); }
+  }
+});
+
+test("document migration preserves existing source, statuses, requirements and receipts", async () => {
+  const c = context(migrations.indexOf("0025_unlimited_plan_documents.sql"));
+  try {
+    await create(c);
+    await ok(c,"StartPlan",{planId:PLAN},0);
+    const step = (await progress(c)).steps[0];
+    await ok(c,"SetStepStatus",{stepId:step.step_id,status:"DONE"},1);
+    const tables = ["plan_documents","plan_steps","assessment_targets","command_receipts"];
+    const before = tables.map(table => c.db.sqlite.prepare("SELECT * FROM "+table).all());
+    c.db.sqlite.exec(migration("0025_unlimited_plan_documents.sql"));
+    assert.deepEqual(tables.map(table => c.db.sqlite.prepare("SELECT * FROM "+table).all()),before);
+    c.db.sqlite.prepare("UPDATE plan_documents SET markdown=? WHERE plan_id=?").run(planText+"x".repeat(60001),PLAN);
+    assert.equal((await call(c,"/api/plans/"+PLAN)).value.plan.planText,planText+"x".repeat(60001));
+    assert.deepEqual(c.db.sqlite.prepare("PRAGMA foreign_key_check").all(),[]);
+  } finally { c.close(); }
+});
+
+test("MCP schema and browser form advertise no plan length cap while other body limits remain", async () => {
+  const c = context();
+  try {
+    const tools=(await call(c,"/mcp",{jsonrpc:"2.0",id:1,method:"tools/list"})).value.result.tools;
+    const schema=tools.find(tool=>tool.name==="CreatePlan").inputSchema.properties.payload.properties.planText;
+    assert.equal(schema.maxLength,undefined);
+    const info=(await mcp(c,"GetTrackerInfo")).value.result.structuredContent;
+    assert.equal(info.planDocuments.maxLength,undefined);
+    const response=await c.worker.fetch(new Request("http://localhost",{headers:{"oai-authenticated-user-id":"source-evidence-owner"}}),{DB:c.db});
+    const html=await response.text();
+    assert(!/<textarea id="description"[^>]*maxlength=/.test(html));
+    const oversized=await call(c,"/api/commands",{schemaVersion:1,commandId:crypto.randomUUID(),commandType:"PausePlan",payload:{planId:PLAN,reason:"x".repeat(140000)}});
+    assert.equal(oversized.status,413);
+    const rpc=await call(c,"/mcp",{jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"GetPlan",arguments:{planId:PLAN,padding:"x".repeat(140000)}}});
+    assert.equal(rpc.status,413);
+  } finally { c.close(); }
 });
