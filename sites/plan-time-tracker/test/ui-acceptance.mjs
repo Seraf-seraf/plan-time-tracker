@@ -97,7 +97,7 @@ try {
   await page.locator('[data-tracker-panel]').waitFor();
   assert.equal(await page.locator('[data-view="plans"]').getAttribute("aria-current"), "page", "plan details remain in the plans section");
   const edit = page.locator('[data-tracker-form="plan-metadata"]');
-  for (const name of ["Название плана", "Описание", "Критерии приёмки", "Дата составления", "Причина правки даты"]) {
+  for (const name of ["Название плана", "Описание", "Критерии приёмки", "Дата составления"]) {
     assert.equal(await edit.getByText(name, { exact: true }).isVisible(), true, "visible label: " + name);
   }
   const dateConfirmation = edit.getByRole("checkbox", { name: "Подтверждаю дату составления после первого старта" });
@@ -113,7 +113,7 @@ try {
   await dateConfirmation.focus();await page.keyboard.press("Space");
   assert.equal(await dateConfirmation.isChecked(), false);
   await edit.getByRole("textbox", { name: "Описание", exact: true }).fill("Saved before lost acknowledgment");
-  await edit.getByRole("textbox", {name:"Причина правки даты",exact:true}).fill("Synthetic metadata edit");
+  assert.equal(await edit.getByRole("textbox", {name:"Причина правки даты",exact:true}).count(), 0);
   await edit.getByRole("button", { name: "Сохранить изменения", exact: true }).click();
   await page.waitForFunction(() => document.querySelector("#toast")?.classList.contains("error"));
   const original = posts.find(post => post.commandType === "UpdatePlanMetadata");

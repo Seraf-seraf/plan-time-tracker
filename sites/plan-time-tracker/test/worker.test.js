@@ -303,7 +303,7 @@ test("stale expectedVersion changes nothing; repeated finish can recover the sto
   assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM command_receipts WHERE plan_id=? AND command_type='FinishPlan' AND outcome_code='OK'").bind(PLAN_A).first()).n, 1);
 });
 
-test("plan date edits require a reason and explicit confirmation when moved past first start", async () => {
+test("plan date edits accept no reason and require explicit confirmation when moved past first start", async () => {
   const c = context(Date.parse("2026-10-09T08:00:00Z"));
   await createPlan(c.worker, c.db, PLAN_A);
   c.setNow(Date.parse("2026-10-09T09:00:00Z"));
@@ -312,7 +312,7 @@ test("plan date edits require a reason and explicit confirmation when moved past
     method: "POST",
     body: JSON.stringify({
       schemaVersion: 1, commandId: id, commandType: "UpdatePlanMetadata", expectedVersion: 1,
-      payload: { planId: PLAN_A, planCreatedAt: { precision: "dateOnly", on: "2026-10-12", timeZone: "Europe/Moscow" }, reason: "Corrected from source document", confirmDateAnomaly: confirm },
+      payload: { planId: PLAN_A, planCreatedAt: { precision: "dateOnly", on: "2026-10-12", timeZone: "Europe/Moscow" }, confirmDateAnomaly: confirm },
     }),
   });
   const blocked = await update(commandId(), false);
@@ -324,7 +324,7 @@ test("plan date edits require a reason and explicit confirmation when moved past
   assert.equal(accepted.response.status, 200);
   assert.equal(accepted.body.result.version, 2);
   assert.equal((await c.db.prepare("SELECT plan_created_on,version FROM plans WHERE plan_id=?").bind(PLAN_A).first()).plan_created_on, "2026-10-12");
-  assert.equal((await c.db.prepare("SELECT reason FROM plan_date_history WHERE plan_id=?").bind(PLAN_A).first()).reason, "Corrected from source document");
+  assert.equal((await c.db.prepare("SELECT reason FROM plan_date_history WHERE plan_id=?").bind(PLAN_A).first()).reason, "");
 });
 
 test("empty metadata updates are rejected without incrementing plan version or adding an event", async () => {

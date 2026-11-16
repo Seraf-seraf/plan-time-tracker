@@ -255,6 +255,8 @@ test("checkpoint UI exposes only authoritative readiness, no owner-decision comm
   assert(scripts[0].includes('new CustomEvent("plan-time-tracker:plan-will-render")'));
   assert(scripts[0].includes('edit.dataset.trackerForm="plan-metadata"'));
   assert(scripts[0].includes('confirm.dataset.draftField="confirmDateAnomaly"'));
+  assert(!scripts[0].includes("Причина правки даты"));
+  assert(!scripts[0].includes("reason:reason.value"));
   assert(scripts[0].includes('plan-time-tracker:draft-cleared'));
   assert(tracker.includes('toggle.setAttribute("aria-controls",body.id)'));
 });
