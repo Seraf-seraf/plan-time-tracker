@@ -33,6 +33,16 @@ function intercept(c, predicate, callback, method = "first") {
     }; return statement;
   }; return () => { c.db.prepare = prepare; };
 }
+function interceptCheckpoint(c, predicate, callback) {
+  const isCheckpoint = (sql, args) => sql.startsWith("UPDATE estimation_jobs SET checkpoint_json=?") && predicate(JSON.parse(args[0]));
+  const reset = intercept(c, isCheckpoint, callback);
+  const batch = c.db.batch;
+  c.db.batch = function(statements) {
+    const execute = () => batch.call(this, statements);
+    return statements.some(statement => isCheckpoint(statement.sql, statement.args)) ? callback(execute) : execute();
+  };
+  return () => { reset(); c.db.batch = batch; };
+}
 function pauseOnce(c, predicate) {
   let announce, resume, selected = false;
   const reached = new Promise(resolve => { announce = resolve; });
@@ -313,6 +323,8 @@ test("5001 accumulated eligible samples are retained with an explicit resource f
     cloneStoredExperience(c, plans[0].planId, 5001 - plans.length);
     const s = await drain(c);
     assert.equal(s.eligibleSampleCount, 5001); assert.equal(s.training.status, "FAILED");
+    assert.equal(s.lastAttempt.parameters.sampleCount, 5001);
+    assert.equal(s.lastAttempt.parameters.sampleCountIsLowerBound, true);
     assert.equal(s.lastReason, "DATASET_LIMIT_REACHED"); assert.equal(s.lastError, "DATASET_LIMIT_REACHED");
     assert.equal(s.training.due, false); assert.equal(s.newPlansSinceTraining, 0);
     assert.deepEqual(await predictWithActiveModel(c.db, OWNER, features, c.now()), before);
@@ -336,7 +348,7 @@ test("a ten second bounded pass checkpoints between cases and resumes without sp
   try {
     await experience(c, 15);
     let elapsed = 0;
-    restore = intercept(c, sql => sql.startsWith("UPDATE estimation_jobs SET checkpoint_json=?"), async execute => {
+    restore = interceptCheckpoint(c, () => true, async execute => {
       const result = await execute(); elapsed = 10000; return result;
     });
     const first = await processEstimationTraining(c.db, OWNER, c.now(), { clock: c.now, wallClock: () => elapsed });
@@ -344,7 +356,7 @@ test("a ten second bounded pass checkpoints between cases and resumes without sp
     assert.equal(first.training.status, "QUEUED"); assert.equal(first.training.due, true);
     assert.equal(first.training.progress.completedCases, 0); assert.equal(first.training.progress.totalCases, 15);
     assert.equal(first.training.progress.phase,"EVALUATE");
-    assert.equal(Object.keys(JSON.parse(trainJob(c).checkpoint_json).baseCases).length,1);
+    assert.equal(c.db.sqlite.prepare("SELECT COUNT(DISTINCT item) AS n FROM estimation_checkpoint_parts WHERE owner_id=? AND field='baseCases'").get(OWNER).n, 1);
     const checkpoint = trainJob(c), snapshot = checkpoint.snapshot_json;
     assert.equal(checkpoint.attempts, 1); assert.equal(models(c).length, 0);
     await drain(c);
@@ -357,8 +369,7 @@ test("fit waits for another pass when its checkpoint consumed the remaining wall
   const c = context(); let restore;
   try {
     await experience(c, 15); let elapsed = 0;
-    restore = intercept(c, (sql, args) => sql.startsWith("UPDATE estimation_jobs SET checkpoint_json=?")
-      && JSON.parse(args[0]).phase === "FIT", async execute => { const result = await execute(); elapsed = 10001; return result; });
+    restore = interceptCheckpoint(c, header => header.phase === "FIT", async execute => { const result = await execute(); elapsed = 10001; return result; });
     const first = await processEstimationTraining(c.db, OWNER, c.now(), { clock: c.now, wallClock: () => elapsed });
     restore();
     assert.equal(first.activeModel, null); assert.equal(first.training.status, "QUEUED");
@@ -436,7 +447,7 @@ test("a checkpoint from another method restarts evaluation under the current lea
     paused.release();await pending;c.advance(60001);await drain(c);c.advance(300000);await drain(c);
     assert.equal((await status(c)).activeModel.sampleCount,2);
     const job=trainJob(c);assert.equal(JSON.parse(job.snapshot_json).methodVersion,'agent-v5-operations');
-    assert.equal(JSON.parse(job.checkpoint_json).cases.length,2);
+    assert.equal(JSON.parse(job.checkpoint_json).completedCases,2);
     assert.equal((await predictWithActiveModel(c.db,OWNER,features,c.now())).pointMs,1000);
   }finally{paused?.release();if(pending)await pending.catch(()=>{});c.close();}
 });

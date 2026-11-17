@@ -3743,7 +3743,7 @@ function atlmJobDue(job, nowMs) {
 }
 // Public diagnostics contain only bounded, non-sensitive model facts.
 function atlmDiagnostics(code, facts = {}) {
-  const parameters = {};
+  const parameters = facts.sampleCountIsLowerBound ? {sampleCountIsLowerBound:true} : {};
   for (const key of ["sampleCount","p","residualDegreesOfFreedom","rank","limit","status","firstStartedAt"])
     if (facts[key] !== undefined && facts[key] !== null && (typeof facts[key] === "string" || Number.isFinite(facts[key]))) parameters[key] = facts[key];
   if (Array.isArray(facts.missingFields)) parameters.missingFields = facts.missingFields.filter(x => typeof x === "string").slice(0, 20);
@@ -3898,7 +3898,7 @@ export async function getEstimationModelStatus(db, ownerId, nowMs) {
     training: { status, generation: train?.generation ?? state?.training_generation ?? 0, due,
       attempts: trainPending ? train.attempts : 0, nextAttemptAt: Number.isFinite(nextAttemptAt) ? nextAttemptAt : null,
       pendingRefreshCount: pending.length, progressRevision: checkpoint.progressRevision ?? 0,
-      progress: { phase: checkpoint.phase ?? null, completedCases: checkpoint.cases?.length ?? 0,
+      progress: { phase: checkpoint.phase ?? null, completedCases: checkpoint.completedCases ?? checkpoint.cases?.length ?? 0,
         totalCases: snapshot.selection?.caseSampleIds?.length ?? 0 } },
     lastError: refreshFailed?.last_error ?? train?.last_error ?? null,
     lastReason: state?.last_training_reason ?? null, lastAttempt:atlmTrainingJson(state?.last_training_diagnostics_json) };
@@ -3928,13 +3928,89 @@ async function atlmReleaseSuperseded(db, ownerId, job, nowMs) {
     WHERE owner_id=? AND job_key=? AND fence=? AND generation>? AND status='RUNNING' AND lease_until>?`)
     .bind(nowMs, ownerId, job.job_key, job.fence, job.generation, nowMs).run();
 }
+const ATLM_CHECKPOINT_FIELDS = ["baseCases", "policyCases", "cases", "calibrationProof", "finalCandidates", "quantileFit"];
+const ATLM_CHECKPOINT_CHARS = 32000;
+const ATLM_CHECKPOINT_PACKET_CHARS = 128000;
+const checkpointStorage = new WeakMap();
+
+async function readAtlmCheckpoint(db, ownerId, job) {
+  const header = atlmTrainingJson(job.checkpoint_json);
+  if (!header?.storageId) return header;
+  const checkpoint = {...header};
+  const saved = new Map();
+  let cursor = 0, currentKey, parts = [], current;
+  function finishItem() {
+    if (!current) return;
+    const value = JSON.parse(parts.join(""));
+    checkpoint[current.field][current.item] = value;
+    saved.set(currentKey, value);
+  }
+  for (const field of header.fields) checkpoint[field] = field === "cases" ? [] : {};
+  do {
+    const rows = await dbAll(db, `SELECT rowid,field,item,part,content FROM estimation_checkpoint_parts
+      WHERE owner_id=? AND generation=? AND storage_id=? AND rowid>? ORDER BY rowid LIMIT 64`,
+      ownerId, job.generation, header.storageId, cursor);
+    for (const row of rows) {
+      const key = row.field + ":" + row.item;
+      if (key !== currentKey) { finishItem(); current = row; currentKey = key; parts = []; }
+      if (row.part !== parts.length) throw new Error("Invalid training checkpoint");
+      parts.push(row.content);
+      cursor = row.rowid;
+    }
+    if (rows.length < 64) break;
+  } while (true);
+  finishItem();
+  checkpointStorage.set(checkpoint, {id:header.storageId, saved});
+  return checkpoint;
+}
+
 async function atlmCheckpoint(db, ownerId, job, checkpoint, nowMs, { snapshot, release = false } = {}) {
-  const fields = ["checkpoint_json=?", "updated_at=?"], values = [JSON.stringify(checkpoint), nowMs];
+  const storage = checkpointStorage.get(checkpoint) ?? {id:crypto.randomUUID(), saved:new Map()};
+  checkpointStorage.set(checkpoint, storage);
+  const header = {...checkpoint, storageId:storage.id, fields:[], completedCases:checkpoint.cases?.length ?? 0};
+  const guard = "owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?";
+  const guardArgs = [ownerId, job.job_key, job.generation, job.fence, nowMs];
+  const statements = [], pending = [];
+  let packet = [], packetChars = 0;
+  function flushPacket() {
+    if (!packet.length) return;
+    statements.push(db.prepare(`INSERT INTO estimation_checkpoint_parts(owner_id,generation,storage_id,field,item,part,content)
+      SELECT ?,?,?,json_extract(value,'$[0]'),json_extract(value,'$[1]'),json_extract(value,'$[2]'),json_extract(value,'$[3]')
+      FROM json_each(?) WHERE EXISTS(SELECT 1 FROM estimation_jobs WHERE ${guard}) ORDER BY CAST(key AS INTEGER)`)
+      .bind(ownerId, job.generation, storage.id, "[" + packet.join(",") + "]", ...guardArgs));
+    packet = [];
+    packetChars = 0;
+  }
+  for (const field of ATLM_CHECKPOINT_FIELDS) {
+    delete header[field];
+    if (!checkpoint[field]) continue;
+    header.fields.push(field);
+    for (const [item, value] of Object.entries(checkpoint[field])) {
+      const key = field + ":" + item;
+      if (storage.saved.get(key) === value) continue;
+      // Entries describe immutable results. Chunks for an item are inserted in order.
+      if (storage.saved.has(key)) throw new Error("Training checkpoint item changed");
+      const json = JSON.stringify(value);
+      for (let offset = 0, part = 0; offset < json.length; part++) {
+        let end = Math.min(json.length, offset + ATLM_CHECKPOINT_CHARS);
+        if (end < json.length && /[\uD800-\uDBFF]/.test(json[end - 1])) end--;
+        const entry = JSON.stringify([field, item, part, json.slice(offset, end)]);
+        if (packetChars + entry.length > ATLM_CHECKPOINT_PACKET_CHARS) flushPacket();
+        packet.push(entry);
+        packetChars += entry.length + 1;
+        offset = end;
+      }
+      pending.push([key, value]);
+    }
+  }
+  flushPacket();
+  const fields = ["checkpoint_json=?", "updated_at=?"], values = [JSON.stringify(header), nowMs];
   if (snapshot !== undefined) { fields.push("snapshot_json=?"); values.push(JSON.stringify(snapshot)); }
   if (release) fields.push("status='QUEUED'", "executor_epoch=executor_epoch+2", "lease_until=NULL");
-  return dbFirst(db, `UPDATE estimation_jobs SET ${fields.join(",")}
-    WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>? RETURNING *`,
-    ...values, ownerId, job.job_key, job.generation, job.fence, nowMs);
+  const head = db.prepare(`UPDATE estimation_jobs SET ${fields.join(",")} WHERE ${guard} RETURNING fence`).bind(...values,...guardArgs);
+  const result = statements.length ? (await db.batch([...statements, head])).at(-1).results[0] : await head.first();
+  if (result) for (const [key, value] of pending) storage.saved.set(key, value);
+  return result;
 }
 async function atlmManifestRows(db, ownerId, manifest) {
   const rows = await dbAll(db, `SELECT s.* FROM estimation_samples s WHERE s.owner_id=?
@@ -3981,7 +4057,7 @@ async function atlmSnapshot(db, ownerId, job, clock) {
     newSampleCount: state.new_sample_count, newSampleSequence: sampleRows.reduce((max, row) => Math.max(max, row.sequence), 0),
     activePointer: state.active_model_id, incumbentId: previous?.status === "ACTIVE" && [ATLM_METHOD.version, ATLM_OLS_METHOD.version].includes(previous.method_version)
       && previous.feature_version === ATLM_FEATURE_VERSION ? previous.model_id : null,
-    forcedRetrain: Boolean(state.forced_retrain), manifest, resourceLimitReached: limited,
+    forcedRetrain: Boolean(state.forced_retrain), manifest, observedSampleCount:sampleRows.length, resourceLimitReached: limited,
     selection: limited ? null : { status: "AVAILABLE", protocolVersion: 3, cutoff: nowMs, inputCount: rows.length,
       eligibleCount: rows.length, caseSampleIds: atlmHybridTargets(rows).map(row => row.sampleId), excluded: [] } };
   if (!limited && (snapshot.selection.status !== "AVAILABLE" || snapshot.selection.eligibleCount !== rows.length)) {
@@ -4066,7 +4142,7 @@ async function atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, resu
     checkpoint_json=?,updated_at=? WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?
     AND EXISTS(SELECT 1 FROM estimation_models WHERE owner_id=? AND model_id=? AND status=?)`)
     .bind(result.status === "FAILED" ? result.reason : null,
-      JSON.stringify({ ...checkpoint, phase: "DONE", progressRevision: checkpoint.progressRevision + 1 }), nowMs,
+      JSON.stringify({ phase: "DONE", completedCases: checkpoint.cases?.length ?? 0, progressRevision: checkpoint.progressRevision + 1 }), nowMs,
       ownerId, job.generation, job.fence, nowMs, ownerId, snapshot.modelId, result.activate ? "ACTIVE" : "REJECTED"));
   statements.push(...atlmEnqueueTrainingStatements(db, ownerId, nowMs));
   await db.batch(statements);
@@ -4183,7 +4259,7 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
         continue;
       }
       await atlmEnsureAttempt(db, ownerId, job, clock());
-      let snapshot = atlmTrainingJson(job.snapshot_json), checkpoint = atlmTrainingJson(job.checkpoint_json), rows;
+      let snapshot = atlmTrainingJson(job.snapshot_json), checkpoint = await readAtlmCheckpoint(db, ownerId, job), rows;
       if (!snapshot || snapshot.methodVersion !== ATLM_METHOD.version || snapshot.featureSchemaVersion !== ATLM_FEATURE_VERSION
         || snapshot.selection?.protocolVersion !== 3 || !checkpoint?.baseCases) {
         const initial = await atlmSnapshot(db, ownerId, job, clock);
@@ -4193,7 +4269,7 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
       }
       if (snapshot.resourceLimitReached) {
         await atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint,
-          { activate: false, status: "FAILED", reason: "DATASET_LIMIT_REACHED", details:{sampleCount:snapshot.manifest.length,limit:ATLM_MAX_ROWS}, artifact: null, evaluation: null }, clock());
+          { activate: false, status: "FAILED", reason: "DATASET_LIMIT_REACHED", details:{sampleCount:snapshot.observedSampleCount ?? ATLM_MAX_ROWS+1,limit:ATLM_MAX_ROWS,sampleCountIsLowerBound:true}, artifact: null, evaluation: null }, clock());
         continue;
       }
       rows ||= await atlmManifestRows(db, ownerId, snapshot.manifest);
