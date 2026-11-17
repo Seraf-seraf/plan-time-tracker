@@ -4,6 +4,60 @@ DROP TRIGGER atlm_input_no_delete;
 DROP TRIGGER atlm_sample_no_delete;
 DROP TRIGGER atlm_model_no_delete;
 INSERT OR IGNORE INTO estimation_owner_state(owner_id) SELECT owner_id FROM owners;
+
+-- v3 training data is incompatible with the v4 feature schema, but keep an
+-- exact row copy so it can be inspected or restored if the upgrade is rolled back.
+CREATE TABLE IF NOT EXISTS estimation_v3_archive_owner_state AS
+  SELECT rowid AS source_rowid, *, CAST(NULL AS INTEGER) AS archived_at
+  FROM estimation_owner_state WHERE 0;
+CREATE TABLE IF NOT EXISTS estimation_v3_archive_models AS
+  SELECT rowid AS source_rowid, *, CAST(NULL AS INTEGER) AS archived_at
+  FROM estimation_models WHERE 0;
+CREATE TABLE IF NOT EXISTS estimation_v3_archive_samples AS
+  SELECT rowid AS source_rowid, *, CAST(NULL AS INTEGER) AS archived_at
+  FROM estimation_samples WHERE 0;
+CREATE TABLE IF NOT EXISTS estimation_v3_archive_training_attempts AS
+  SELECT rowid AS source_rowid, *, CAST(NULL AS INTEGER) AS archived_at
+  FROM estimation_training_attempts WHERE 0;
+CREATE TABLE IF NOT EXISTS estimation_v3_archive_plan_inputs AS
+  SELECT rowid AS source_rowid, *, CAST(NULL AS INTEGER) AS archived_at
+  FROM plan_estimation_inputs WHERE 0;
+CREATE TABLE IF NOT EXISTS estimation_v3_archive_jobs AS
+  SELECT rowid AS source_rowid, *, CAST(NULL AS INTEGER) AS archived_at
+  FROM estimation_jobs WHERE 0;
+
+CREATE UNIQUE INDEX IF NOT EXISTS estimation_v3_archive_owner_state_key
+  ON estimation_v3_archive_owner_state(owner_id);
+CREATE UNIQUE INDEX IF NOT EXISTS estimation_v3_archive_models_key
+  ON estimation_v3_archive_models(owner_id,model_id);
+CREATE UNIQUE INDEX IF NOT EXISTS estimation_v3_archive_samples_key
+  ON estimation_v3_archive_samples(owner_id,sequence);
+CREATE UNIQUE INDEX IF NOT EXISTS estimation_v3_archive_attempts_key
+  ON estimation_v3_archive_training_attempts(owner_id,attempt_id);
+CREATE UNIQUE INDEX IF NOT EXISTS estimation_v3_archive_inputs_key
+  ON estimation_v3_archive_plan_inputs(owner_id,plan_id);
+CREATE UNIQUE INDEX IF NOT EXISTS estimation_v3_archive_jobs_key
+  ON estimation_v3_archive_jobs(owner_id,job_key);
+
+INSERT OR IGNORE INTO estimation_v3_archive_owner_state
+  SELECT rowid,*,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)
+  FROM estimation_owner_state WHERE schema_version<4;
+INSERT OR IGNORE INTO estimation_v3_archive_models
+  SELECT rowid,*,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)
+  FROM estimation_models WHERE owner_id IN (SELECT owner_id FROM estimation_owner_state WHERE schema_version<4);
+INSERT OR IGNORE INTO estimation_v3_archive_samples
+  SELECT rowid,*,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)
+  FROM estimation_samples WHERE owner_id IN (SELECT owner_id FROM estimation_owner_state WHERE schema_version<4);
+INSERT OR IGNORE INTO estimation_v3_archive_training_attempts
+  SELECT rowid,*,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)
+  FROM estimation_training_attempts WHERE owner_id IN (SELECT owner_id FROM estimation_owner_state WHERE schema_version<4);
+INSERT OR IGNORE INTO estimation_v3_archive_plan_inputs
+  SELECT rowid,*,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)
+  FROM plan_estimation_inputs WHERE owner_id IN (SELECT owner_id FROM estimation_owner_state WHERE schema_version<4);
+INSERT OR IGNORE INTO estimation_v3_archive_jobs
+  SELECT rowid,*,CAST((julianday('now')-2440587.5)*86400000 AS INTEGER)
+  FROM estimation_jobs WHERE owner_id IN (SELECT owner_id FROM estimation_owner_state WHERE schema_version<4);
+
 UPDATE estimation_owner_state SET active_model_id=NULL,
   data_reset_at=max(CAST((julianday('now')-2440587.5)*86400000 AS INTEGER),
     COALESCE((SELECT max(fence)+1 FROM estimation_jobs WHERE owner_id=estimation_owner_state.owner_id),0),
