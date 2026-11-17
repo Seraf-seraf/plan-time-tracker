@@ -33,6 +33,7 @@ ATLM использует признаки `agent-task-v4`, точечные м�
 Каноническая установка применяет все SQL 0001–0027. Сборка включает Worker и SQL sidecars; тесты проверяют новую установку и обновление заполненной схемы.
 
 ```sh
+npm ci
 npm run build
 npm run validate
 npm test

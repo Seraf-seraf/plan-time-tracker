@@ -22,6 +22,7 @@ ATLM `agent-v5-operations` выбирает точечный прогноз из
 
 ```sh
 cd sites/plan-time-tracker
+npm ci
 npm test
 npm run validate
 npm run test:ui
