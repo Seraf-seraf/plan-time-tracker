@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { context, call, command, envelope, ok, mcp, running, result, check, PLAN, OWNER, migrations, migration, rows } from "./fixtures/tracker-db.mjs";
+import { assessForStart, context, call, command, envelope, ok, mcp, running, result, check, PLAN, OWNER, migrations, migration, rows } from "./fixtures/tracker-db.mjs";
 
 const OTHER = "22222222-2222-4222-8222-222222222222";
 const historyArgs = targets => ({ targets, from: "2027-01-01", to: "2027-01-31", timeZone: "UTC" });
@@ -59,6 +59,7 @@ test("immutable revisions retain baseline; only requirements changes make estima
     const step = await planned(c), p = await assessment(c, step.stepId);
     await ok(c, "RecordAssessment", p, 0);
     const initial = await read(c, p);
+    await assessForStart(c);
     await ok(c, "StartPlan", { planId: PLAN }, 0);
     assert.equal((await read(c, p)).needsRevision, false);
     await ok(c,"UpdatePlanMetadata",{planId:PLAN,title:"Expanded result"},1);
@@ -151,9 +152,9 @@ test("MCP discovery and HTTP expose the same strict neutral contract and version
       assert.equal((await mcp(c, "GetEstimationHistory", args)).value.result.isError, true);
     }
     const init = await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "initialize" });
-    assert.equal(init.value.result.serverInfo.version, "0.7.0");
+    assert.equal(init.value.result.serverInfo.version, "0.8.0");
     const caps = (await mcp(c, "GetTrackerCapabilities")).value.result.structuredContent;
-    assert.equal(caps.version, "0.7.0"); assert.equal(caps.assessments.methodologyControlsExecution, false);
+    assert.equal(caps.version, "0.8.0"); assert.equal(caps.assessments.methodologyControlsExecution, true);
     const listing = await call(c, "/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" });
     const tool = listing.value.result.tools.find(t => t.name === "SaveTaskAssessment");
     assert.ok(tool.inputSchema.required.includes("expectedVersion"));
@@ -219,7 +220,7 @@ async function beginAttempt(c, stepId) {
 const closeAttempt = (c, lease) => ok(c, "CloseStepAttempt", { ...lease, disposition: "CLOSED", reason: "Period fixture completed" });
 
 test("calendar facts remain measured when historical active intervals are missing", async () => {
-  const c = context();
+  const c = context(migrations.indexOf("0027_agent_task_v4_gate.sql"));
   try {
     await planned(c);
     c.db.sqlite.prepare("UPDATE plans SET status='COMPLETED',first_started_at=?,finished_at=? WHERE owner_id=? AND plan_id=?")

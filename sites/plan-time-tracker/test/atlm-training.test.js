@@ -7,7 +7,8 @@ import { processEstimationTraining, getEstimationModelStatus, predictWithActiveM
   normalizeAgentTask, claimAtlmJob, scheduleAtlmTraining, readAtlmSamples, evaluateHybridAtlmChronologically } from "../worker/index.js";
 import { context, plannedAtlm, completeAtlm, atlmTask, atlmAssessment, command, ok, mcp, rows, OWNER } from "./fixtures/tracker-db.mjs";
 const features = normalizeAgentTask(atlmTask()).features;
-const drain = c => processEstimationTraining(c.db, OWNER, c.now(), { clock: c.now });
+// A full deterministic pass; deadline/yield behavior has separate controlled-clock tests.
+const drain = c => processEstimationTraining(c.db, OWNER, c.now(), { clock: c.now, wallClock: () => 0 });
 const status = c => getEstimationModelStatus(c.db, OWNER, c.now());
 const trainJob = c => c.db.sqlite.prepare("SELECT * FROM estimation_jobs WHERE owner_id=? AND job_key='train'").get(OWNER);
 const models = c => c.db.sqlite.prepare("SELECT * FROM estimation_models WHERE owner_id=? ORDER BY model_version").all(OWNER);
@@ -62,8 +63,10 @@ test("one to two eligible plans triggers once; receipt replay and excluded plans
   try {
     await experience(c, 1, { processEach: true });
     assert.equal((await status(c)).newPlansSinceTraining, 1); assert.equal(trainJob(c), undefined);
-    const incomplete = atlmTask(); incomplete.workUnits = null; incomplete.unknownReasons.workUnits = "Unknown";
-    await completed(c, 1000, incomplete); await drain(c);
+    const excluded=await plannedAtlm(c,crypto.randomUUID());
+    await ok(c,"StartPlan",{planId:excluded.planId},0);
+    await ok(c,"FinishPlan",{planId:excluded.planId,allowIncomplete:true,reason:"Unverified result"},1);
+    await drain(c);
     assert.equal((await status(c)).excludedSampleCount, 1); assert.equal(trainJob(c), undefined);
     const second = await completed(c);
     const receipt = c.db.sqlite.prepare("SELECT command_id FROM command_receipts WHERE owner_id=? AND plan_id=? AND command_type='FinishPlan'").get(OWNER, second.planId);
@@ -147,7 +150,7 @@ test("checkpoint survives a database reopen and queued continuation does not con
     const initial = await paused.reached;
     c.advance(60001); paused.release(); await pending;
     const persisted = trainJob(c), resumeAt = c.now();
-    c.db.sqlite.prepare("UPDATE estimation_jobs SET status='QUEUED',lease_until=NULL,executor_epoch=executor_epoch+1 WHERE owner_id=? AND job_key='train'").run(OWNER);
+    c.db.sqlite.prepare("UPDATE estimation_jobs SET status='QUEUED',lease_until=NULL,executor_epoch=executor_epoch+2 WHERE owner_id=? AND job_key='train'").run(OWNER);
     c.close(); c = context(0, { databasePath }); c.advance(resumeAt - c.now()); await drain(c);
     assert.equal(trainJob(c).attempts, persisted.attempts);
     assert.equal(models(c)[0].manifest_json, JSON.stringify(JSON.parse(initial.snapshot_json).manifest));
@@ -410,7 +413,7 @@ test("late-ingested batches persist early models without inventing historical ch
       if(n===1){assert.equal(state.activeModel,null);assert.equal(model.reason,'INSUFFICIENT_DATA');continue;}
       assert.equal(state.activeModel.sampleCount,n);
       assert.equal(state.activeModel.evaluation.pointCaseCount,0);
-      assert.equal(model.method_version,"agent-v4-probabilistic");assert.equal(model.feature_version,"agent-task-v3");
+      assert.equal(model.method_version,"agent-v5-operations");assert.equal(model.feature_version,"agent-task-v4");
       const before=rows(c),prediction=await predictWithActiveModel(c.db,OWNER,features,c.now());
       assert.equal(prediction.pointMs,1000);
       assert.equal(prediction.accuracy,"EXPERIMENTAL");
@@ -432,7 +435,7 @@ test("a checkpoint from another method restarts evaluation under the current lea
       .run(JSON.stringify(old),JSON.stringify({phase:'EVALUATE',cases:[{sampleId:'invalid-old-case'}],progressRevision:1}),OWNER);
     paused.release();await pending;c.advance(60001);await drain(c);c.advance(300000);await drain(c);
     assert.equal((await status(c)).activeModel.sampleCount,2);
-    const job=trainJob(c);assert.equal(JSON.parse(job.snapshot_json).methodVersion,'agent-v4-probabilistic');
+    const job=trainJob(c);assert.equal(JSON.parse(job.snapshot_json).methodVersion,'agent-v5-operations');
     assert.equal(JSON.parse(job.checkpoint_json).cases.length,2);
     assert.equal((await predictWithActiveModel(c.db,OWNER,features,c.now())).pointMs,1000);
   }finally{paused?.release();if(pending)await pending.catch(()=>{});c.close();}

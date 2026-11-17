@@ -107,7 +107,7 @@ test("packaged public workflow learns runtime effects and accepts explicit unkno
     const taskFor=(modelId,reasoningEffort,plannedParallelAgents)=>{
       const task=taskV4();Object.assign(task.execution,{modelId,reasoningEffort,plannedParallelAgents});
       for(const [field,value] of Object.entries({modelId,reasoningEffort,plannedParallelAgents})){
-        const path='execution.'+field;if(value===null){delete task.evidence[path];task.unknownReasons[path]='Unknown';}
+        const path='execution.'+field;if(value===null){delete task.evidence[path];task.unknownReasons[path]={reason:'Metadata not disclosed',checkedSource:'Runner metadata'};}
         else {task.evidence[path]='Fixture';delete task.unknownReasons[path];}
       }
       return task;
@@ -123,7 +123,7 @@ test("packaged public workflow learns runtime effects and accepts explicit unkno
     assert.equal(known.value.result.isError,undefined,JSON.stringify(known.value));
     assert.equal(known.value.result.structuredContent.hybrid.usedEngine,'RIDGE');
     assert.ok(known.value.result.structuredContent.pointMs>0);
-    const missing=taskFor(null,null,null);
+    const missing=taskFor(null,null,1);
     const unknown=await mcp(c,'EstimatePlanTime',{planId:target.planId,expectedRequirementsDigest:digest,agentTask:missing});
     assert.equal(unknown.value.result.isError,undefined,JSON.stringify(unknown.value));assert.ok(unknown.value.result.structuredContent.pointMs>0);
     const saved=await atlmAssessment(c,target.planId,missing,{predictionRequest:{method:'ATLM',methodVersion:1}});

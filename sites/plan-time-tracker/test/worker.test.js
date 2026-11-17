@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import { assessForStart } from "./fixtures/tracker-db.mjs";
 import { Script } from "node:vm";
 import {
   AppError,
@@ -88,7 +89,7 @@ async function call(worker, db, path, options = {}, ownerId = OWNER) {
 }
 
 async function createPlan(worker, db, planId, title = "Feature implementation", ownerId = OWNER, extra = {}) {
-  return call(worker, db, "/api/commands", {
+  const created = await call(worker, db, "/api/commands", {
     method: "POST",
     body: JSON.stringify({
       schemaVersion: 1,
@@ -104,6 +105,8 @@ async function createPlan(worker, db, planId, title = "Feature implementation", 
       },
     }),
   }, ownerId);
+  if (created.response.ok) await assessForStart({worker, db}, planId, ownerId);
+  return created;
 }
 
 async function transition(worker, db, type, planId, version, ownerId = OWNER, now = undefined, id = commandId()) {
@@ -291,10 +294,12 @@ test("stale expectedVersion changes nothing; repeated finish can recover the sto
   const c = context();
   await createPlan(c.worker, c.db, PLAN_A);
   await transition(c.worker, c.db, "StartPlan", PLAN_A, 0);
+  const successfulReceipts = () => c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM command_receipts WHERE plan_id=? AND outcome_code='OK'").get(PLAN_A).n;
+  const before = successfulReceipts();
   const stale = await transition(c.worker, c.db, "ResumePlan", PLAN_A, 0);
   assert.equal(stale.response.status, 409);
   assert.equal(stale.body.error.code, "VERSION_CONFLICT");
-  assert.equal((await c.db.prepare("SELECT COUNT(*) AS n FROM command_receipts WHERE plan_id=? AND outcome_code='OK'").bind(PLAN_A).first()).n, 2);
+  assert.equal(successfulReceipts(), before);
   const finishId = commandId();
   const fin = await transition(c.worker, c.db, "FinishPlan", PLAN_A, 1, OWNER, undefined, finishId);
   const retry = await transition(c.worker, c.db, "FinishPlan", PLAN_A, 1, OWNER, undefined, finishId);
@@ -487,8 +492,12 @@ test("completed plans without measured intervals count as finished but stay outs
   const c = context(Date.parse("2026-10-12T09:00:00Z"));
   await createPlan(c.worker, c.db, PLAN_A);
   const start = Date.parse("2026-10-12T08:00:00Z");
-  await c.db.prepare("UPDATE plans SET status='COMPLETED',first_started_at=?,finished_at=? WHERE owner_id=? AND plan_id=?")
-    .bind(start, c.now(), OWNER, PLAN_A).run();
+  const finish = c.now();
+  c.setNow(start);
+  assert.equal((await transition(c.worker, c.db, "StartPlan", PLAN_A, 0)).response.status, 200);
+  c.setNow(finish);
+  assert.equal((await transition(c.worker, c.db, "FinishPlan", PLAN_A, 1)).response.status, 200);
+  await c.db.prepare("DELETE FROM work_intervals WHERE owner_id=? AND plan_id=?").bind(OWNER, PLAN_A).run();
   const a = await buildAnalytics(c.db, OWNER, { from: "2026-10-12", to: "2026-10-12", timeZone: "UTC" }, c.now());
   assert.equal(a.completedPlans, 1);
   assert.equal(a.completedMeasuredN, 0);

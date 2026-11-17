@@ -10,7 +10,7 @@ test('each explicit training attempt is recorded even when there is no data',asy
     const attempts=c.db.sqlite.prepare('SELECT * FROM estimation_training_attempts ORDER BY started_at,attempt_id').all();
     assert.equal(attempts.length,1);assert.ok(attempts[0].completed_at!==null);
     assert.equal(attempts[0].reason,'INSUFFICIENT_DATA');
-    assert.equal(attempts[0].method_version,'agent-v4-probabilistic');
+    assert.equal(attempts[0].method_version,'agent-v5-operations');
     assert.deepEqual(JSON.parse(attempts[0].manifest_json),[]);
   }finally{c.close();}
 });

@@ -46,7 +46,7 @@ test("OLS reports rank deficiency for correlated predictors", async () => {
 
 test("unknown additional facts remain usable and invalid input is rejected", async () => {
   const { artifact } = await fitAtlmOls(rows());
-  assert.equal(predictAtlmOls(artifact, features({ "components.MODIFY": null })).status, "AVAILABLE");
+  assert.equal(predictAtlmOls(artifact, features({ "components.MODIFY": null })).reason, "INVALID_FEATURES");
   assert.equal(predictAtlmOls(artifact, features({ doneBoundary: "UNKNOWN" })).reason, "MISSING_REQUIRED_FEATURES");
   assert.equal(predictAtlmOls(artifact, features({ "components.MODIFY": -1 })).reason, "INVALID_FEATURES");
 });

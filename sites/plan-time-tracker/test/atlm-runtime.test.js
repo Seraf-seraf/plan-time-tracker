@@ -18,20 +18,13 @@ test('model and effort categories use only values occurring at least three times
 });
 
 test('all missing runtime values add no active columns and unseen values are accepted', async () => {
-  const row = make(0, { modelId:null, reasoningEffort:null, plannedParallelAgents:null });
+  const row = make(0, { modelId:null, reasoningEffort:null, plannedParallelAgents:1 });
   const fit = await fitAtlmRidge([row]); assert.equal(fit.status, 'AVAILABLE'); assert.equal(fit.artifact.p, 1);
   assert.equal(predictAtlmRidge(fit.artifact, { ...row.features, modelId:'unseen', reasoningEffort:'max', plannedParallelAgents:3 }).status, 'AVAILABLE');
 });
 
-test('a missing numeric value has a distinct indicator and prefix-only median', () => {
-  const features = [2, null, 2, null].map((plannedParallelAgents, i) => make(i, { plannedParallelAgents }).features);
-  const fit = fitAtlmV4Preprocessor(features);
-  assert.equal(fit.status, 'AVAILABLE');
-  assert.ok(fit.manifest.columns.some(c => c.kind === 'missing' && c.field === 'plannedParallelAgents'));
-  assert.ok(fit.manifest.droppedColumns.some(c => c.kind === 'count' && c.field === 'plannedParallelAgents'));
-  const snapshot = structuredClone(fit.manifest);
-  fitAtlmV4Preprocessor([...features, make(5, { plannedParallelAgents: 100 }).features]);
-  assert.deepEqual(fit.manifest, snapshot);
+test('fit rejects a missing required numeric runtime feature', () => {
+  assert.equal(fitAtlmV4Preprocessor([make(0,{plannedParallelAgents:null}).features]).reason, 'INVALID_FEATURES');
 });
 
 test('unbounded learned categories fail with an explicit resource limit', () => {
@@ -41,7 +34,7 @@ test('unbounded learned categories fail with an explicit resource limit', () => 
 });
 
 test('runtime manifest rejects reordered columns and invalid category metadata', async () => {
-  const input = Array.from({length: 8}, (_, i) => make(i, {modelId: i < 4 ? 'a' : 'b', plannedParallelAgents: i % 2 ? 1 : null}));
+  const input = Array.from({length: 8}, (_, i) => make(i, {modelId: i < 4 ? 'a' : 'b', plannedParallelAgents: i % 2 ? 1 : 2}));
   const fit = await fitAtlmRidge(input); assert.equal(fit.status, 'AVAILABLE');
   for (const change of [a => a.preprocessor.openCategories.modelId.push('x'.repeat(129)),
     a => a.preprocessor.imputations.plannedParallelAgents = -1,

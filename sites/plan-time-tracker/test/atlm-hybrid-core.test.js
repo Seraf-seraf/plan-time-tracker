@@ -35,7 +35,7 @@ test('ridge artifacts are deterministic and reject damaged preprocessing', async
 test('single observation is unpenalized and unknown optional inputs remain usable', async () => {
   const fit = await fitAtlmRidge(rows.slice(0, 1)), f = rows[0].features;
   assert.equal(fit.status, 'AVAILABLE'); assert.equal(predictAtlmRidge(fit.artifact, f).pointMs, rows[0].actualMs);
-  for (const changes of [{modelId:null}, {modelId:'unseen'}, {reasoningEffort:'unseen'}, {plannedParallelAgents:null}]) {
+  for (const changes of [{modelId:null}, {modelId:'unseen'}, {reasoningEffort:'unseen'}, {plannedParallelAgents:2}]) {
     assert.equal(predictAtlmRidge(fit.artifact, { ...f, ...changes }).status, 'AVAILABLE');
   }
   assert.equal((await fitAtlmRidge([])).reason, 'INSUFFICIENT_DATA');

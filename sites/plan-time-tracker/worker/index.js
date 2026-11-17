@@ -1,6 +1,6 @@
 import { UI_FONT_CSS } from "./fonts.js";
 
-const TRACKER_VERSION = "0.7.0";
+const TRACKER_VERSION = "0.8.0";
 const BODY_LIMIT = 128 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SNAPSHOT_DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -149,7 +149,7 @@ export function median(values) {
   return sorted.length % 2 ? sorted[middle] : sorted[middle - 1] + Math.round((sorted[middle] - sorted[middle - 1]) / 2);
 }
 
-const V4_DONE_BOUNDARIES = ["ANALYSIS","LOCAL_VERIFIED","LOCAL_STAGED","PUBLISHED","DEPLOYED_VERIFIED","UNKNOWN"];
+const V4_DONE_BOUNDARIES = ["ANALYSIS","LOCAL_VERIFIED","LOCAL_STAGED","PUBLISHED","DEPLOYED_VERIFIED"];
 const ESTIMATE_ID = /^[\x20-\x7e]{1,128}$/;
 function isPlainRecord(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -158,7 +158,7 @@ function isPlainRecord(value) {
 }
 function isNonnegativeSafeInteger(value) { return Number.isSafeInteger(value) && value>=0; }
 
-const ATLM_METHOD = Object.freeze({ id: "atlm", version: "agent-v4-probabilistic" });
+const ATLM_METHOD = Object.freeze({ id: "atlm", version: "agent-v5-operations" });
 const ATLM_OLS_METHOD = ATLM_METHOD;
 const ATLM_RIDGE_METHOD = Object.freeze({ id: "atlm-ridge", version: "1" });
 const ATLM_RIDGE_LAMBDA = 1;
@@ -167,7 +167,7 @@ const ATLM_HYBRID_METHOD = ATLM_METHOD;
 const ATLM_POLICY_VERSION = 2;
 const ATLM_MIN_COMPARISONS = 5;
 const ATLM_MAE_TIE_MS = 1;
-const ATLM_FEATURE_VERSION = "agent-task-v3";
+const ATLM_FEATURE_VERSION = "agent-task-v4";
 const ATLM_MAX_ROWS = 5000;
 const ATLM_MAX_EVALUATION_CASES = 20;
 
@@ -728,6 +728,10 @@ function messageFor(code) {
     ATLM_MODEL_CHANGED: "Модель или исходная история изменились во время расчёта. Получите свежую оценку новой командой.",
     DATASET_CHANGED: "Набор обучающих данных изменился. Начните выгрузку заново.",
     ASSESSMENT_SOURCE_NOT_FOUND: "Исторический источник оценки недоступен.",
+    ASSESSMENT_REQUIRED: "Перед первым запуском сохраните плановую оценку ATLM.",
+    ASSESSMENT_INCOMPLETE: "Заполните обязательные поля и основания оценки.",
+    ASSESSMENT_INVALID: "Исправьте указанные поля оценки.",
+    ASSESSMENT_SCHEMA_OUTDATED: "Сохраните новую оценку по текущей схеме.",
     ASSESSMENT_SCHEMA_RETIRED: "Исходная оценка удалена при переходе на новую схему ATLM; повтор команды не создаёт оценку.",
     ATLM_CLIENT_RETIRED: "Клиент использует прежний формат прогноза. Обновите приложение и повторите запуск плана.",
     PLAN_PAUSED: "План на паузе. Сначала явно возобновите его.",
@@ -798,128 +802,183 @@ const V4_TASK_KEY = { type: "string", minLength: 1, maxLength: 128 };
 const V4_TASK_ITEM = (properties) => ({ type: "object", additionalProperties: false,
   required: Object.keys(properties), properties });
 const V4_TASK_MAX_BYTES = 64 * 1024;
-const V4_TASK_LIST = (items) => ({ type: ["array", "null"], maxItems: V4_TASK_MAX_BYTES, items });
+const V4_TASK_LIST = (items) => ({ type: "array", maxItems: V4_TASK_MAX_BYTES, items });
 const V4_WORK_KINDS = ["CREATE", "MODIFY", "DEBUG", "REFACTOR", "MIGRATE", "VERIFY", "ANALYZE", "OPERATE"];
 const V4_VERIFICATION_KINDS = ["BUILD_STATIC", "UNIT", "INTEGRATION", "UI_E2E", "DEPLOY_SMOKE"];
+const V4_SLUG = { ...V4_TASK_KEY, pattern: "^[a-z0-9][a-z0-9._:-]*$" };
+const V4_LEARNING_KINDS = ["TOOLING", "RUNTIME", "DATA_MODEL", "OTHER"];
+const V4_OPERATION_ENUMS = {
+  action: ["READ", "WRITE"], work: ["USE", "MODIFY", "ADD"], contractState: ["KNOWN", "PARTIAL", "UNKNOWN"],
+  retryPolicy: ["NOT_REQUIRED", "EXISTING", "IMPLEMENT", "UNKNOWN"],
+  idempotency: ["NOT_APPLICABLE", "EXISTING", "IMPLEMENT", "UNKNOWN"],
+  recovery: ["NOT_REQUIRED", "EXISTING", "IMPLEMENT", "UNKNOWN"],
+  authType: ["NONE", "API_KEY", "OAUTH2", "SERVICE_ACCOUNT", "OTHER", "UNKNOWN"],
+  accessState: ["AVAILABLE", "MISSING", "UNKNOWN", "NOT_REQUIRED"],
+};
+const V4_OPERATION = V4_TASK_ITEM({
+  id: V4_SLUG, description: V4_TASK_TEXT, evidence: V4_TASK_TEXT,
+  ...Object.fromEntries(Object.entries(V4_OPERATION_ENUMS).map(([key, values]) => [key, { enum: values }])),
+  verificationScenarioIds: { ...V4_TASK_LIST(V4_TASK_KEY), minItems: 1, uniqueItems: true },
+});
+const V4_BOUNDARY = V4_TASK_ITEM({
+  id: V4_SLUG, name: { type: "string", minLength: 1, maxLength: 160 },
+  contractControl: { enum: ["OWNED", "FOREIGN"] }, role: { enum: ["API", "SERVICE", "DATASTORE", "QUEUE", "SDK", "PLATFORM"] },
+  evidence: V4_TASK_TEXT, operations: { ...V4_TASK_LIST(V4_OPERATION), minItems: 1 },
+});
 const V4_TASK_SCHEMA = {
-  type: "object", additionalProperties: false,
-  required: ["schemaVersion", "workUnits", "doneBoundary", "reuseLevel", "components", "contracts", "integrations", "migrationEntities", "dataVolumeBand", "requirementsUncertainty", "solutionUncertainty", "diagnosisState", "unfamiliarTechnologies", "scopeChangeRisk", "verificationKinds", "verificationScenarios", "verificationReadiness", "requiredReviewPasses", "environmentReadiness", "accessReadiness", "deploymentTargets", "execution", "evidence", "unknownReasons"],
+  type: "object", additionalProperties: false, description: "agent-task-v4. См. assess-task/references/features.md.",
+  required: ["schemaVersion", "workUnits", "doneBoundary", "reuseLevel", "components", "contracts", "systemBoundaries", "migrationEntities", "dataVolumeBand", "requirementsUncertainty", "solutionUncertainty", "diagnosisState", "learningTargets", "scopeChangeRisk", "verificationKinds", "verificationScenarios", "verificationReadiness", "requiredReviewPasses", "environmentReadiness", "accessReadiness", "deploymentTargets", "execution", "evidence", "unknownReasons"],
   properties: {
-    schemaVersion: { enum: ["agent-task-v3"] },
-    workUnits: V4_TASK_LIST(V4_TASK_ITEM({ id: V4_TASK_KEY, kind: { enum: V4_WORK_KINDS }, description: V4_TASK_TEXT, evidence: V4_TASK_TEXT })),
+    schemaVersion: { enum: ["agent-task-v4"] },
+    workUnits: { ...V4_TASK_LIST(V4_TASK_ITEM({ id: V4_TASK_KEY, kind: { enum: V4_WORK_KINDS }, description: V4_TASK_TEXT, evidence: V4_TASK_TEXT })), minItems: 1 },
     doneBoundary: { enum: [...V4_DONE_BOUNDARIES] },
-    reuseLevel: { type: ["integer", "null"], minimum: 0, maximum: 3 },
+    reuseLevel: { type: "integer", minimum: 0, maximum: 3 },
     components: V4_TASK_LIST(V4_TASK_ITEM({ key: V4_TASK_KEY, change: { enum: ["CREATE", "MODIFY", "REMOVE"] }, evidence: V4_TASK_TEXT })),
     contracts: V4_TASK_LIST(V4_TASK_ITEM({ kind: { enum: ["API", "MCP", "EVENT", "STORAGE", "UI", "CONFIG"] }, key: V4_TASK_KEY, change: { enum: ["ADD", "COMPATIBLE", "BREAKING", "REMOVE"] }, evidence: V4_TASK_TEXT })),
-    integrations: V4_TASK_LIST(V4_TASK_ITEM({ key: V4_TASK_KEY, change: { enum: ["USE", "CHANGE", "ADD"] }, evidence: V4_TASK_TEXT })),
+    systemBoundaries: V4_TASK_LIST(V4_BOUNDARY),
     migrationEntities: V4_TASK_LIST(V4_TASK_ITEM({ key: V4_TASK_KEY, evidence: V4_TASK_TEXT })),
     dataVolumeBand: { enum: ["NONE", "LE_1K", "LE_100K", "LE_10M", "GT_10M", "UNKNOWN"] },
-    requirementsUncertainty: { type: ["integer", "null"], minimum: 0, maximum: 3 },
-    solutionUncertainty: { type: ["integer", "null"], minimum: 0, maximum: 3 },
+    requirementsUncertainty: { type: "integer", minimum: 0, maximum: 3 },
+    solutionUncertainty: { type: "integer", minimum: 0, maximum: 3 },
     diagnosisState: { enum: ["NOT_APPLICABLE", "PROVEN", "HYPOTHESIS", "UNKNOWN"] },
-    unfamiliarTechnologies: V4_TASK_LIST(V4_TASK_ITEM({ key: V4_TASK_KEY, evidence: V4_TASK_TEXT })),
-    scopeChangeRisk: { type: ["integer", "null"], minimum: 0, maximum: 3 },
+    learningTargets: V4_TASK_LIST(V4_TASK_ITEM({ id: V4_SLUG, kind: { enum: V4_LEARNING_KINDS }, evidence: V4_TASK_TEXT })),
+    scopeChangeRisk: { type: "integer", minimum: 0, maximum: 3 },
     verificationKinds: V4_TASK_LIST({ enum: V4_VERIFICATION_KINDS }),
     verificationScenarios: V4_TASK_LIST(V4_TASK_ITEM({ id: V4_TASK_KEY, description: V4_TASK_TEXT, evidence: V4_TASK_TEXT })),
     verificationReadiness: { enum: ["READY", "ADAPT", "CREATE", "NONE_REQUIRED", "UNKNOWN"] },
-    requiredReviewPasses: { type: ["integer", "null"], minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+    requiredReviewPasses: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
     environmentReadiness: { enum: ["READY", "SETUP_KNOWN", "BLOCKED", "UNKNOWN"] },
     accessReadiness: { enum: ["AVAILABLE", "MISSING", "UNKNOWN"] },
     deploymentTargets: V4_TASK_LIST(V4_TASK_ITEM({ key: V4_TASK_KEY, evidence: V4_TASK_TEXT })),
-    execution: V4_TASK_ITEM({ mode: { enum: ["AI_AGENT", "HUMAN", "HYBRID", "UNKNOWN"] },
+    execution: V4_TASK_ITEM({ mode: { enum: ["AI_AGENT", "HUMAN", "HYBRID"] },
       modelId: { type: ["string", "null"], minLength: 1, maxLength: 128 }, reasoningEffort: { type: ["string", "null"], minLength: 1, maxLength: 128 },
-      environmentId: { enum: ["local", "cloud_workspace", null] }, plannedParallelAgents: { type: ["integer", "null"], minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
-      codebaseFamiliarity: { enum: ["NOT_READ", "MAPPED", "PRIOR_VERIFIED_WORK", "UNKNOWN"] } }),
-    evidence: { type: "object" }, unknownReasons: { type: "object" },
+      environmentId: { enum: ["local", "cloud_workspace"] }, plannedParallelAgents: { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+      codebaseFamiliarity: { enum: ["NOT_READ", "MAPPED", "PRIOR_VERIFIED_WORK"] } }),
+    evidence: { type: "object", additionalProperties: V4_TASK_TEXT },
+    unknownReasons: { type: "object", additionalProperties: V4_TASK_ITEM({ reason: V4_TASK_TEXT, checkedSource: V4_TASK_TEXT }) },
   },
 };
 
 
-// JSON keys are the stable agent-task-v3 contract; descriptions disambiguate their meaning in MCP discovery.
-const V4_TASK_DESCRIPTIONS = {
-  workUnits:"Самостоятельные проверяемые результаты задачи, не этапы работы.",
-  doneBoundary:"Состояние, до которого по требованиям нужно довести результат.",
-  reuseLevel:"Насколько существующее решение подходит для задачи: от 0 (нет основы) до 3 (готовый путь).",
-  components:"Модули, сервисы или приложения, которые создаются, меняются или удаляются.",
-  contracts:"Изменяемые интерфейсы и форматы; используемый без изменений контракт не включается.",
-  integrations:"Внешние системы, которые используются, меняются или добавляются в рамках задачи.",
-  migrationEntities:"Сохранённые сущности, чьи данные нужно преобразовать.",
-  dataVolumeBand:"Диапазон объёма сохранённых данных, затронутых задачей; UNKNOWN, если неизвестен.",
-  requirementsUncertainty:"Ясность требуемого результата: 0 — правила определены; 1 — открыты локальные детали; 2 — открыт существенный сценарий; 3 — результат требует согласования; null — неизвестно.",
-  solutionUncertainty:"Ясность способа реализации: 0 — способ проверен; 1 — выбран, но не проверен; 2 — открыт ключевой технический вопрос; 3 — способ не определён; null — неизвестно.",
-  diagnosisState:"Состояние установления причины для DEBUG; иначе NOT_APPLICABLE.",
-  unfamiliarTechnologies:"Технологии, чьи контракты требуется изучить; [] — изучение не требуется, null — неизвестно.",
-  scopeChangeRisk:"Риск дополнительной работы за границами задачи: 0 — границы зафиксированы, 1 — локальные уточнения, 2 — существенная дополнительная работа, 3 — несколько открытых внешних зависимостей или исследование; null — неизвестно.",
-  verificationKinds:"Требуемые виды проверок, без повторов.",verificationScenarios:"Независимые сценарии, которые необходимо проверить.",
-  verificationReadiness:"Готовность проверок: READY, ADAPT, CREATE, NONE_REQUIRED или UNKNOWN.",
-  requiredReviewPasses:"Число обязательных независимых ревью; null — неизвестно.",
-  environmentReadiness:"Готовность рабочей среды к началу работы: READY, SETUP_KNOWN, BLOCKED или UNKNOWN. Не тип среды и не цель развёртывания.",
-  accessReadiness:"Доступность необходимых доступов: AVAILABLE, MISSING или UNKNOWN.",
-  deploymentTargets:"Окружения или сервисы, куда требуется развернуть результат; [] — не требуется, null — неизвестно.",
-  execution:"Исполнитель и условия выполнения работы; не цели развёртывания.",
-  evidence:"Основания известных скалярных признаков по полным путям полей.",unknownReasons:"Причины неизвестных признаков по полным путям полей."
-};
-for (const [key, description] of Object.entries(V4_TASK_DESCRIPTIONS)) V4_TASK_SCHEMA.properties[key].description = description;
-const V4_EXECUTION_DESCRIPTIONS = {
-  mode:"Кто выполняет задачу: AI_AGENT, HUMAN, HYBRID или UNKNOWN.",modelId:"Идентификатор модели, если известен; иначе null.",
-  reasoningEffort:"Уровень рассуждения модели, если известен; иначе null.",environmentId:"Место работы исполнителя: local или cloud_workspace; null — неизвестно. Не готовность среды и не цель развёртывания.",
-  plannedParallelAgents:"Планируемое число одновременно работающих агентов; null — неизвестно.",
-  codebaseFamiliarity:"Знакомство с кодом до оценки: NOT_READ, MAPPED, PRIOR_VERIFIED_WORK или UNKNOWN."
-};
-for (const [key, description] of Object.entries(V4_EXECUTION_DESCRIPTIONS)) V4_TASK_SCHEMA.properties.execution.properties[key].description = description;
+function taskFieldError(path, incomplete = false, reason = "INVALID_FIELD") {
+  return appError("VALIDATION_ERROR", "Некорректная оценка (" + reason + "): " + path, 400,
+    { readiness: incomplete ? "INCOMPLETE" : "INVALID", path, reason });
+}
+
+function canonicalTaskItems(items, field) {
+  const unique = new Map();
+  for (const item of items) {
+    const key = item.id ?? (item.kind ? item.kind + ":" + item.key : item.key);
+    if (unique.has(key) && canonical(unique.get(key)) !== canonical(item)) throw taskFieldError(field, false, "CONFLICTING_ID");
+    unique.set(key, item);
+  }
+  return [...unique.entries()].sort(([a], [b]) => atlmCompareId(a, b)).map(([, item]) => item);
+}
+
+// Reject recognizable placeholders. The accuracy of a cited source is reviewed by the assessor.
+const EMPTY_TASK_PROOF = /^(из задачи|проверено|неизвестно|основание|нет данных|unknown|checked|from task|todo|tbd|n\/a|none|evidence|placeholder|[-?.…]+)[.!]?$/iu;
+function taskProof(value, path) {
+  if (typeof value !== "string" || !value.trim() || EMPTY_TASK_PROOF.test(value.trim()))
+    throw taskFieldError(path, true, "MISSING_EVIDENCE");
+}
 
 export function normalizeAgentTask(input) {
-  if (new TextEncoder().encode(JSON.stringify(input)).length > V4_TASK_MAX_BYTES) throw appError("VALIDATION_ERROR", "agentTask exceeds 64 KiB UTF-8.");
+  if (new TextEncoder().encode(JSON.stringify(input)).length > V4_TASK_MAX_BYTES) throw taskFieldError("agentTask");
   validateAssessmentValue(input, V4_TASK_SCHEMA, "agentTask");
-  const task = JSON.parse(JSON.stringify(input));
-  const scalarPaths = ["doneBoundary", "reuseLevel", "dataVolumeBand", "requirementsUncertainty", "solutionUncertainty", "diagnosisState", "scopeChangeRisk", "verificationReadiness", "requiredReviewPasses", "environmentReadiness", "accessReadiness", ...Object.keys(task.execution).map(key => "execution." + key)];
-  const listPaths = ["workUnits", "components", "contracts", "integrations", "migrationEntities", "unfamiliarTechnologies", "verificationKinds", "verificationScenarios", "deploymentTargets"];
-  const read = path => path.split(".").reduce((value, key) => value[key], task);
-  for (const path of [...scalarPaths, ...listPaths]) {
-    const value = read(path), openString = ["execution.modelId", "execution.reasoningEffort"].includes(path);
-    const unknown = value === null || (!openString && value === "UNKNOWN");
-    const text = unknown ? task.unknownReasons[path] : scalarPaths.includes(path) ? task.evidence[path] : null;
-    if ((unknown || scalarPaths.includes(path)) && (typeof text !== "string" || !text.trim() || Array.from(text).length > 400)) throw appError("VALIDATION_ERROR", "Missing evidence or unknown reason: " + path);
+  const task = structuredClone(input);
+  const evidencePaths = new Set(), unknownPaths = new Set();
+  function requireEvidence(path) {
+    evidencePaths.add(path);
+    taskProof(task.evidence[path], path);
   }
-  for (const field of listPaths.filter(key => key !== "verificationKinds")) {
-    if (task[field] === null) continue;
-    const unique = new Map();
-    for (const item of task[field]) {
-      const key = item.id ?? (item.kind ? item.kind + ":" + item.key : item.key), previous = unique.get(key);
-      if (previous && canonical(previous) !== canonical(item)) throw appError("VALIDATION_ERROR", "Conflicting duplicate agentTask key: " + key);
-      unique.set(key, item);
+  function requireReason(path) {
+    unknownPaths.add(path);
+    const explanation = task.unknownReasons[path];
+    taskProof(explanation?.reason, path);
+    taskProof(explanation?.checkedSource, path);
+  }
+  function scalar(path, value) {
+    if (value === null || (value === "UNKNOWN" && !["execution.modelId","execution.reasoningEffort"].includes(path))) requireReason(path);
+    else requireEvidence(path);
+  }
+
+  const scenarioIds = new Set(task.verificationScenarios.map(item => item.id));
+  for (const boundary of task.systemBoundaries) {
+    const prefix = "systemBoundaries[" + boundary.id + "].operations";
+    for (const op of boundary.operations) {
+      const path = prefix + "[" + op.id + "].";
+      taskProof(op.evidence, path + "evidence");
+      if (op.action === "READ" && op.idempotency !== "NOT_APPLICABLE") throw taskFieldError(path + "idempotency");
+      if ((op.authType === "NONE") !== (op.accessState === "NOT_REQUIRED")) throw taskFieldError(path + "accessState");
+      if (op.verificationScenarioIds.some(id => !scenarioIds.has(id)) ||
+          new Set(op.verificationScenarioIds).size !== op.verificationScenarioIds.length) throw taskFieldError(path + "verificationScenarioIds");
+      op.verificationScenarioIds.sort(atlmCompareId);
+      for (const field of Object.keys(V4_OPERATION_ENUMS)) {
+        if (op[field] === "UNKNOWN" || op[field] === "PARTIAL") requireReason(path + field);
+      }
+      if (op.action === "WRITE" && op.idempotency === "NOT_APPLICABLE") requireEvidence(path + "idempotency");
+      if (op.authType === "OTHER") requireEvidence(path + "authType");
     }
-    task[field] = [...unique.entries()].sort(([a], [b]) => atlmCompareId(a, b)).map(([, item]) => item);
+    boundary.operations = canonicalTaskItems(boundary.operations, prefix);
+    const semantics = boundary.operations.map(op => canonical([op.action, op.description.normalize("NFC").trim().replace(/\s+/gu," ").toLowerCase()]));
+    if (new Set(semantics).size !== semantics.length) throw taskFieldError(prefix, false, "DUPLICATE_OPERATION");
   }
-  if (task.verificationKinds !== null) task.verificationKinds = V4_VERIFICATION_KINDS.filter(kind => task.verificationKinds.includes(kind));
-  if (task.workUnits !== null && !task.workUnits.length) throw appError("VALIDATION_ERROR", "workUnits must be nonempty or unknown.");
-  if (task.workUnits !== null && (task.workUnits.some(unit => unit.kind === "DEBUG") === (task.diagnosisState === "NOT_APPLICABLE"))) throw appError("VALIDATION_ERROR", "diagnosisState does not match workUnits.");
-  if (task.dataVolumeBand === "NONE" && task.migrationEntities?.length) throw appError("VALIDATION_ERROR", "Migration cannot have zero affected data.");
-  if (task.verificationKinds?.includes("DEPLOY_SMOKE") && !task.deploymentTargets?.length) throw appError("VALIDATION_ERROR", "DEPLOY_SMOKE requires a deployment target.");
-  const missingFields = [];
-  if (task.workUnits === null) missingFields.push("workUnits");
-  if (task.doneBoundary === "UNKNOWN") missingFields.push("doneBoundary");
-  const count = (items, predicate = () => true) => items === null ? null : items.filter(predicate).length;
+
+  for (const [field, value] of Object.entries(task)) {
+    if (["schemaVersion","evidence","unknownReasons"].includes(field)) continue;
+    if (field === "execution") {
+      for (const [key, item] of Object.entries(value)) scalar("execution." + key, item);
+    } else if (Array.isArray(value)) {
+      if (!value.length) requireEvidence(field);
+      if (field === "verificationKinds") {
+        task[field] = [...new Set(value)].sort(atlmCompareId);
+        for (const kind of task[field]) requireEvidence(field + "." + kind);
+      } else {
+        for (const item of value) taskProof(item.evidence, field + ".evidence");
+        task[field] = canonicalTaskItems(value, field);
+      }
+    } else scalar(field, value);
+  }
+  if (Object.keys(task.evidence).some(key => !evidencePaths.has(key))) throw taskFieldError("evidence");
+  if (Object.keys(task.unknownReasons).some(key => !unknownPaths.has(key))) throw taskFieldError("unknownReasons");
+  if (task.workUnits.some(unit => unit.kind === "DEBUG") === (task.diagnosisState === "NOT_APPLICABLE")) throw taskFieldError("diagnosisState");
+  if (task.dataVolumeBand === "NONE" && task.migrationEntities.length) throw taskFieldError("dataVolumeBand");
+  if (task.verificationKinds.includes("DEPLOY_SMOKE") && !task.deploymentTargets.length) throw taskFieldError("deploymentTargets");
+
+  const count = (items, predicate = () => true) => items.filter(predicate).length;
+  const operations = task.systemBoundaries.flatMap(b => b.operations);
+  const writeCount = count(operations, op => op.action === "WRITE");
+  const readCount = operations.length - writeCount;
+  const byEnum = (items, field, values) => Object.fromEntries(values.map(value => [field + "." + value, count(items, item => item[field] === value)]));
   const features = {
     ...Object.fromEntries(V4_WORK_KINDS.map(kind => ["workUnits." + kind, count(task.workUnits, item => item.kind === kind)])),
     doneBoundary: task.doneBoundary, reuseLevel: task.reuseLevel,
     ...Object.fromEntries(["CREATE", "MODIFY", "REMOVE"].map(change => ["components." + change, count(task.components, item => item.change === change)])),
     ...Object.fromEntries(["API", "MCP", "EVENT", "STORAGE", "UI", "CONFIG"].map(kind => ["contracts." + kind, count(task.contracts, item => item.kind === kind)])),
     ...Object.fromEntries(["BREAKING", "REMOVE"].map(change => ["contracts." + change, count(task.contracts, item => item.change === change)])),
-    ...Object.fromEntries(["USE", "CHANGE", "ADD"].map(change => ["integrations." + change, count(task.integrations, item => item.change === change)])),
+    readCount, writeCount, operationCount: operations.length, writeRatio: operations.length ? writeCount / operations.length : 0,
+    hasMixedOperations: Number(readCount > 0 && writeCount > 0),
+    ownedBoundaryCount: count(task.systemBoundaries, b => b.contractControl === "OWNED"),
+    foreignBoundaryCount: count(task.systemBoundaries, b => b.contractControl === "FOREIGN"),
+    foreignWriteCount: count(task.systemBoundaries.filter(b => b.contractControl === "FOREIGN").flatMap(b => b.operations), op => op.action === "WRITE"),
+    unknownContractOperationCount: count(operations, op => op.contractState === "UNKNOWN"),
+    ...byEnum(task.systemBoundaries, "role", V4_BOUNDARY.properties.role.enum),
+    ...Object.assign({}, ...Object.entries(V4_OPERATION_ENUMS).filter(([field]) => field !== "action").map(([field, values]) => byEnum(operations, field, values))),
+    ...Object.fromEntries(V4_LEARNING_KINDS.map(kind => ["learningTargets." + kind, count(task.learningTargets, t => t.kind === kind)])),
     migrationEntities: count(task.migrationEntities), dataVolumeBand: task.dataVolumeBand,
     requirementsUncertainty: task.requirementsUncertainty, solutionUncertainty: task.solutionUncertainty,
-    diagnosisState: task.diagnosisState, unfamiliarTechnologies: count(task.unfamiliarTechnologies), scopeChangeRisk: task.scopeChangeRisk,
-    ...Object.fromEntries(V4_VERIFICATION_KINDS.map(kind => ["verificationKinds." + kind, task.verificationKinds === null ? null : Number(task.verificationKinds.includes(kind))])),
+    diagnosisState: task.diagnosisState, scopeChangeRisk: task.scopeChangeRisk,
+    ...Object.fromEntries(V4_VERIFICATION_KINDS.map(kind => ["verificationKinds." + kind, Number(task.verificationKinds.includes(kind))])),
     verificationScenarios: count(task.verificationScenarios), verificationReadiness: task.verificationReadiness,
     requiredReviewPasses: task.requiredReviewPasses, environmentReadiness: task.environmentReadiness,
     accessReadiness: task.accessReadiness, deploymentTargets: count(task.deploymentTargets), ...task.execution,
   };
-  return { agentTask: task, features, missingFields };
+  return { agentTask: task, features, missingFields: [], unknownPaths: [...unknownPaths].sort(atlmCompareId) };
 }
 
 // The preprocessing manifest belongs to a training prefix, never to the full
 // history. Keep all candidate columns in the manifest, including constants.
+const V4_RATIO_FIELD = "writeRatio";
 const V4_ORDINAL_FIELDS = ["reuseLevel", "requirementsUncertainty", "solutionUncertainty", "scopeChangeRisk"];
 const V4_CATEGORY_FIELDS = {
   doneBoundary: [...V4_DONE_BOUNDARIES],
@@ -928,39 +987,52 @@ const V4_CATEGORY_FIELDS = {
   verificationReadiness: ["READY", "ADAPT", "CREATE", "NONE_REQUIRED", "UNKNOWN"],
   environmentReadiness: ["READY", "SETUP_KNOWN", "BLOCKED", "UNKNOWN"],
   accessReadiness: ["AVAILABLE", "MISSING", "UNKNOWN"],
-  mode: ["AI_AGENT", "HUMAN", "HYBRID", "UNKNOWN"],
-  environmentId: ["local", "cloud_workspace", "UNKNOWN"],
-  codebaseFamiliarity: ["NOT_READ", "MAPPED", "PRIOR_VERIFIED_WORK", "UNKNOWN"],
+  mode: ["AI_AGENT", "HUMAN", "HYBRID"],
+  environmentId: ["local", "cloud_workspace"],
+  codebaseFamiliarity: ["NOT_READ", "MAPPED", "PRIOR_VERIFIED_WORK"],
 };
 const V4_OPEN_CATEGORY_FIELDS = ["modelId", "reasoningEffort"];
 const V4_COUNT_FIELDS = [
   ...V4_WORK_KINDS.map(kind => "workUnits." + kind),
   ...["CREATE", "MODIFY", "REMOVE"].map(change => "components." + change),
   ...["API", "MCP", "EVENT", "STORAGE", "UI", "CONFIG", "BREAKING", "REMOVE"].map(kind => "contracts." + kind),
-  ...["USE", "CHANGE", "ADD"].map(change => "integrations." + change),
-  "migrationEntities", "unfamiliarTechnologies", "verificationScenarios", "requiredReviewPasses", "deploymentTargets", "plannedParallelAgents",
+  "readCount", "writeCount", "operationCount", "ownedBoundaryCount", "foreignBoundaryCount", "foreignWriteCount", "unknownContractOperationCount",
+  ...V4_BOUNDARY.properties.role.enum.map(role => "role." + role),
+  ...Object.entries(V4_OPERATION_ENUMS).filter(([field]) => field !== "action").flatMap(([field, values]) => values.map(value => field + "." + value)),
+  ...V4_LEARNING_KINDS.map(kind => "learningTargets." + kind),
+  "migrationEntities", "verificationScenarios", "requiredReviewPasses", "deploymentTargets", "plannedParallelAgents",
 ];
-const V4_FLAG_FIELDS = V4_VERIFICATION_KINDS.map(kind => "verificationKinds." + kind);
-const V4_FEATURE_FIELDS = [...V4_ORDINAL_FIELDS, ...Object.keys(V4_CATEGORY_FIELDS), ...V4_OPEN_CATEGORY_FIELDS, ...V4_COUNT_FIELDS, ...V4_FLAG_FIELDS].sort(atlmCompareId);
+const V4_FLAG_FIELDS = ["hasMixedOperations", ...V4_VERIFICATION_KINDS.map(kind => "verificationKinds." + kind)];
+const V4_FEATURE_FIELDS = [V4_RATIO_FIELD, ...V4_ORDINAL_FIELDS, ...Object.keys(V4_CATEGORY_FIELDS), ...V4_OPEN_CATEGORY_FIELDS, ...V4_COUNT_FIELDS, ...V4_FLAG_FIELDS].sort(atlmCompareId);
 const V4_MIN_CATEGORY_SAMPLES = 3;
 const V4_MODEL_COLUMN_LIMIT = 512;
 const ATLM_FIT_WORK_LIMIT = 5000000;
 
 function v4FeatureProblem(features) {
   if (!isPlainRecord(features) || canonical(Object.keys(features).sort(atlmCompareId)) !== canonical(V4_FEATURE_FIELDS)) return "INVALID_FEATURES";
-  for (const field of V4_COUNT_FIELDS) if (features[field] !== null && !isNonnegativeSafeInteger(features[field])) return "INVALID_FEATURES";
+  if (!Number.isFinite(features.writeRatio) || features.writeRatio < 0 || features.writeRatio > 1) return "INVALID_FEATURES";
+  if (features.doneBoundary === "UNKNOWN") return "MISSING_REQUIRED_FEATURES";
+  for (const field of V4_COUNT_FIELDS) if (!isNonnegativeSafeInteger(features[field])) return "INVALID_FEATURES";
   if (features.plannedParallelAgents === 0) return "INVALID_FEATURES";
-  for (const field of V4_ORDINAL_FIELDS) if (features[field] !== null && (!isNonnegativeSafeInteger(features[field]) || features[field] > 3)) return "INVALID_FEATURES";
-  for (const field of V4_FLAG_FIELDS) if (![null, 0, 1].includes(features[field])) return "INVALID_FEATURES";
+  for (const field of V4_ORDINAL_FIELDS) if (!isNonnegativeSafeInteger(features[field]) || features[field] > 3) return "INVALID_FEATURES";
+  for (const field of V4_FLAG_FIELDS) if (![0, 1].includes(features[field])) return "INVALID_FEATURES";
   for (const field of Object.keys(V4_CATEGORY_FIELDS)) {
-    if (field === "environmentId") {
-      if (![null, "local", "cloud_workspace"].includes(features[field])) return "INVALID_FEATURES";
-      continue;
-    }
     if (!V4_CATEGORY_FIELDS[field].includes(features[field])) return "INVALID_FEATURES";
   }
   for (const field of V4_OPEN_CATEGORY_FIELDS) if (features[field] !== null
     && (typeof features[field] !== "string" || !features[field].trim() || Array.from(features[field]).length > 128)) return "INVALID_FEATURES";
+  const {readCount, writeCount, operationCount, ownedBoundaryCount, foreignBoundaryCount} = features;
+  if (operationCount !== readCount + writeCount || features.writeRatio !== (operationCount ? writeCount / operationCount : 0)
+      || features.hasMixedOperations !== Number(readCount > 0 && writeCount > 0)
+      || features.foreignWriteCount > writeCount || (!foreignBoundaryCount && features.foreignWriteCount !== 0)
+      || (!ownedBoundaryCount && features.foreignWriteCount !== writeCount)
+      || ownedBoundaryCount + foreignBoundaryCount > operationCount
+      || (operationCount > 0 && ownedBoundaryCount + foreignBoundaryCount === 0)
+      || features.unknownContractOperationCount !== features["contractState.UNKNOWN"]) return "INVALID_FEATURES";
+  for (const [field, levels] of Object.entries(V4_OPERATION_ENUMS)) {
+    if (field !== "action" && levels.reduce((sum, level) => sum + features[field + "." + level], 0) !== operationCount) return "INVALID_FEATURES";
+  }
+  if (V4_BOUNDARY.properties.role.enum.reduce((sum, role) => sum + features["role." + role], 0) !== ownedBoundaryCount + foreignBoundaryCount) return "INVALID_FEATURES";
   const workCounts = V4_WORK_KINDS.map(kind => features["workUnits." + kind]);
   if (features.doneBoundary === "UNKNOWN" || workCounts.every(value => value === null)) return "MISSING_REQUIRED_FEATURES";
   if (workCounts.some(value => value === null) || workCounts.every(value => value === 0)) return "INVALID_FEATURES";
@@ -995,7 +1067,7 @@ export function fitAtlmV4Preprocessor(featureRows) {
   for (const features of featureRows) { const problem = v4FeatureProblem(features); if (problem) return atlmUnavailable(problem); }
   const fields = Object.keys(featureRows[0]).sort(atlmCompareId);
   if (featureRows.some(row => canonical(Object.keys(row).sort(atlmCompareId)) !== canonical(fields))) return atlmUnavailable("INVALID_FEATURES");
-  const manifest = { formatVersion: 1, fields, openCategories: {}, imputations: {}, columns: [], droppedColumns: [] };
+  const manifest = { formatVersion: 2, fields, openCategories: {}, imputations: {}, columns: [], droppedColumns: [] };
   const candidates = [];
   for (const field of fields) {
     if (Object.hasOwn(V4_CATEGORY_FIELDS, field) || V4_OPEN_CATEGORY_FIELDS.includes(field)) {
@@ -1009,7 +1081,7 @@ export function fitAtlmV4Preprocessor(featureRows) {
       for (const level of levels.slice(1)) candidates.push({ kind: "category", field, level });
       continue;
     }
-    const isFlag = field.startsWith("verificationKinds."), isOrdinal = V4_ORDINAL_FIELDS.includes(field);
+    const isFlag = V4_FLAG_FIELDS.includes(field) || field === V4_RATIO_FIELD, isOrdinal = V4_ORDINAL_FIELDS.includes(field);
     const kind = isFlag || isOrdinal ? "ordinal" : "count";
     const known = featureRows.map(row => row[field]).filter(value => value !== null && value !== undefined);
     if (known.some(value => !Number.isFinite(value) || value < 0)) return atlmUnavailable("INVALID_FEATURES");
@@ -1032,13 +1104,13 @@ export function fitAtlmV4Preprocessor(featureRows) {
 }
 
 export function encodeAtlmV4Features(features, manifest) {
-  if (!isPlainRecord(manifest) || manifest.formatVersion !== 1 || !Array.isArray(manifest.fields)
+  if (!isPlainRecord(manifest) || manifest.formatVersion !== 2 || !Array.isArray(manifest.fields)
     || !manifest.fields.every(field => typeof field === "string") || !isPlainRecord(manifest.openCategories)
     || !isPlainRecord(manifest.imputations) || !Array.isArray(manifest.columns) || !Array.isArray(manifest.droppedColumns)
     || manifest.columns.length + manifest.droppedColumns.length > V4_MODEL_COLUMN_LIMIT) return atlmUnavailable("INVALID_ARTIFACT");
   if (canonical(manifest.fields) !== canonical(V4_FEATURE_FIELDS)) return atlmUnavailable("INVALID_ARTIFACT");
   if (!atlmExactKeys(manifest.openCategories, V4_OPEN_CATEGORY_FIELDS)
-    || !atlmExactKeys(manifest.imputations, [...V4_COUNT_FIELDS, ...V4_ORDINAL_FIELDS, ...V4_FLAG_FIELDS])) return atlmUnavailable("INVALID_ARTIFACT");
+    || !atlmExactKeys(manifest.imputations, [V4_RATIO_FIELD, ...V4_COUNT_FIELDS, ...V4_ORDINAL_FIELDS, ...V4_FLAG_FIELDS])) return atlmUnavailable("INVALID_ARTIFACT");
   for (const field of V4_OPEN_CATEGORY_FIELDS.filter(field => manifest.fields.includes(field))) {
     const levels = manifest.openCategories[field];
     if (!Array.isArray(levels) || levels.some(value => typeof value !== "string" || !value.trim() || Array.from(value).length > 128)
@@ -1050,9 +1122,9 @@ export function encodeAtlmV4Features(features, manifest) {
       const levels = V4_CATEGORY_FIELDS[field] || ["OTHER", "UNKNOWN", ...manifest.openCategories[field].map(value => "VALUE:" + value)];
       for (const level of levels.slice(1)) expectedColumns.push(canonical({ kind: "category", field, level }));
     } else {
-      const kind = V4_FLAG_FIELDS.includes(field) || V4_ORDINAL_FIELDS.includes(field) ? "ordinal" : "count";
+      const kind = field === V4_RATIO_FIELD || V4_FLAG_FIELDS.includes(field) || V4_ORDINAL_FIELDS.includes(field) ? "ordinal" : "count";
       const imputed = manifest.imputations[field];
-      const upper = V4_FLAG_FIELDS.includes(field) ? 1 : V4_ORDINAL_FIELDS.includes(field) ? 3 : Math.log1p(Number.MAX_SAFE_INTEGER);
+      const upper = field === V4_RATIO_FIELD || V4_FLAG_FIELDS.includes(field) ? 1 : V4_ORDINAL_FIELDS.includes(field) ? 3 : Math.log1p(Number.MAX_SAFE_INTEGER);
       if (!Number.isFinite(imputed) || imputed < 0 || imputed > upper) return atlmUnavailable("INVALID_ARTIFACT");
       expectedColumns.push(canonical({ kind, field }), canonical({ kind: "missing", field }));
     }
@@ -1117,7 +1189,7 @@ export async function fitAtlmV4Regression(rows, engine) {
     solved = atlmQr(augmented, response);
   }
   if (!solved.coefficients?.every(Number.isFinite)) return atlmUnavailable("NUMERICAL_FAILURE", { sampleCount: n, p });
-  const artifact = atlmFreeze({ formatVersion: 3, kind: engine, featureSchemaVersion: "agent-task-v3", metric: "PLAN_ACTIVE",
+  const artifact = atlmFreeze({ formatVersion: 3, kind: engine, featureSchemaVersion: "agent-task-v4", metric: "PLAN_ACTIVE",
     n, p, rank: raw.rank, preprocessor: preprocessor.manifest, coefficients: solved.coefficients,
     targetTransform: "log1p-minutes-v1", lambda: engine === "RIDGE" ? ATLM_RIDGE_LAMBDA : null,
     manifest: sorted.map(({ sampleId, planId }) => ({ sampleId, planId })), datasetDigest: "sha256:" + await hashCommandInput(sorted) });
@@ -1127,7 +1199,8 @@ export async function fitAtlmV4Regression(rows, engine) {
 function atlmV4DefaultFeatures() {
   return Object.fromEntries(V4_FEATURE_FIELDS.map(field => {
     if (field === "doneBoundary") return [field, "ANALYSIS"];
-    if (field === "environmentId" || V4_OPEN_CATEGORY_FIELDS.includes(field) || field === "plannedParallelAgents") return [field, null];
+    if (V4_OPEN_CATEGORY_FIELDS.includes(field)) return [field,null];
+    if (field === "plannedParallelAgents") return [field,1];
     if (Object.hasOwn(V4_CATEGORY_FIELDS, field)) return [field, V4_CATEGORY_FIELDS[field][0]];
     return [field, field === "workUnits.CREATE" ? 1 : 0];
   }));
@@ -1135,7 +1208,7 @@ function atlmV4DefaultFeatures() {
 
 function atlmV4RegressionArtifactValid(artifact) {
   if (!isPlainRecord(artifact) || artifact.formatVersion !== 3 || !["OLS", "RIDGE"].includes(artifact.kind)
-    || artifact.featureSchemaVersion !== "agent-task-v3" || artifact.metric !== "PLAN_ACTIVE" || artifact.targetTransform !== "log1p-minutes-v1"
+    || artifact.featureSchemaVersion !== "agent-task-v4" || artifact.metric !== "PLAN_ACTIVE" || artifact.targetTransform !== "log1p-minutes-v1"
     || !Number.isSafeInteger(artifact.n) || artifact.n < 1 || artifact.n > ATLM_MAX_ROWS
     || !Number.isSafeInteger(artifact.p) || artifact.p < 1 || artifact.p > V4_MODEL_COLUMN_LIMIT + 1
     || !Number.isSafeInteger(artifact.rank) || artifact.rank < 1 || artifact.rank > Math.min(artifact.n, artifact.p)
@@ -1251,7 +1324,7 @@ function atlmStudentT90(degreesOfFreedom) {
 
 function atlmBayesArtifactValid(artifact) {
   if (!isPlainRecord(artifact) || artifact.formatVersion !== 3 || artifact.kind !== "BAYESIAN"
-    || artifact.featureSchemaVersion !== "agent-task-v3" || artifact.metric !== "PLAN_ACTIVE" || artifact.priorVersion !== 1 || artifact.targetTransform !== "log1p-minutes-v1"
+    || artifact.featureSchemaVersion !== "agent-task-v4" || artifact.metric !== "PLAN_ACTIVE" || artifact.priorVersion !== 1 || artifact.targetTransform !== "log1p-minutes-v1"
     || !Number.isSafeInteger(artifact.n) || artifact.n < 1 || artifact.n > ATLM_MAX_ROWS
     || !Number.isSafeInteger(artifact.p) || artifact.p < 1 || artifact.p > V4_MODEL_COLUMN_LIMIT + 1
     || !Number.isSafeInteger(artifact.rank) || artifact.rank < 1 || artifact.rank > Math.min(artifact.n, artifact.p)
@@ -1298,7 +1371,7 @@ export async function fitAtlmBayesian(rows) {
   const shape = ATLM_BAYES_PRIOR_SHAPE + n / 2, scale = ATLM_BAYES_PRIOR_SCALE + (residualSquares + priorPenalty) / 2;
   if (!coefficients.every(Number.isFinite) || !Number.isFinite(scale) || scale <= 0) return atlmUnavailable("NUMERICAL_FAILURE", { sampleCount:n, p });
   const rank = atlmQr(matrix, Array(n).fill(0)).rank;
-  const artifact = atlmFreeze({ formatVersion:3, kind:"BAYESIAN", featureSchemaVersion:"agent-task-v3", metric:"PLAN_ACTIVE", n, p, rank,
+  const artifact = atlmFreeze({ formatVersion:3, kind:"BAYESIAN", featureSchemaVersion:"agent-task-v4", metric:"PLAN_ACTIVE", n, p, rank,
     priorVersion:1, targetTransform:"log1p-minutes-v1", preprocessor:fitted.manifest,
     posterior:{ coefficients, cholesky:lower, shape, scale }, manifest:sorted.map(({ sampleId, planId }) => ({ sampleId, planId })),
     datasetDigest:"sha256:" + await hashCommandInput(sorted) });
@@ -1637,7 +1710,7 @@ export async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
 
 export async function claimAtlmJob(db, ownerId, jobKey, nowMs, leaseMs = 60000, { allowExpiredLease = true } = {}) {
   if (!Number.isSafeInteger(nowMs) || !Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw appError("VALIDATION_ERROR", "Invalid ATLM lease.");
-  return dbFirst(db, `UPDATE estimation_jobs SET status='RUNNING',lease_until=?,updated_at=?,fence=fence+1,executor_epoch=executor_epoch+1,attempts=attempts+CASE WHEN status='QUEUED' AND checkpoint_json IS NOT NULL THEN 0 ELSE 1 END
+  return dbFirst(db, `UPDATE estimation_jobs SET status='RUNNING',lease_until=?,updated_at=?,fence=fence+1,executor_epoch=executor_epoch+2,attempts=attempts+CASE WHEN status='QUEUED' AND checkpoint_json IS NOT NULL THEN 0 ELSE 1 END
     WHERE owner_id=? AND job_key=? AND generation>processed_generation AND next_attempt_at<=?
       AND status<>'FAILED' AND (attempts<4 OR (status='QUEUED' AND checkpoint_json IS NOT NULL AND attempts<=4))
       AND (? OR status<>'RUNNING') AND (status<>'RUNNING' OR lease_until<=?) RETURNING *`, nowMs + leaseMs, nowMs, ownerId, jobKey, nowMs, allowExpiredLease ? 1 : 0, nowMs);
@@ -1767,12 +1840,19 @@ async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
 // Read inputs and source generation together; optimistic retries keep a multi-read
 // calculation from being returned as current after its inputs or plan status changed.
 const CURRENT_FORECAST_MAX_READ_ATTEMPTS = 3;
-const CURRENT_FORECAST_INPUT_SQL = `SELECT input.*,json_array(status,first_started_at,deleted_at,requirements_json,
+const CURRENT_FORECAST_INPUT_SQL = `SELECT input.*,
+  json_array(status,first_started_at,deleted_at,requirements_json,sequence,dataset_revision,
+    active_model_id,model_status,last_training_diagnostics_json,training_generation,history_jobs_json) AS start_key,
+  json_array(status,first_started_at,deleted_at,requirements_json,
   sequence,dataset_revision,active_model_id,model_status,last_training_diagnostics_json,training_generation,jobs_json) AS snapshot_key
   FROM (SELECT p.status,p.first_started_at,p.deleted_at,t.requirements_json,
     a.sequence,a.assessment_id,a.revision,a.requirements_digest,a.assessment_json,
     COALESCE(o.dataset_revision,0) AS dataset_revision,o.active_model_id,m.status AS model_status,
-    o.last_training_diagnostics_json,o.training_generation,
+    o.last_training_diagnostics_json,COALESCE(o.training_generation,0) AS training_generation,
+    (SELECT json_group_array(json_array(j.job_key,j.generation,j.processed_generation,j.status))
+      FROM estimation_jobs j WHERE j.owner_id=p.owner_id AND (j.kind<>'REFRESH_SAMPLE'
+        OR EXISTS(SELECT 1 FROM estimation_samples s WHERE s.owner_id=j.owner_id AND s.plan_id=j.plan_id)
+        OR EXISTS(SELECT 1 FROM plans h WHERE h.owner_id=j.owner_id AND h.plan_id=j.plan_id AND h.status='COMPLETED'))) AS history_jobs_json,
     (SELECT json_group_array(json_array(j.job_key,j.generation,j.processed_generation,j.status))
       FROM estimation_jobs j WHERE j.owner_id=p.owner_id) AS jobs_json
     FROM plans p JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id AND t.step_id IS NULL
@@ -1784,6 +1864,42 @@ const CURRENT_FORECAST_INPUT_SQL = `SELECT input.*,json_array(status,first_start
 async function currentForecastInput(db, ownerId, planId) {
   return dbFirst(db,CURRENT_FORECAST_INPUT_SQL,ownerId,planId);
 }
+async function assessmentReadiness(assessment, savedDigest, requirementsDigest) {
+  const task = assessment?.context?.agentTask;
+  const state = {status:"INCOMPLETE", code:"ASSESSMENT_INCOMPLETE", schemaVersion:task?.schemaVersion ?? null,
+    requirementsDigest, featureDigest:null, missingPaths:[], invalidPaths:[], unknownPaths:[]};
+  if (!assessment) return {...state, code:"ASSESSMENT_REQUIRED", missingPaths:["assessment"]};
+  if (!task) return {...state, missingPaths:["context.agentTask"]};
+  if (task.schemaVersion && task.schemaVersion !== ATLM_FEATURE_VERSION)
+    return {...state, status:"OUTDATED", code:"ASSESSMENT_SCHEMA_OUTDATED", invalidPaths:["schemaVersion"]};
+  let normalized;
+  try { normalized = normalizeAgentTask(task); }
+  catch (error) {
+    if (error.code !== "VALIDATION_ERROR") throw error;
+    const path = (error.details?.path ?? "agentTask").replace(/^agentTask\./, "");
+    return error.details?.readiness === "INCOMPLETE" ? {...state, missingPaths:[path]} :
+      {...state, status:"INVALID", code:"ASSESSMENT_INVALID", invalidPaths:[path]};
+  }
+  const f = normalized.features;
+  Object.assign(state, {featureDigest:"sha256:" + await hashCommandInput(f), unknownPaths:normalized.unknownPaths,
+    operations:{readCount:f.readCount, writeCount:f.writeCount, writeRatio:f.writeRatio}});
+  if (assessment.predictionRequest?.method !== "ATLM" || assessment.predictionRequest.methodVersion !== 1)
+    return {...state, missingPaths:["predictionRequest"]};
+  if (savedDigest !== requirementsDigest || assessment.serverEstimation?.requirementsDigest !== savedDigest)
+    return {...state, status:"STALE", code:"ASSESSMENT_CONTEXT_CHANGED", invalidPaths:["requirementsDigest"]};
+  if (assessment.serverEstimation.featureDigest !== state.featureDigest)
+    return {...state, status:"STALE", code:"ASSESSMENT_CONTEXT_CHANGED", invalidPaths:["featureDigest"]};
+  return {...state, status:"READY", code:null};
+}
+
+async function planStartReadiness(db, ownerId, planId) {
+  const row = await dbFirst(db, `SELECT t.requirements_json,a.assessment_json,a.requirements_digest
+    FROM assessment_targets t LEFT JOIN assessment_revisions a ON a.sequence=(SELECT MAX(r.sequence)
+      FROM assessment_revisions r WHERE r.owner_id=t.owner_id AND r.plan_id=t.plan_id AND r.step_id IS NULL)
+    WHERE t.owner_id=? AND t.plan_id=? AND t.step_id IS NULL`, ownerId, planId);
+  return assessmentReadiness(parseColumn(row?.assessment_json,null),row?.requirements_digest,
+    row ? "sha256:" + await hashCommandInput(JSON.parse(row.requirements_json)) : null);
+}
 async function currentPlanForecast(db, ownerId, planId, nowMs) {
   for(let attempt=0;attempt<CURRENT_FORECAST_MAX_READ_ATTEMPTS;attempt++){
     const input=await currentForecastInput(db,ownerId,planId);
@@ -1791,13 +1907,13 @@ async function currentPlanForecast(db, ownerId, planId, nowMs) {
     if(input.status!=="PLANNED"||input.first_started_at!==null||input.deleted_at!==null)return null;
     const assessment=input.assessment_json?JSON.parse(input.assessment_json):null;
     const digest="sha256:"+await hashCommandInput(JSON.parse(input.requirements_json));
+    const readiness=await assessmentReadiness(assessment,input.requirements_digest,digest);
     let estimation;
     const unavailable=code=>({formatVersion:2,metric:"PLAN_ACTIVE",forecastScope:"FULL_FROM_FIRST_START",
       method:{...ATLM_METHOD},status:"UNAVAILABLE",pointMs:null,modelId:null,modelVersion:null,requirementsDigest:digest,
       calculatedAt:nowMs,sampleCount:0,accuracy:"NOT_VALIDATED",evaluation:null,pointEngine:null,interval:atlmUnavailableInterval("BAYESIAN_PREDICTIVE",code),
       unavailableReason:code,diagnostics:atlmDiagnostics(code)});
-    if(!assessment?.context?.agentTask)estimation=unavailable("MISSING_FEATURES");
-    else if(input.requirements_digest!==digest)estimation=unavailable("SCOPE_CHANGED");
+    if(readiness.status !== "READY")estimation=unavailable(readiness.code);
     else {
       try {
         estimation=await calculateAtlmEstimate(db,ownerId,{planId,agentTask:assessment.context.agentTask,expectedRequirementsDigest:digest},nowMs);
@@ -1810,7 +1926,7 @@ async function currentPlanForecast(db, ownerId, planId, nowMs) {
     if(canonical(input)!==canonical(after))continue;
     const diagnostics=estimation.fallback?.atlmDiagnostics??estimation.diagnostics;
     return {input, result:{formatVersion:1,planId,assessmentId:input.assessment_id??null,assessmentRevision:input.revision??null,
-      source:"CURRENT_INPUT",serverEstimation:estimation,recordedEstimation:assessment?.serverEstimation??null,diagnostics,
+      source:"CURRENT_INPUT",assessmentReadiness:readiness,serverEstimation:estimation,recordedEstimation:assessment?.serverEstimation??null,diagnostics,
       forecastAvailability:{planStatus:input.status,deleted:false,canCalculate:estimation.status==="AVAILABLE",canRefreshSaved:true,
         calculationMethod:estimation.status==="AVAILABLE"?estimation.method:null,reason:estimation.status==="AVAILABLE"?null:estimation.unavailableReason,
         diagnostics:estimation.status==="AVAILABLE"?null:diagnostics},
@@ -1838,7 +1954,7 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
     throw appError("ASSESSMENT_CONTEXT_CHANGED","Статус плана изменился. Повторите обновление прогноза.",409);
   if (row.first_started_at !== null && row.input_plan_id === null && row.data_reset_at !== null && row.first_started_at <= row.data_reset_at) {
     const diagnostics = atlmDiagnostics("HISTORY_RESET");
-    return { formatVersion: 1, planId: args.planId, assessmentId: null, assessmentRevision: null, source: "HISTORY_RESET",
+    return { formatVersion: 1, planId: args.planId, assessmentId: null, assessmentRevision: null, source: "HISTORY_RESET", assessmentReadiness:null,
       serverEstimation: null, recordedEstimation: null, diagnostics,
       forecastAvailability: { planStatus: row.status, deleted: row.deleted_at !== null, canCalculate: false, canRefreshSaved: false,
         calculationMethod: null, reason: "HISTORY_RESET", diagnostics }, isStale: false, staleReasons: [], serverNow: nowMs };
@@ -1875,7 +1991,7 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
   else if(!row.assessment_json) diagnostics = atlmDiagnostics("MISSING_FEATURES");
   else {
     const assessment = JSON.parse(row.assessment_json);
-    if(assessment.context?.agentTask){
+    if(assessment.context?.agentTask?.schemaVersion===ATLM_FEATURE_VERSION && row.deleted_at === null){
       const normalized = normalizeAgentTask(assessment.context.agentTask);
       if(normalized.missingFields.length) diagnostics = atlmDiagnostics("MISSING_REQUIRED_FEATURES",{missingFields:normalized.missingFields});
       else {
@@ -1899,6 +2015,7 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
   const forecastAvailability = {planStatus:row.status,deleted:row.deleted_at!==null,canCalculate:canRefreshSaved && !!calculationMethod,canRefreshSaved,
     calculationMethod:canRefreshSaved?calculationMethod:null,reason:availabilityDiagnostics?.code ?? null,diagnostics:availabilityDiagnostics};
   return { formatVersion: 1, planId: args.planId, assessmentId: row.assessment_id ?? null, assessmentRevision: row.revision ?? null,
+    assessmentReadiness:await assessmentReadiness(row.assessment_json ? JSON.parse(row.assessment_json) : null,row.requirements_digest,"sha256:" + await hashCommandInput(JSON.parse(row.current_requirements_json))),
     source: row.first_started_at !== null ? "FROZEN_INPUT" : row.assessment_id ? "LATEST_ASSESSMENT" : "NONE",
     serverEstimation, recordedEstimation, diagnostics, forecastAvailability, isStale: staleReasons.length > 0, staleReasons, serverNow: nowMs };
 }
@@ -1933,7 +2050,7 @@ async function getAtlmDataset(db, ownerId, args, nowMs) {
   if (hasMore) rows.pop();
   const nextCursor = hasMore ? JSON.stringify({ version: 1, ownerScope, datasetRevision: snapshot.revision, asOf,
     afterSequence: Number(rows.at(-1).sampleId), throughSequence: cursor?.throughSequence ?? snapshot.through_sequence }) : null;
-  return { formatVersion: 1, datasetRevision: snapshot.revision, asOf, rows, hasMore, nextCursor, serverNow: nowMs };
+  return { formatVersion: 1, featureSchemaVersion:ATLM_FEATURE_VERSION, datasetRevision: snapshot.revision, asOf, rows, hasMore, nextCursor, serverNow: nowMs };
 }
 async function getEstimationTrainingHistory(db,ownerId,args,nowMs) {
   validateAssessmentValue(args,ATLM_TOOL_SCHEMAS.GetEstimationTrainingHistory);
@@ -2008,28 +2125,42 @@ const assessmentPayloadSchema = {
   },
 };
 // Used by these new tools at runtime as well as discovery; free JSON remains neutral.
+// Map keys can become diagnostic paths. Only expose keys from the task grammar.
+function isTaskProofPath(key) {
+  if (Object.hasOwn(V4_TASK_SCHEMA.properties, key)) return true;
+  if (key.startsWith("execution.")) return Object.hasOwn(V4_TASK_SCHEMA.properties.execution.properties, key.slice("execution.".length));
+  if (key.startsWith("verificationKinds.")) return V4_VERIFICATION_KINDS.includes(key.slice("verificationKinds.".length));
+  const match = /^systemBoundaries\[([a-z0-9][a-z0-9._:-]{0,127})\]\.operations\[([a-z0-9][a-z0-9._:-]{0,127})\]\.(\w+)$/.exec(key);
+  return Boolean(match && Object.hasOwn(V4_OPERATION_ENUMS, match[3]));
+}
+
 function validateAssessmentValue(value, schema, path = "input", depth = 0) {
   if (depth > 12) throw appError("VALIDATION_ERROR", "JSON depth exceeds 12.");
-  if (schema.enum && !schema.enum.includes(value)) throw appError("VALIDATION_ERROR", path + ": invalid enum.");
+  if (schema.enum && !schema.enum.includes(value)) throw taskFieldError(path, value === null);
   const type = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
   const types = schema.type ? [].concat(schema.type) : null;
-  if (types && !types.includes(type) && !(type === "number" && types.includes("integer") && Number.isSafeInteger(value))) throw appError("VALIDATION_ERROR", path + ": invalid type.");
-  if (typeof value === "number" && (!Number.isFinite(value) || (schema.minimum !== undefined && value < schema.minimum) || (schema.maximum !== undefined && value > schema.maximum))) throw appError("VALIDATION_ERROR", path + ": invalid number.");
+  if (types && !types.includes(type) && !(type === "number" && types.includes("integer") && Number.isSafeInteger(value))) throw taskFieldError(path, value === null);
+  if (typeof value === "number" && (!Number.isFinite(value) || (schema.minimum !== undefined && value < schema.minimum) || (schema.maximum !== undefined && value > schema.maximum))) throw taskFieldError(path);
   if (typeof value === "string") {
+    if (schema.pattern && !(new RegExp(schema.pattern)).test(value)) throw taskFieldError(path);
     if (Array.from(value).length > (schema.maxLength ?? 4000) || Array.from(value.trim()).length < (schema.minLength ?? 0)
-      || (schema.format === "uuid" && !UUID.test(value))) throw appError("VALIDATION_ERROR", path + ": invalid string.");
+      || (schema.format === "uuid" && !UUID.test(value))) throw taskFieldError(path, !value.trim());
     assertSafeMetadataText(value, path);
   }
   if (Array.isArray(value)) {
-    if (value.length > (schema.maxItems ?? 100) || value.length < (schema.minItems ?? 0)) throw appError("VALIDATION_ERROR", path + ": invalid array.");
-    value.forEach(item => validateAssessmentValue(item, schema.items || {}, path, depth + 1));
+    if (value.length > (schema.maxItems ?? 100) || value.length < (schema.minItems ?? 0)) throw taskFieldError(path, value.length < (schema.minItems ?? 0));
+    value.forEach((item, index) => validateAssessmentValue(item, schema.items || {}, path + "[" + index + "]", depth + 1));
   } else if (value && typeof value === "object") {
-    if (Object.keys(value).length > 100) throw appError("VALIDATION_ERROR", path + ": too many keys.");
-    for (const key of schema.required || []) if (!Object.hasOwn(value, key)) throw appError("VALIDATION_ERROR", path + ": missing " + key);
+    if (!isPlainRecord(schema.additionalProperties) && Object.keys(value).length > 100) throw appError("VALIDATION_ERROR", path + ": too many keys.");
+    for (const key of schema.required || []) if (!Object.hasOwn(value, key)) throw taskFieldError(path + "." + key, true, "MISSING_FIELD");
     if (schema.additionalProperties === false) assertExactKeys(value, new Set(Object.keys(schema.properties || {})), path);
     for (const [key, item] of Object.entries(value)) {
-      if (key.length > 128) throw appError("VALIDATION_ERROR", path + ": key too long.");
-      validateAssessmentValue(item, schema.properties?.[key] || {}, path + "." + key, depth + 1);
+      if (schema === V4_TASK_SCHEMA.properties.evidence || schema === V4_TASK_SCHEMA.properties.unknownReasons) {
+        if (!isTaskProofPath(key)) throw taskFieldError(path);
+        assertSafeMetadataText(key, path);
+      }
+      if (!isPlainRecord(schema.additionalProperties) && key.length > 128) throw appError("VALIDATION_ERROR", path + ": key too long.");
+      validateAssessmentValue(item, (Object.hasOwn(schema.properties ?? {}, key) ? schema.properties[key] : isPlainRecord(schema.additionalProperties) ? schema.additionalProperties : {}), path + "." + key, depth + 1);
     }
   }
 }
@@ -2041,7 +2172,7 @@ function validateAssessmentCommand(envelope) {
   if (new TextEncoder().encode(JSON.stringify(envelope.payload)).length > V4_TASK_MAX_BYTES) throw appError("VALIDATION_ERROR", "Assessment exceeds 64 KiB UTF-8.");
   const p = envelope.payload, f = p.forecast, c = p.complexity;
   if (Object.hasOwn(p.context, "agentTask")) normalizeAgentTask(p.context.agentTask);
-  if (p.predictionRequest && (p.stepId !== undefined || !Object.hasOwn(p.context, "agentTask"))) throw appError("VALIDATION_ERROR", "predictionRequest requires plan-level agentTask v3.");
+  if (p.predictionRequest && (p.stepId !== undefined || !Object.hasOwn(p.context, "agentTask"))) throw appError("VALIDATION_ERROR", "predictionRequest requires plan-level agentTask v4.");
   if (!isSnapshotDigest(p.expectedRequirementsDigest)) throw appError("VALIDATION_ERROR", "expectedRequirementsDigest must identify the requirements assessed by the agent.");
   if (p.method.scale === null || p.method.scale === "") throw appError("VALIDATION_ERROR", "Declare the assessment scale.");
   if ((c.status === "UNKNOWN") !== (c.value === null)) throw appError("VALIDATION_ERROR", "Unknown complexity requires null; known complexity requires a value.");
@@ -2056,6 +2187,7 @@ async function assessmentView(db, ownerId, row) {
   const digest = target ? "sha256:" + await hashCommandInput(JSON.parse(target.requirements_json)) : null;
   return { sequence: row.sequence, assessmentId: row.assessment_id, revision: row.revision, previousRevision: row.previous_revision,
     planId: row.plan_id, stepId: row.step_id, authorId: row.author_id, recordedAt: row.recorded_at,
+    assessmentReadiness:await assessmentReadiness(JSON.parse(row.assessment_json),row.requirements_digest,digest),
     requirementsDigest: row.requirements_digest, currentRequirementsDigest: digest, needsRevision: digest !== row.requirements_digest,
     requirements: JSON.parse(row.requirements_json), assessment: { formatVersion: 1, ...JSON.parse(row.assessment_json) } };
 }
@@ -2072,8 +2204,10 @@ async function readAssessment(db, ownerId, args, nowMs) {
     const target = await assessmentTarget(db, ownerId, args.planId, args.stepId);
     if (!target) throw appError("STEP_NOT_FOUND", messageFor("STEP_NOT_FOUND"), 404);
     const requirements = JSON.parse(target.requirements_json);
-    return { contextOnly: true, planId: args.planId, stepId: args.stepId ?? null, requirements,
-      currentRequirementsDigest: "sha256:" + await hashCommandInput(requirements), serverNow: nowMs };
+    const digest="sha256:" + await hashCommandInput(requirements);
+    const latest=await dbFirst(db,"SELECT assessment_json,requirements_digest FROM assessment_revisions WHERE owner_id=? AND plan_id=? AND step_id IS ? ORDER BY sequence DESC LIMIT 1",ownerId,args.planId,args.stepId ?? null);
+    return { assessmentReadiness:await assessmentReadiness(latest ? JSON.parse(latest.assessment_json) : null,latest?.requirements_digest,digest), contextOnly: true, planId: args.planId, stepId: args.stepId ?? null, requirements,
+      currentRequirementsDigest: digest, serverNow: nowMs };
   }
   if (args.stepId !== undefined) throw appError("VALIDATION_ERROR", "stepId is only used for a context-only read.");
   const rows = await dbAll(db, "SELECT * FROM assessment_revisions WHERE owner_id=? AND plan_id=? AND assessment_id=? ORDER BY revision DESC LIMIT 1", ownerId, args.planId, args.assessmentId);
@@ -2155,17 +2289,16 @@ function validateTrackerCommand(envelope) {
 }
 
 async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
-  // Retired receipts must be found before the new assessment schema rejects an
-  // otherwise identical retry of an old command.
+  // A retry of an old assessment must replay even after retiring its schema.
   if (envelope?.commandType === "RecordAssessment" && envelope.schemaVersion === 1 && UUID.test(envelope.commandId || "")
     && Number.isSafeInteger(envelope.expectedVersion) && envelope.expectedVersion >= 0 && isPlainRecord(envelope.payload)) {
-    const retired = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=? AND outcome_code='ASSESSMENT_SCHEMA_RETIRED'", identity.ownerId, envelope.commandId);
-    if (retired) {
-      validateAssessmentValue(envelope.payload, {}, "payload");
+    const recorded = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=? AND command_type='RecordAssessment'", identity.ownerId, envelope.commandId);
+    if (recorded) {
+      assertExactKeys(envelope, new Set(["schemaVersion","commandId","commandType","expectedVersion","payload","payloadHash"]), "RecordAssessment");
       const hash = await payloadHash(envelope);
-      if (envelope.payloadHash !== undefined && envelope.payloadHash !== hash) throw appError("VALIDATION_ERROR", "payloadHash не совпадает с конвертом.");
-      if (!await receiptMatchesCommand(retired, envelope, hash)) throw appError("IDEMPOTENCY_KEY_REUSED", messageFor("IDEMPOTENCY_KEY_REUSED"), 409);
-      return resultFromReceipt(retired, true);
+      if (envelope.payloadHash !== undefined && envelope.payloadHash !== hash && envelope.payloadHash !== recorded.payload_hash) throw appError("VALIDATION_ERROR", "payloadHash не совпадает с конвертом.");
+      if (!await receiptMatchesCommand(recorded, envelope, hash)) throw appError("IDEMPOTENCY_KEY_REUSED", messageFor("IDEMPOTENCY_KEY_REUSED"), 409);
+      return resultFromReceipt(recorded, true);
     }
   }
   validateTrackerCommand(envelope);
@@ -2312,46 +2445,63 @@ export async function executeCommand(db, identity, envelope, channel, nowMs) {
 
   }
 
-  let startInput = null;
-  if(envelope.commandType==="StartPlan"){
-    const initial=await currentForecastInput(db,identity.ownerId,planId);
-    if(initial?.status==="PLANNED"&&initial.first_started_at===null&&initial.deleted_at===null){
-      let current;
-      try {current=await currentPlanForecast(db,identity.ownerId,planId,nowMs);}
-      catch(error){
-        if(error.code!=="SOURCE_UNAVAILABLE")throw error;
-        const input=await currentForecastInput(db,identity.ownerId,planId);
-        if(canonical(input)!==canonical(initial))throw appError("ASSESSMENT_CONTEXT_CHANGED",messageFor("ASSESSMENT_CONTEXT_CHANGED"),409);
-        current={input,result:{serverEstimation:{formatVersion:2,metric:"PLAN_ACTIVE",forecastScope:"FULL_FROM_FIRST_START",
-          status:"UNAVAILABLE",pointMs:null,method:{...ATLM_METHOD},modelId:null,modelVersion:null,calculatedAt:nowMs,
-          requirementsDigest:"sha256:"+await hashCommandInput(JSON.parse(input.requirements_json)),
-          sampleCount:0,accuracy:"NOT_VALIDATED",evaluation:null,pointEngine:null,interval:atlmUnavailableInterval("BAYESIAN_PREDICTIVE","SOURCE_UNAVAILABLE"),
-          unavailableReason:"SOURCE_UNAVAILABLE",diagnostics:atlmDiagnostics("SOURCE_UNAVAILABLE")}}};
-      }
-      if(current){
-        startInput=current.input;
-        const assessment=startInput.assessment_json?JSON.parse(startInput.assessment_json):null;
-        payload.atlmStartForecast={assessmentSequence:assessment?.context?.agentTask&&startInput.requirements_digest===current.result.serverEstimation.requirementsDigest?startInput.sequence:null,
-          estimation:current.result.serverEstimation};
-      }
-    }
-  }
+  const start = envelope.commandType === "StartPlan" ? await currentForecastInput(db, identity.ownerId, planId) : null;
+  const firstStart = start?.status === "PLANNED" && start.first_started_at === null && start.deleted_at === null;
   const actorType = channel === "mcp" ? "agent" : "user";
+  const receiptValues = [identity.ownerId, envelope.commandId, hash, envelope.commandType, planId, envelope.expectedVersion ?? null,
+    nowMs, identity.ownerId, actorType];
+  const insertReceipt = `INSERT OR IGNORE INTO command_receipts
+    (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,result_json,recorded_at)`;
   let receiptInserted = false;
-  try {
-    const startGuard=startInput ? `CASE
-      WHEN NOT EXISTS(SELECT 1 FROM plans WHERE owner_id=? AND plan_id=? AND deleted_at IS NULL) THEN 'PLAN_NOT_FOUND'
-      WHEN (SELECT version FROM plans WHERE owner_id=? AND plan_id=?)<>? THEN 'VERSION_CONFLICT'
-      WHEN NOT EXISTS(SELECT 1 FROM (${CURRENT_FORECAST_INPUT_SQL}) source WHERE source.snapshot_key=?) THEN 'ASSESSMENT_CONTEXT_CHANGED'
-      ELSE 'PENDING' END` : "'PENDING'";
-    const guardArgs=startInput?[identity.ownerId,planId,identity.ownerId,planId,envelope.expectedVersion,
-      identity.ownerId,planId,startInput.snapshot_key]:[];
-    const write = await db.prepare(`INSERT OR IGNORE INTO command_receipts (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,${startGuard},?)`)
-      .bind(identity.ownerId, envelope.commandId, hash, envelope.commandType, planId, envelope.expectedVersion == null ? null : envelope.expectedVersion,
-        nowMs, identity.ownerId, actorType, JSON.stringify(payload), ...guardArgs, nowMs).run();
-    receiptInserted = Number(write.meta?.changes) > 0;
-  } catch (error) { throw mapDbError(error); }
-  receipt = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=?", identity.ownerId, envelope.commandId);
+  for (let attempt = 1; attempt <= CURRENT_FORECAST_MAX_READ_ATTEMPTS; attempt++) {
+    let statement;
+    if (firstStart) {
+      let current;
+      try {
+        current = await currentPlanForecast(db, identity.ownerId, planId, nowMs);
+      } catch (error) {
+        if (error.code === "SOURCE_UNAVAILABLE") {
+          const requirementsDigest = "sha256:" + await hashCommandInput(JSON.parse(start.requirements_json));
+          const readiness = await assessmentReadiness(parseColumn(start.assessment_json, null), start.requirements_digest, requirementsDigest);
+          current = {input:start, result:{assessmentReadiness:readiness, serverEstimation:{
+            formatVersion:2, metric:"PLAN_ACTIVE", forecastScope:"FULL_FROM_FIRST_START", status:"UNAVAILABLE",
+            pointMs:null, method:{...ATLM_METHOD}, modelId:null, modelVersion:null, calculatedAt:nowMs,
+            requirementsDigest, featureDigest:readiness.featureDigest, sampleCount:0, accuracy:"NOT_VALIDATED",
+            evaluation:null, pointEngine:null, interval:atlmUnavailableInterval("BAYESIAN_PREDICTIVE",error.code),
+            unavailableReason:error.code, diagnostics:atlmDiagnostics(error.code)}}};
+        } else if (error.code !== "ASSESSMENT_CONTEXT_CHANGED") throw error;
+      }
+      const readiness = current?.input.start_key === start.start_key ? current.result.assessmentReadiness : null;
+      const outcome = readiness ? (readiness.code ?? "PENDING") : "ASSESSMENT_CONTEXT_CHANGED";
+      const contents = readiness?.status === "READY" ? {...payload, atlmStartForecast:{
+        snapshotVersion:4, assessmentSequence:start.sequence, estimation:current.result.serverEstimation}} : payload;
+      // A change to the assessment, model or training history requires a new command.
+      // A refresh for another unfinished plan can safely trigger a fresh calculation here.
+      statement = db.prepare(`WITH source AS (${CURRENT_FORECAST_INPUT_SQL}), decision AS (
+        SELECT CASE
+          WHEN NOT EXISTS(SELECT 1 FROM plans WHERE owner_id=? AND plan_id=? AND deleted_at IS NULL) THEN 'PLAN_NOT_FOUND'
+          WHEN (SELECT version FROM plans WHERE owner_id=? AND plan_id=?)<>? THEN 'VERSION_CONFLICT'
+          WHEN NOT EXISTS(SELECT 1 FROM source WHERE start_key=?) THEN 'ASSESSMENT_CONTEXT_CHANGED'
+          WHEN NOT EXISTS(SELECT 1 FROM source WHERE source.snapshot_key=?) AND ?='PENDING' THEN ?
+          ELSE ? END AS code)
+        ${insertReceipt} SELECT ?,?,?,?,?,?,?,?,?,?,code,
+          CASE WHEN code=? THEN ? WHEN code='ASSESSMENT_CONTEXT_CHANGED' THEN ? ELSE NULL END,?
+          FROM decision WHERE code IS NOT NULL`)
+        .bind(identity.ownerId, planId, identity.ownerId, planId, identity.ownerId, planId, envelope.expectedVersion,
+          start.start_key, current?.input.snapshot_key ?? null, outcome,
+          attempt === CURRENT_FORECAST_MAX_READ_ATTEMPTS ? "ASSESSMENT_CONTEXT_CHANGED" : null, outcome,
+          ...receiptValues, JSON.stringify(contents), readiness?.code ?? null,
+          readiness?.code ? JSON.stringify({assessmentReadiness:readiness}) : null,
+          JSON.stringify({invalidPaths:["assessment"]}), nowMs);
+    } else {
+      statement = db.prepare(`${insertReceipt} VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',NULL,?)`)
+        .bind(...receiptValues, JSON.stringify(payload), nowMs);
+    }
+    try { receiptInserted = Number((await statement.run()).meta?.changes) > 0; }
+    catch (error) { throw mapDbError(error); }
+    receipt = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=?", identity.ownerId, envelope.commandId);
+    if (receipt) break;
+  }
   if (!receipt) throw appError("INTERNAL_ERROR", "Не удалось сохранить результат команды.", 500);
   if (!await receiptMatchesCommand(receipt, envelope, hash)) throw appError("IDEMPOTENCY_KEY_REUSED", messageFor("IDEMPOTENCY_KEY_REUSED"), 409);
   return resultFromReceipt(receipt, !receiptInserted);
@@ -2403,6 +2553,7 @@ async function planSummary(db, ownerId, row, nowMs) {
   const calendarMs = row.first_started_at == null ? null : Math.max(0, end - row.first_started_at);
   const completion = await dbFirst(db, "SELECT (SELECT COUNT(*) FROM tracker_incomplete_steps WHERE owner_id=? AND plan_id=?) AS incompleteStepCount,(SELECT COUNT(*) FROM plan_steps WHERE owner_id=? AND plan_id=?) AS enabled", ownerId, row.plan_id, ownerId, row.plan_id);
   return {
+    ...(row.status==="PLANNED" && row.deleted_at===null ? {assessmentReadiness:await planStartReadiness(db,ownerId,row.plan_id)} : {}),
     completion: { readyToFinish: row.deleted_at == null && (!completion.enabled || completion.incompleteStepCount === 0), incompleteStepCount: completion.incompleteStepCount, trackerEnabled: Boolean(completion.enabled) },
     planId: row.plan_id, title: row.title, description: row.description, acceptanceCriteria: row.acceptance_criteria,
     planCreatedAt: row.plan_created_precision === "instant"
@@ -2464,9 +2615,9 @@ const EXPORT_SOURCES={
  steps:["plan_steps","step_id,plan_id,ordinal,title,content,status,version,created_at,updated_at"],
  stepIntervals:["step_work_intervals","step_id,start_ms,end_ms"],
  intervals:["work_intervals","interval_id,plan_id,start_ms,end_ms"],dates:["plan_date_history","history_id,plan_id,old_precision,old_at_ms,old_on,old_timezone,changed_at,reason"],
- assessments:["assessment_revisions","assessment_id,revision,plan_id,step_id,recorded_at,requirements_digest,requirements_json,assessment_json"],targets:["assessment_targets","plan_id,step_id,requirements_json"],
+ assessments:["assessment_revisions","sequence,assessment_id,revision,plan_id,step_id,recorded_at,requirements_digest,requirements_json,assessment_json"],targets:["assessment_targets","plan_id,step_id,requirements_json"],
  exceptions:["tracker_finish_exceptions","plan_id,reason,created_at"],
- frozen:["plan_estimation_inputs","plan_id,selection_status,first_started_at,forecast_json"],
+ frozen:["plan_estimation_inputs","plan_id,assessment_sequence,selection_status,first_started_at,forecast_json"],
  samples:["estimation_samples","sequence,plan_id,input_assessment_sequence,source_digest,source_generation,eligibility,reasons_json,features_json,issued_prediction_json,actual_ms,captured_at,source_available_at,observed_at,is_first_eligible"],
  models:["estimation_models","model_id,model_version,status,method_version,feature_version,manifest_json,dataset_digest,train_cutoff,metrics_json,sample_count,reason,created_at,activated_at"],
  attempts:["estimation_training_attempts","attempt_id,started_at,completed_at,method_version,feature_version,dataset_revision,manifest_json,diagnostics_json,case_ids_json,metrics_json,selected_json,reason"]
@@ -2489,16 +2640,21 @@ async function buildExportReport(db,ownerId,clock){
  const frozen=new Map(data.frozen.map(row=>[row.plan_id,row]));
  const documents=new Map(data.documents.map(d=>[d.plan_id,d.markdown])),digests=new Map();for(const t of data.targets)digests.set(t.plan_id+":"+(t.step_id||""),"sha256:"+await hashCommandInput(JSON.parse(t.requirements_json)));
  const assessments=rows=>rows.map(row=>{const {assessmentId,planId,stepId,expectedRequirementsDigest,...assessment}=JSON.parse(row.assessment_json);return {assessmentId:row.assessment_id,revision:row.revision,recordedAt:row.recorded_at,requirements:JSON.parse(row.requirements_json),needsRevision:row.requirements_digest!==digests.get(row.plan_id+":"+(row.step_id||"")),assessment:{formatVersion:1,...assessment}};});
- const plans=data.plans.sort((a,b)=>a.registered_at-b.registered_at||a.plan_id.localeCompare(b.plan_id)).map(row=>{
+ const plans=await Promise.all(data.plans.sort((a,b)=>a.registered_at-b.registered_at||a.plan_id.localeCompare(b.plan_id)).map(async row=>{
   const get=key=>related[key].get(row.plan_id)||[],intervals=get("intervals").sort((a,b)=>a.start_ms-b.start_ms),steps=get("steps").sort((a,b)=>a.ordinal-b.ordinal),measured=row.first_started_at!=null,end=row.finished_at??row.deleted_at??nowMs,activeMs=measured?calculateActiveMs(intervals,nowMs):null,calendarMs=measured?Math.max(0,end-row.first_started_at):null,incomplete=steps.filter(step=>step.status!=="DONE").length;
   return {planId:row.plan_id,title:row.title,description:row.description,acceptanceCriteria:row.acceptance_criteria,...(documents.has(row.plan_id)?{planText:documents.get(row.plan_id)}:{}),planCreatedAt:exportPlanDate(row.plan_created_precision,row.plan_created_at_ms,row.plan_created_on,row.plan_created_timezone),registeredAt:row.registered_at,status:row.status,deletedAt:row.deleted_at,firstStartedAt:row.first_started_at,finishedAt:row.finished_at,sourceReference:row.source_reference,
    completion:{trackerEnabled:steps.length>0,incompleteStepCount:incomplete,readyToFinish:row.deleted_at==null&&incomplete===0},activeMs,calendarMs,pausedMs:calendarMs==null?null:Math.max(0,calendarMs-activeMs),intervals:intervals.map(i=>({intervalId:i.interval_id,startMs:i.start_ms,endMs:i.end_ms})),
    dateHistory:get("dates").sort((a,b)=>a.changed_at-b.changed_at).map(d=>({previous:exportPlanDate(d.old_precision,d.old_at_ms,d.old_on,d.old_timezone),changedAt:d.changed_at,reason:d.reason})),
    assessments:assessments(get("assessments").filter(a=>a.step_id==null)),
    steps:steps.map(step=>({stepId:step.step_id,ordinal:step.ordinal,title:step.title,content:step.content,status:step.status,version:step.version,createdAt:step.created_at,updatedAt:step.updated_at,readyToFinish:step.status==="DONE",intervals:data.stepIntervals.filter(i=>i.step_id===step.step_id).sort((a,b)=>a.start_ms-b.start_ms).map(i=>({startMs:i.start_ms,endMs:i.end_ms})),assessments:assessments(get("assessments").filter(a=>a.step_id===step.step_id))})),
+   assessmentReadiness:await (async()=>{
+     const latest=measured ? get("assessments").find(a=>a.sequence===frozen.get(row.plan_id)?.assessment_sequence) : get("assessments").filter(a=>a.step_id==null).sort((a,b)=>b.sequence-a.sequence)[0];
+     if(measured && !latest)return null;
+     return assessmentReadiness(parseColumn(latest?.assessment_json,null),latest?.requirements_digest,digests.get(row.plan_id+":"));
+   })(),
    frozenForecast:frozen.has(row.plan_id) ? parseColumn(frozen.get(row.plan_id).forecast_json) : null,
    finishExceptions:get("exceptions").map(e=>({reason:e.reason,recordedAt:e.created_at}))};
- });
+ }));
  const included=plans.filter(p=>p.deletedAt==null),measured=included.filter(p=>p.activeMs!=null),union=unionIntervals(included.flatMap(p=>p.intervals.map(i=>[i.startMs,i.endMs??nowMs])));
  const training={samples:data.samples.map(atlmSampleView),models:data.models.filter(m=>m.method_version===ATLM_METHOD.version && m.feature_version===ATLM_FEATURE_VERSION).map(m=>({
    modelId:m.model_id,modelVersion:m.model_version,status:m.status,methodVersion:m.method_version,featureVersion:m.feature_version,
@@ -2517,13 +2673,13 @@ async function readTrackerCapabilities(db,ownerId){return {
       immutableRevisions: true, agentDefinedMethods: true, maxPayloadBytes: V4_TASK_MAX_BYTES, maxJsonDepth: 12,
       forecastUnits: "ms", forecastMetrics: FORECAST_METRICS, initialExpectedVersion: 0, requirementsDigest: true,
       contextRead: { tool: "GetAssessment", omitAssessmentId: true }, expectedRequirementsDigestRequired: true,
-      historyMaxTargets: 20, historyMaxLimit: 100, methodologyControlsExecution: false,
-      atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v3", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
+      historyMaxTargets: 20, historyMaxLimit: 100, methodologyControlsExecution: true,
+      atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v4", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
         policyVersion: ATLM_POLICY_VERSION, engines: ["OLS", "RIDGE", "BAYESIAN"], intervalEngines:["BAYESIAN_PREDICTIVE","BAYES_QUANTILE"],
-        execution: { environmentId: { optional: true, type: ["string", "null"], closedSet: true,
-          values: [...ENVIRONMENT_IDS], unknownValue: null,
-          description: "Допустимые значения: local, cloud_workspace; null означает неизвестную среду." } },
-        predictionScope: "FULL_FROM_FIRST_START", plannedForecastMode:"CURRENT_READ_ONLY", firstStartForecast:"FROZEN_SNAPSHOT", earlyForecastMethod:{...HISTORICAL_MEDIAN_METHOD}, retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
+        execution: { environmentId: { optional: false, type: "string", closedSet: true,
+          values: [...ENVIRONMENT_IDS],
+          description: "Допустимые значения: local, cloud_workspace." } },
+        predictionScope: "FULL_FROM_FIRST_START", plannedForecastMode:"CURRENT_READ_ONLY", firstStartForecast:"FROZEN_SNAPSHOT", firstStartRequires:"READY", earlyForecastMethod:{...HISTORICAL_MEDIAN_METHOD}, retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
         calculateTool: "CalculateAtlmEstimate", planEstimateTool: "GetPlanEstimate", modelStatusTool: "GetEstimationModelStatus",
         processTool: "ProcessEstimationTraining", startTrainingTool: "StartEstimationTraining", datasetTool: "GetAtlmDataset", historyTool:"GetEstimationTrainingHistory", predictionRequest: { method: "ATLM", methodVersion: 1 },
         limits: { maxTrainingSamples: 5000, datasetDefaultLimit: 50, datasetMaxLimit: 100, historyDefaultLimit:50, historyMaxLimit:100 } },
@@ -3051,7 +3207,7 @@ const UI_ATLM = String.raw`(()=>{
   const button=(text,action)=>{const el=make("button",text);el.type="button";el.addEventListener("click",action);return el;};
   const minutes=value=>new Intl.NumberFormat("ru-RU",{maximumFractionDigits:1}).format(value/60000)+" мин";
   const count=value=>Number.isSafeInteger(value)&&value>=0?value:0;
-  const reasons={AVAILABLE:"Модель успешно обучена.",MISSING_REQUIRED_FEATURES:"Нужны признаки задачи.",HISTORY_RESET:"Нет нового прогноза для ранее начатого плана.",TRAINING_TIME_BUDGET:"Обучение не завершилось в отведённое время.",COLLECTING_DATA:"Пока недостаточно проверенных завершённых планов.",INCOMPLETE_FEATURES:"Для прогноза не хватает исходных сведений о задаче.",UNSUPPORTED_CATEGORY:"В накопленной истории ещё нет опыта для этого вида задачи.",MODEL_INVALIDATED:"Исходные данные модели изменились; требуется пересборка.",INVALID_PREDICTION:"Модель не смогла получить корректную оценку.",UNSUPPORTED_FORECAST_SCOPE:"Прогноз доступен для полного плана до первого запуска.",DATASET_LIMIT_REACHED:"Накопленные данные сохранены, но превышен текущий предел обучения.",RANK_DEFICIENT:"Данных пока недостаточно для независимой оценки влияния признаков.",MODEL_CAPACITY_LIMIT:"Превышен ресурсный предел числа коэффициентов модели. История сохранена.",INSUFFICIENT_DATA:"Пока недостаточно пригодных данных для обучения и проверки.",INSUFFICIENT_VALIDATION:"Пока недостаточно случаев для проверки новой модели.",INSUFFICIENT_EVALUATION_CASES:"В последней попытке не хватило проверочных сравнений. Новая версия допускает ранний прогноз с неподтверждённым качеством.",INSUFFICIENT_INCUMBENT_CASES:"Для замены действующей модели недостаточно независимых сравнений с ней.",MEDIAN_BASELINE_BETTER:"Новая модель ошибается сильнее обычной медианы прошлых длительностей.",MEDIAN_BASELINE_NOT_WORSE:"Медиана прошлых длительностей не хуже проверенных обучаемых способов. Новая обученная модель не активирована.",CANDIDATE_COVERAGE_WORSE:"Новая модель даёт прогноз для меньшей доли задач, чем действующая.",CANDIDATE_MAE_WORSE:"Средняя ошибка новой модели выше, чем у действующей.",SNAPSHOT_INVALIDATED:"Исходные данные изменились; подготовлена новая попытка обучения.",LEASE_EXPIRED:"Предыдущая обработка не завершилась вовремя; её состояние сохранено.",TRAINING_EXECUTION_FAILED:"Во время обучения произошёл технический сбой.",SOURCE_UNAVAILABLE:"Источник данных временно недоступен.",INVALID_ESTIMATION_SOURCE:"Сохранённый источник оценки не удалось проверить.",AVAILABLE:"Модель успешно обучена.",
+  const reasons={ASSESSMENT_REQUIRED:"До первого запуска не сохранены исходные признаки.",ASSESSMENT_INCOMPLETE:"Заполните обязательные поля оценки.",ASSESSMENT_INVALID:"Исправьте ошибки в оценке.",ASSESSMENT_SCHEMA_OUTDATED:"Требуется оценка по актуальной схеме.",ASSESSMENT_CONTEXT_CHANGED:"Требования или признаки изменились. Обновите оценку.",AVAILABLE:"Модель успешно обучена.",MISSING_REQUIRED_FEATURES:"Нужны признаки задачи.",HISTORY_RESET:"Нет нового прогноза для ранее начатого плана.",TRAINING_TIME_BUDGET:"Обучение не завершилось в отведённое время.",COLLECTING_DATA:"Пока недостаточно проверенных завершённых планов.",INCOMPLETE_FEATURES:"Для прогноза не хватает исходных сведений о задаче.",UNSUPPORTED_CATEGORY:"В накопленной истории ещё нет опыта для этого вида задачи.",MODEL_INVALIDATED:"Исходные данные модели изменились; требуется пересборка.",INVALID_PREDICTION:"Модель не смогла получить корректную оценку.",UNSUPPORTED_FORECAST_SCOPE:"Прогноз доступен для полного плана до первого запуска.",DATASET_LIMIT_REACHED:"Накопленные данные сохранены, но превышен текущий предел обучения.",RANK_DEFICIENT:"Данных пока недостаточно для независимой оценки влияния признаков.",MODEL_CAPACITY_LIMIT:"Превышен ресурсный предел числа коэффициентов модели. История сохранена.",INSUFFICIENT_DATA:"Пока недостаточно пригодных данных для обучения и проверки.",INSUFFICIENT_VALIDATION:"Пока недостаточно случаев для проверки новой модели.",INSUFFICIENT_EVALUATION_CASES:"В последней попытке не хватило проверочных сравнений. Новая версия допускает ранний прогноз с неподтверждённым качеством.",INSUFFICIENT_INCUMBENT_CASES:"Для замены действующей модели недостаточно независимых сравнений с ней.",MEDIAN_BASELINE_BETTER:"Новая модель ошибается сильнее обычной медианы прошлых длительностей.",MEDIAN_BASELINE_NOT_WORSE:"Медиана прошлых длительностей не хуже проверенных обучаемых способов. Новая обученная модель не активирована.",CANDIDATE_COVERAGE_WORSE:"Новая модель даёт прогноз для меньшей доли задач, чем действующая.",CANDIDATE_MAE_WORSE:"Средняя ошибка новой модели выше, чем у действующей.",SNAPSHOT_INVALIDATED:"Исходные данные изменились; подготовлена новая попытка обучения.",LEASE_EXPIRED:"Предыдущая обработка не завершилась вовремя; её состояние сохранено.",TRAINING_EXECUTION_FAILED:"Во время обучения произошёл технический сбой.",SOURCE_UNAVAILABLE:"Источник данных временно недоступен.",INVALID_ESTIMATION_SOURCE:"Сохранённый источник оценки не удалось проверить.",AVAILABLE:"Модель успешно обучена.",
     MISSING_FEATURES:"До первого запуска не сохранены исходные признаки.",INVALID_FEATURES:"Исходные признаки не соответствуют схеме.",PLAN_DELETED:"План удалён.",PLAN_NOT_COMPLETED:"План ещё не завершён.",RESULT_NOT_VERIFIED:"Результат и обязательные проверки не подтверждены.",SCOPE_CHANGED:"После начала изменился объём задачи.",INCOMPLETE_MEASUREMENT:"Нет полного подтверждённого измерения активного времени."};
   const statuses={IDLE:"Ожидание новых планов",QUEUED:"Обучение в очереди",RUNNING:"Модель обучается",RETRY_WAIT:"Ожидание повторной попытки",COLLECTING_DATA:"Накапливаем опыт",REJECTED:"Новая модель не прошла проверку",FAILED:"Не удалось завершить обучение"};
   const style=make("style");style.textContent=".atlm-panel{min-width:0;overflow-wrap:anywhere}.atlm-panel p{margin:9px 0}.atlm-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.atlm-heading h2,.atlm-heading h3{margin:0}.atlm-panel button{min-height:44px;white-space:normal}.atlm-controls{display:flex;gap:8px;flex-wrap:wrap}.atlm-point{font-size:1.35rem;font-weight:700;color:var(--ink)}.atlm-plan-estimate{margin:18px 0;padding:16px;border:1px solid var(--line-strong,var(--line));border-radius:var(--radius,10px);background:var(--paper-3,var(--panel))}.atlm-note{color:var(--ink-2,var(--muted));font-size:.9rem}.atlm-stale{border-left:3px solid var(--amber,var(--amber));padding-left:10px}.atlm-range-text,.atlm-fact{font-variant-numeric:tabular-nums}.atlm-scale{height:14px;position:relative;margin:18px 6px;background:var(--paper-2);border-radius:8px}.atlm-band{position:absolute;height:8px;top:3px;background:var(--amber);border-radius:8px}.atlm-marker,.atlm-fact-marker{position:absolute;top:0;height:14px;border-left:3px solid var(--ink)}.atlm-fact-marker{border-color:var(--blue)}.atlm-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:1px;background:var(--line);border:1px solid var(--line)}.atlm-metric{display:grid;gap:8px;padding:12px;background:var(--paper-2)}.atlm-metric strong{font-variant-numeric:tabular-nums}.atlm-metrics-help{margin:16px 0}.atlm-attempts{margin-top:24px}.atlm-table-wrap{max-width:100%;overflow-x:auto}.atlm-table-wrap table{width:100%;border-collapse:collapse;text-align:left;font-size:.9rem}.atlm-table-wrap th,.atlm-table-wrap td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}.atlm-panel summary{min-height:44px;display:flex;align-items:center;cursor:pointer}.atlm-panel summary::before{content:'▸';margin-right:6px}.atlm-panel details[open]>summary::before{content:'▾'}.atlm-table-wrap:focus-visible{outline:3px solid var(--amber-text);outline-offset:2px}.atlm-features{margin-top:16px}.atlm-features dl{display:grid;grid-template-columns:minmax(8rem,1fr) minmax(0,2fr);gap:6px 12px}.atlm-features dd{margin:0}.atlm-features h4{margin:14px 0 4px}@media(max-width:390px){.atlm-heading{align-items:flex-start}.atlm-controls{width:100%}.atlm-controls button{flex:1 1 100%}}";document.head.append(style);
@@ -3161,16 +3317,16 @@ const UI_ATLM = String.raw`(()=>{
     if(!task){details.append(make("p","Нужны признаки.","atlm-note"));target.append(details);return;}
     const groups=[
       ["Работа",["workUnits","doneBoundary","reuseLevel"]],
-      ["Изменения",["components","contracts","integrations","migrationEntities","dataVolumeBand"]],
-      ["Неопределённость",["requirementsUncertainty","solutionUncertainty","diagnosisState","unfamiliarTechnologies","scopeChangeRisk"]],
+      ["Изменения",["components","contracts","systemBoundaries","migrationEntities","dataVolumeBand"]],
+      ["Неопределённость",["requirementsUncertainty","solutionUncertainty","diagnosisState","learningTargets","scopeChangeRisk"]],
       ["Проверки",["verificationKinds","verificationScenarios","verificationReadiness","requiredReviewPasses"]],
       ["Условия работы",["environmentReadiness","accessReadiness","deploymentTargets"]],
       ["Исполнитель",["execution.mode","execution.modelId","execution.reasoningEffort","execution.environmentId","execution.plannedParallelAgents","execution.codebaseFamiliarity"]]
     ];
     const fields={
       workUnits:["Результаты","Что должно быть получено в результате задачи."],doneBoundary:["Граница готовности","До какого состояния нужно довести результат."],reuseLevel:["Готовая основа","Насколько существующее решение подходит для задачи."],
-      components:["Компоненты","Какие модули, сервисы или приложения меняются."],contracts:["Контракты","Какие интерфейсы и форматы меняются."],integrations:["Интеграции","Какие внешние системы используются или меняются."],migrationEntities:["Миграция данных","Какие сохранённые сущности нужно преобразовать."],dataVolumeBand:["Объём данных","Сколько сохранённых записей затрагивает задача."],
-      requirementsUncertainty:["Ясность требований","Насколько понятно, какой результат нужен."],solutionUncertainty:["Ясность решения","Насколько понятно, как получить результат."],diagnosisState:["Причина проблемы","Насколько установлена причина, если задача включает диагностику."],unfamiliarTechnologies:["Технологии для изучения","Технологии, чьи контракты нужно изучить для задачи."],scopeChangeRisk:["Риск расширения задачи","Насколько вероятно, что понадобится работа за текущими границами."],
+      components:["Компоненты","Какие модули, сервисы или приложения меняются."],contracts:["Контракты","Какие интерфейсы и форматы меняются."],systemBoundaries:["Системные границы","Операции с независимо управляемыми контрактами."],migrationEntities:["Миграция данных","Какие сохранённые сущности нужно преобразовать."],dataVolumeBand:["Объём данных","Сколько сохранённых записей затрагивает задача."],
+      requirementsUncertainty:["Ясность требований","Насколько понятно, какой результат нужен."],solutionUncertainty:["Ясность решения","Насколько понятно, как получить результат."],diagnosisState:["Причина проблемы","Насколько установлена причина, если задача включает диагностику."],learningTargets:["Технологии для изучения","Технологии, чьи контракты нужно изучить для задачи."],scopeChangeRisk:["Риск расширения задачи","Насколько вероятно, что понадобится работа за текущими границами."],
       verificationKinds:["Виды проверок","Какие виды проверок нужны."],verificationScenarios:["Сценарии проверок","Что именно нужно проверить."],verificationReadiness:["Готовность проверок","Можно ли использовать существующие проверки."],requiredReviewPasses:["Независимые ревью","Сколько независимых ревью обязательно."],
       environmentReadiness:["Готовность рабочей среды","Можно ли начать работу или среду нужно подготовить."],accessReadiness:["Доступы","Есть ли необходимые доступы."],deploymentTargets:["Развёртывание","Куда нужно развернуть результат по условиям задачи."],
       "execution.mode":["Кто выполняет","Человек, ИИ-агент или они вместе."],"execution.modelId":["Модель","Модель ИИ-агента, если известна."],"execution.reasoningEffort":["Уровень рассуждения","Заданный уровень рассуждения модели, если известен."],"execution.environmentId":["Среда выполнения","Где работает исполнитель: локально или в облаке."],"execution.plannedParallelAgents":["Параллельные агенты","Сколько агентов планируется использовать одновременно."],"execution.codebaseFamiliarity":["Знакомство с кодом","Что исполнитель успел изучить до оценки."]
@@ -3185,12 +3341,13 @@ const UI_ATLM = String.raw`(()=>{
       verificationReadiness:{READY:"Готовы",ADAPT:"Нужно доработать",CREATE:"Нужно создать",NONE_REQUIRED:"Не требуются"},environmentReadiness:{READY:"Готова",SETUP_KNOWN:"Нужна известная настройка",BLOCKED:"Работа в среде заблокирована"},accessReadiness:{AVAILABLE:"Есть",MISSING:"Нет необходимых доступов"},
       "execution.mode":{AI_AGENT:"ИИ-агент",HUMAN:"Человек",HYBRID:"Человек и ИИ-агент"},"execution.environmentId":{local:"Локальная",cloud_workspace:"Облачная рабочая среда"},"execution.codebaseFamiliarity":{NOT_READ:"Код не изучен",MAPPED:"Структура кода изучена",PRIOR_VERIFIED_WORK:"Есть ранее проверенная работа с кодом"}
     };
-    const empty={components:"Изменений компонентов нет",contracts:"Изменений контрактов нет",integrations:"Интеграции не требуются",migrationEntities:"Миграция не требуется",unfamiliarTechnologies:"Технологий для изучения нет",verificationKinds:"Проверки не требуются",verificationScenarios:"Сценариев нет",deploymentTargets:"Развёртывание не требуется"};
+    const empty={components:"Изменений компонентов нет",contracts:"Изменений контрактов нет",systemBoundaries:"Интеграции не требуются",migrationEntities:"Миграция не требуется",learningTargets:"Технологий для изучения нет",verificationKinds:"Проверки не требуются",verificationScenarios:"Сценариев нет",deploymentTargets:"Развёртывание не требуется"};
     const read=path=>path.split(".").reduce((value,key)=>value?.[key],task);
     const changes={CREATE:"создать",MODIFY:"изменить",REMOVE:"удалить",ADD:"добавить",COMPATIBLE:"совместимое изменение",BREAKING:"несовместимое изменение",USE:"использовать",CHANGE:"изменить"};
     function itemText(path,item){
+      if(path==="systemBoundaries")return item.name+" ("+item.contractControl+", "+item.role+"): "+item.operations.map(op=>op.action+" "+op.description).join(", ");
       const label=item.description||item.key||item.id||item.kind;
-      if(["components","contracts","integrations"].includes(path)&&item.change)return label+" — "+(changes[item.change]||item.change);
+      if(["components","contracts","systemBoundaries"].includes(path)&&item.change)return label+" — "+(changes[item.change]||item.change);
       return label;
     }
     function display(path,value){
@@ -3204,7 +3361,7 @@ const UI_ATLM = String.raw`(()=>{
         const [name,hint]=fields[key],term=make("dt"),description=make("dd"),value=read(key);
         term.append(make("span",name),make("small",hint,"atlm-feature-hint"));description.append(make("span",display(key,value)));
         const reason=task.unknownReasons?.[key];
-        if((value===null||value===undefined||value==="UNKNOWN")&&typeof reason==="string"&&reason.trim())description.append(make("small",reason,"atlm-feature-reason"));
+        if((value===null||value===undefined||value==="UNKNOWN")&&reason?.checkedSource)description.append(make("small",reason.reason+" ("+reason.checkedSource+")","atlm-feature-reason"));
         list.append(term,description);
       }
       details.append(list);
@@ -3336,6 +3493,13 @@ const UI_ATLM = String.raw`(()=>{
       if(estimate==null&&data.diagnostics)body.append(make("p",diagnosticText(data.diagnostics)||reasonText(data.diagnostics.code),"atlm-note"));
 
 
+      const readiness=data.assessmentReadiness;
+      if(readiness){
+        body.append(make("p",readiness.status==="READY"?"Оценка готова":reasonText(readiness.code),"atlm-readiness"));
+        const paths=[...readiness.missingPaths,...readiness.invalidPaths];
+        if(paths.length)body.append(make("p","Поля для проверки: "+paths.join(", "),"atlm-note"));
+        if(readiness.operations){const ops=readiness.operations;body.append(make("p","READ: "+ops.readCount+", WRITE: "+ops.writeCount+", доля WRITE: "+new Intl.NumberFormat("ru-RU",{style:"percent",maximumFractionDigits:1}).format(ops.writeRatio),"atlm-operation-counts"));}
+      }
       addTaskFeatures(body,task,taskError,()=>loadPlan(planId));
       if(data.isStale&&data.source!=="CURRENT_INPUT")body.append(make("p",data.staleReasons?.includes("BASELINE_SOURCE_CHANGED")?"История завершённых планов изменилась; сохранённая медиана показана как историческая оценка.":"Оценка устарела: изменился объём задачи или исходные данные модели. Сохранённое значение показано для истории.","atlm-stale"));
     }catch(error){if(token!==planToken||planRoot.dataset.planId!==planId||error.name==="AbortError")return;body.replaceChildren(make("p","Не удалось загрузить прогноз. "+error.message,"error"));}
@@ -3452,7 +3616,7 @@ function uiHtml() {
     "<section id=\"view-settings\" class=\"hidden\"><h2>Настройки</h2><div class=\"settings-grid\"><article class=\"panel\"><h2>Настройки времени</h2><form id=\"settings\" class=\"form\"><div class=\"field\"><label for=\"tz\">Часовой пояс</label><select id=\"tz\" required>" + UI_TIME_ZONES.map((option) => "<option value=\"" + option.value + "\"" + (option.value === "Asia/Omsk" ? " selected" : "") + ">" + option.label + "</option>").join("") + "</select></div><button class=\"primary\">Сохранить</button></form><p class=\"muted\">Все отметки времени хранятся в UTC. Часовой пояс используется для отображения дат и отчётов.</p></article><article class=\"panel\"><h2>Экспорт данных</h2><p class=\"muted\">Скачайте аналитический JSON-отчёт: планы, этапы, оценки, результаты, проверки и история работы. Удалённые планы включены.</p><a class=\"settings-export\" href=\"/api/export\">Скачать JSON отчет</a></article><article class=\"panel settings-deleted\"><h2>Удалённые планы</h2><p class=\"muted\">Просматривайте сохранённую историю и восстанавливайте планы. Восстановление не запускает таймер.</p><button id=\"openDeleted\" type=\"button\">Открыть удалённые планы</button></article></div></section>",
     "<div id=\"modal\" class=\"modal hidden\" role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"modalTitle\"><div class=\"modalbox\"><div class=\"toolbar\"><h2 id=\"modalTitle\" style=\"flex:1\">Новый план</h2><button id=\"close\">Закрыть</button></div><form id=\"create\" class=\"form\"><div class=\"field\"><label for=\"title\">Название</label><input id=\"title\" maxlength=\"200\" required></div><div class=\"field\"><label for=\"description\">Текст плана</label><textarea id=\"description\" rows=\"14\" required placeholder=\"Вставьте план целиком. Заголовки этапов: ## Этап 1. Название\"></textarea></div><div class=\"field\"><label for=\"createdDate\">Дата составления</label><input id=\"createdDate\" type=\"date\" required></div><div class=\"actions\"><button type=\"button\" id=\"cancel\">Отмена</button><button class=\"primary\">Создать план</button></div></form></div></div><div id=\"toast\" class=\"toast hidden\" role=\"status\" aria-live=\"polite\"></div>",
     "</main>",
-    "<script>(()=>{" + UI_ANALYTICS + "const q=s=>document.querySelector(s), all=s=>[...document.querySelectorAll(s)];const supportedZones=" + JSON.stringify(UI_TIME_ZONES.map((option) => option.value)) + ";const normalizeZone=value=>supportedZones.includes(value)?value:\"Asia/Omsk\";let plans=[],activePlans=[],deletedRequestId=0,currentDetailPlan=null,detailReturnView=\"plans\",receivedAt=Date.now(),todayActiveMs=0,todayDate=null,refreshRequestId=0,zone=\"Asia/Omsk\",serverNow=Date.now(),pending=new Map(),rejectedValidation=new Set(),rejectedVersion=new Map(),analyticsRequestId=0,detailRequestId=0,timer,modalReturnFocus=null;const uid=()=>crypto.randomUUID();const dateLocal=d=>{const value=Object.fromEntries(new Intl.DateTimeFormat(\"en-CA\",{timeZone:zone,year:\"numeric\",month:\"2-digit\",day:\"2-digit\"}).formatToParts(d).map(part=>[part.type,part.value]));return value.year+\"-\"+value.month+\"-\"+value.day};const duration=n=>{if(n==null)return\"—\";n=Math.max(0,Math.round(n/60000));const day=Math.floor(n/1440),h=Math.floor(n%1440/60),m=n%60;return day?day+\" д \"+h+\" ч \"+m+\" мин\":h?h+\" ч \"+m+\" мин\":m+\" мин\"};const formatPlanSample=n=>{const count=Number(n)||0,lastTwo=count%100;return\"по \"+count+\" \"+((lastTwo>=11&&lastTwo<=14)||count%10!==1?\"планам\":\"плану\")};const dateFmt=n=>n==null?\"—\":new Intl.DateTimeFormat(\"ru-RU\",{dateStyle:\"medium\",timeStyle:\"short\",timeZone:zone}).format(new Date(n));const statusText=status=>({PLANNED:\"Запланирован\",RUNNING:\"Выполняется\",PAUSED:\"На паузе\",COMPLETED:\"Завершён\"})[status]||status;function showToast(t,err){const x=q(\"#toast\");x.textContent=t;x.classList.toggle(\"error\",!!err);x.classList.remove(\"hidden\");clearTimeout(timer);timer=setTimeout(()=>x.classList.add(\"hidden\"),4500)}async function call(path,opt){const r=await fetch(path,{...opt,headers:{\"content-type\":\"application/json\",...(opt&&opt.headers||{})},cache:\"no-store\"});let v={};try{v=await r.json()}catch{}if(!r.ok){const e=new Error(v.error&&v.error.message||\"HTTP \"+r.status);e.status=r.status;e.code=v.error&&v.error.code;e.details=v.error&&v.error.details;throw e}return v}const rejectedTerminal=new Set();async function hasFinalPlanRejection(type,envelope,error){if(error.status!==409||!((type===\"FinishPlan\"&&error.code===\"CHECKPOINTS_INCOMPLETE\")||(type===\"DeletePlan\"&&error.code===\"PLAN_DELETED\")||(type===\"RestorePlan\"&&error.code===\"PLAN_NOT_DELETED\")))return false;try{const receipt=await call(\"/api/tracker/commands/\"+encodeURIComponent(envelope.commandId));return receipt.status===\"FINAL\"&&receipt.commandId===envelope.commandId&&receipt.commandType===envelope.commandType&&receipt.error?.code===error.code&&!receipt.result}catch{return false}}function makeCmd(type,plan,payload){const key=type+\":\"+(plan?plan.planId:\"new\"),nextPayload={...(plan?{planId:plan.planId}:{}),...(payload||{})};let c=pending.get(key);const newVersion=plan?plan.version:undefined;if(c&&rejectedTerminal.has(key)){c=null;pending.delete(key);rejectedTerminal.delete(key)}if(c&&rejectedValidation.has(key)&&JSON.stringify(c.payload)!==JSON.stringify(nextPayload)){c=null;pending.delete(key);rejectedValidation.delete(key)}if(c&&rejectedVersion.has(key)&&c.expectedVersion!==newVersion){c=null;pending.delete(key);rejectedVersion.delete(key)}if(c&&JSON.stringify(c.payload)!==JSON.stringify(nextPayload)){const e=new Error(\"Исход предыдущей команды неизвестен. Повторите её без изменения данных или обновите состояние перед новой командой.\");e.code=\"COMMAND_OUTCOME_UNKNOWN\";throw e}if(!c){c={schemaVersion:1,commandId:uid(),commandType:type,expectedVersion:newVersion,payload:nextPayload};pending.set(key,c)}return [key,c]}async function command(type,plan,payload){let prepared;try{prepared=makeCmd(type,plan,payload)}catch(e){showToast((e.code||\"ERROR\")+\": \"+e.message,true);throw e}const [key,c]=prepared;let r;try{r=await call(\"/api/commands\",{method:\"POST\",body:JSON.stringify(c)});if(r?.commandId!==c.commandId||r.outcome!==\"OK\"||typeof r.applied!==\"boolean\"||typeof r.replayed!==\"boolean\"||r.applied===r.replayed||!r.result||typeof r.result!==\"object\"||Array.isArray(r.result)||r.error){const e=new Error(\"Ответ команды не подтверждает её результат. Повторите запрос без изменения данных.\");e.code=\"COMMAND_OUTCOME_UNKNOWN\";throw e}}catch(e){if(e.code===\"VALIDATION_ERROR\")rejectedValidation.add(key);else if(await hasFinalPlanRejection(type,c,e))rejectedTerminal.add(key);if(e.code===\"VERSION_CONFLICT\"&&Number.isSafeInteger(e.details&&e.details.currentVersion)){rejectedVersion.set(key,e.details.currentVersion);if(plan)plan.version=e.details.currentVersion}showToast((e.code||\"ERROR\")+\": \"+e.message,true);if(e.code===\"VERSION_CONFLICT\")try{await refresh()}catch{}throw e}pending.delete(key);rejectedValidation.delete(key);rejectedVersion.delete(key);rejectedTerminal.delete(key);q(\"#toast\").classList.add(\"hidden\");q(\"#toast\").classList.remove(\"error\");try{await refresh()}catch{showToast(\"Изменение сохранено, но данные не обновились. Перезагрузите страницу.\",true)}return r}window.addEventListener(\"plan-time-tracker:command\",event=>{const detail=event.detail||{};command(detail.commandType,detail.plan,detail.payload).then(detail.resolve,detail.reject)});window.addEventListener(\"plan-time-tracker:refresh-plan\",event=>{const detail=event.detail||{},navigationToken=detailRequestId;(async()=>{await refresh();if(navigationToken===detailRequestId&&!q(\"#view-detail\").classList.contains(\"hidden\")&&q(\"#planDetail\").dataset.planId===detail.planId)await openPlan(detail.planId,detail.successMessage)})().then(detail.resolve,detail.reject)});function btn(text,fn,cls){const b=document.createElement(\"button\");b.textContent=text;if(cls)b.className=cls;b.onclick=async e=>{e.stopPropagation();if(b.disabled)return;b.disabled=true;try{await fn()}catch{}finally{b.disabled=false}};return b}function deletionButton(p){const restoring=p.deletedAt!=null;return btn(restoring?\"Восстановить\":\"Удалить\",async()=>{if(!window.confirm(restoring?\"Восстановить план «\"+p.title+\"»? Таймер останется остановленным.\":\"Удалить план «\"+p.title+\"»? Активное время и попытки будут остановлены. План можно восстановить в настройках, в разделе «Удалённые планы».\"))return;const navigationToken=detailRequestId;await command(restoring?\"RestorePlan\":\"DeletePlan\",p);if(navigationToken===detailRequestId&&q(\"#planDetail\").dataset.planId===p.planId&&!q(\"#view-detail\").classList.contains(\"hidden\"))await openPlan(p.planId)},restoring?\"\":\"danger\")}async function loadDeleted(){const requestId=++deletedRequestId,list=q(\"#deleted\");list.textContent=\"Загружаю удалённые планы…\";try{let page=await call(\"/api/plans?deleted=true&limit=100\"),collected=[...page.plans];while(page.nextCursor){page=await call(\"/api/plans?deleted=true&limit=100&cursor=\"+encodeURIComponent(page.nextCursor));if(requestId!==deletedRequestId)return;collected.push(...page.plans)}if(requestId!==deletedRequestId)return;list.replaceChildren();if(!collected.length)list.textContent=\"Удалённых планов нет.\";else collected.forEach(p=>list.append(card(p)))}catch(error){if(requestId!==deletedRequestId)return;list.textContent=\"Не удалось загрузить удалённые планы. \"+error.message;list.append(btn(\"Повторить\",loadDeleted));}}function finishButton(p,confirmation){let b;if(p.completion&&!p.completion.readyToFinish){b=btn(\"Условия завершения\",()=>openPlan(p.planId));b.title=\"Не выполнены условия этапов: \"+p.completion.incompleteStepCount}else b=btn(\"Завершить\",async()=>{if(!window.confirm(confirmation))return;try{await command(\"FinishPlan\",p)}finally{if(q(\"#planDetail\").dataset.planId===p.planId&&!q(\"#view-detail\").classList.contains(\"hidden\"))await openPlan(p.planId)}},\"danger\");b.dataset.finishPlan=p.planId;return b}window.addEventListener(\"plan-time-tracker:completion-updated\",event=>{const next=event.detail;if(!next?.completion)return;const summaries=[...plans,...activePlans,currentDetailPlan].filter(p=>p&&p.planId===next.planId);for(const p of summaries)p.completion=next.completion;const p=summaries[0];if(p)for(const button of all(\"[data-finish-plan]\"))if(button.dataset.finishPlan===p.planId)button.replaceWith(finishButton(p,\"Завершить план? Сервер остановит таймер.\"))});function card(p){const row=document.createElement(\"div\");row.className=\"row\";row.dataset.planId=p.planId;const left=document.createElement(\"button\"),title=document.createElement(\"span\"),meta=document.createElement(\"span\");left.type=\"button\";left.className=\"plan-open\";left.onclick=()=>openPlan(p.planId);left.setAttribute(\"aria-label\",p.title);title.className=\"row-title\";title.textContent=p.title;meta.className=\"row-meta\";meta.textContent=(p.status===\"RUNNING\"?\"Выполняется\":p.status===\"PAUSED\"?\"Пауза\":p.status===\"COMPLETED\"?\"Завершён\":\"Запланирован\")+\" · активно \"+duration(p.activeMs)+\" · создан \"+dateFmt(p.registeredAt);left.append(title,meta);const right=document.createElement(\"div\");right.className=\"row-right\";const badge=document.createElement(\"span\");badge.className=\"badge \"+p.status.toLowerCase();badge.textContent=statusText(p.status);right.append(badge);if(p.deletedAt!=null){badge.textContent=\"Удалён\";meta.textContent=\"Удалён \"+dateFmt(p.deletedAt)+\" · активно \"+duration(p.activeMs);right.append(deletionButton(p));row.append(left,right);return row}if(p.status===\"PLANNED\")right.append(btn(\"Запустить\",()=>command(\"StartPlan\",p),\"primary\"));if(p.status===\"RUNNING\")right.append(btn(\"Пауза\",()=>command(\"PausePlan\",p)));if(p.status===\"PAUSED\")right.append(btn(\"Продолжить\",()=>command(\"ResumePlan\",p),\"primary\"));if(p.status===\"RUNNING\"||p.status===\"PAUSED\")right.append(finishButton(p,\"Завершить план? Сервер остановит таймер.\"));right.append(deletionButton(p));row.append(left,right);return row}async function openPlan(planId,successMessage){const returnView=!q(\"#view-detail\").classList.contains(\"hidden\")?detailReturnView:!q(\"#view-deleted\").classList.contains(\"hidden\")?\"deleted\":\"plans\";const requestToken=++detailRequestId;try{const p=(await call(\"/api/plans/\"+encodeURIComponent(planId)+\"\")).plan;if(requestToken!==detailRequestId)return;detailReturnView=returnView;q(\"#backPlans\").textContent=returnView===\"deleted\"?\"← К удалённым планам\":\"← К планам\";currentDetailPlan=p;const box=q(\"#planDetail\");window.dispatchEvent(new CustomEvent(\"plan-time-tracker:plan-will-render\"));box.dataset.planId=planId;box.dataset.planStatus=p.status;box.dataset.deleted=String(p.deletedAt!=null);box.replaceChildren();const h=document.createElement(\"h2\");h.textContent=p.title;box.append(h);const m=document.createElement(\"p\");m.className=\"muted\";m.textContent=\"Дата плана: \"+(p.planCreatedAt.precision===\"dateOnly\"?p.planCreatedAt.on:dateFmt(Date.parse(p.planCreatedAt.value)))+\" · создан \"+dateFmt(p.registeredAt)+\" · \"+statusText(p.status);box.append(m);const deletionActions=document.createElement(\"div\");deletionActions.className=\"actions\";deletionActions.append(deletionButton(p));box.append(deletionActions);if(p.deletedAt!=null){const notice=document.createElement(\"p\");notice.className=\"notice\";notice.textContent=\"План удалён. История доступна только для чтения. Восстановление не запускает таймер.\";box.append(notice)}if(p.deletedAt==null&&(p.status===\"RUNNING\"||p.status===\"PAUSED\")){const actions=document.createElement(\"div\");actions.className=\"actions plan-completion-actions\";actions.append(finishButton(p,\"Завершить план? Сервер остановит таймер.\"));box.append(actions)}for(const label of [...(p.planText?[]:[p.description||\"Описание не задано.\",\"Критерии приёмки: \"+(p.acceptanceCriteria||\"не заданы\")]),\"Активно \"+duration(p.activeMs)+\"; календарное \"+duration(p.calendarMs)+\"; пауза \"+duration(p.pausedMs)]){const e=document.createElement(\"p\");e.textContent=label;box.append(e)}if(p.deletedAt==null){const edit=document.createElement(\"form\");edit.className=\"form\";edit.dataset.trackerForm=\"plan-metadata\";const title=document.createElement(\"input\");title.value=p.title;title.maxLength=200;title.setAttribute(\"aria-label\",\"Название плана\");const description=document.createElement(\"textarea\");description.value=p.description||\"\";description.maxLength=20000;description.setAttribute(\"aria-label\",\"Описание\");const criteria=document.createElement(\"textarea\");criteria.value=p.acceptanceCriteria||\"\";criteria.maxLength=20000;criteria.setAttribute(\"aria-label\",\"Критерии приёмки\");const date=document.createElement(\"input\");date.type=\"date\";date.value=p.planCreatedAt.precision===\"dateOnly\"?p.planCreatedAt.on:dateLocal(Date.parse(p.planCreatedAt.value));date.setAttribute(\"aria-label\",\"Дата составления\");const label=document.createElement(\"label\"),confirm=document.createElement(\"input\");confirm.type=\"checkbox\";confirm.dataset.draftField=\"confirmDateAnomaly\";label.className=\"checkbox-field\";const confirmText=document.createElement(\"span\");confirmText.textContent=\"Подтверждаю дату составления после первого старта\";label.append(confirm,confirmText);const save=document.createElement(\"button\");save.textContent=\"Сохранить изменения\";const labelled=(text,control)=>{const field=document.createElement(\"label\");field.className=\"field\";field.append(document.createTextNode(text),control);return field};edit.append(labelled(\"Название плана\",title),labelled(\"Описание\",description),labelled(\"Критерии приёмки\",criteria),labelled(\"Дата составления\",date),label,save);edit.onsubmit=async e=>{e.preventDefault();const draftSubmission={planId:p.planId,form:edit};window.dispatchEvent(new CustomEvent(\"plan-time-tracker:draft-submitted\",{detail:draftSubmission}));await command(\"UpdatePlanMetadata\",p,{title:title.value,description:description.value,acceptanceCriteria:criteria.value,planCreatedAt:p.planCreatedAt.precision===\"instant\"&&date.value===dateLocal(Date.parse(p.planCreatedAt.value))?p.planCreatedAt:{precision:\"dateOnly\",on:date.value,timeZone:zone},confirmDateAnomaly:confirm.checked});window.dispatchEvent(new CustomEvent(\"plan-time-tracker:draft-cleared\",{detail:{submission:draftSubmission.submission}}));await openPlan(p.planId)};if(p.planText){description.closest(\"label\").remove();criteria.closest(\"label\").remove();const metadata=document.createElement(\"details\"),summary=document.createElement(\"summary\");metadata.className=\"plan-metadata\";summary.textContent=\"Изменить название и дату\";metadata.append(summary,edit);box.append(metadata)}else box.append(edit);}const intervals=document.createElement(\"details\"),ih=document.createElement(\"summary\");ih.textContent=\"Интервалы работы\";intervals.append(ih);p.intervals.forEach(i=>{const e=document.createElement(\"p\");e.textContent=dateFmt(i.start_ms)+\" — \"+dateFmt(i.end_ms)+\" · \"+duration((i.end_ms||p.serverNow)-i.start_ms);intervals.append(e)});box.append(intervals);view(\"detail\");window.dispatchEvent(new CustomEvent(\"plan-time-tracker:plan-rendered\",{detail:{planId,successMessage}}))}catch(e){showToast((e.code||\"ERROR\")+\": \"+e.message,true)}}function renderActive(){const el=q(\"#active\");el.replaceChildren();q(\"#activeCount\").textContent=String(activePlans.length);if(!activePlans.length){if(plans.length){const p=document.createElement(\"p\");p.className=\"muted\";p.textContent=\"Активных планов нет. Создайте план и запустите, когда начнёте работу.\";el.append(p)}el.append(btn(\"Создать план\",openModal,\"primary\"));return}for(const plan of activePlans){const panel=document.createElement(\"section\");panel.className=\"active-plan\";panel.dataset.planId=plan.planId;panel.setAttribute(\"aria-label\",plan.title);const title=document.createElement(\"h3\");title.append(btn(plan.title,()=>openPlan(plan.planId),\"plan-open\"));const clock=document.createElement(\"div\");clock.className=\"timer\";clock.dataset.clockPlan=plan.planId;clock.setAttribute(\"aria-label\",\"Активное время: \"+plan.title);clock.textContent=duration(plan.activeMs+Math.max(0,Date.now()-receivedAt));const detail=document.createElement(\"div\");detail.className=\"muted\";detail.textContent=\"Начат \"+dateFmt(plan.firstStartedAt);const actions=document.createElement(\"div\");actions.className=\"actions\";actions.append(btn(\"Пауза\",()=>command(\"PausePlan\",plan)),finishButton(plan,\"Завершить план? Время будет остановлено сервером.\"),deletionButton(plan));panel.append(title,clock,detail,actions);el.append(panel)}}" + UI_PLAN_LISTS + "async function refresh(){const requestId=++refreshRequestId;const [first,w,settings]=await Promise.all([call(\"/api/plans?limit=100\"),call(\"/api/whoami\"),call(\"/api/settings\")]);let collected=[...first.plans],cursor=first.nextCursor;while(cursor){const page=await call(\"/api/plans?limit=100&cursor=\"+encodeURIComponent(cursor));if(requestId!==refreshRequestId)return;collected.push(...page.plans);cursor=page.nextCursor}const nextZone=normalizeZone(settings.timezone),dateParts=Object.fromEntries(new Intl.DateTimeFormat(\"en-CA\",{timeZone:nextZone,year:\"numeric\",month:\"2-digit\",day:\"2-digit\"}).formatToParts(first.serverNow).map(part=>[part.type,part.value])),today=dateParts.year+\"-\"+dateParts.month+\"-\"+dateParts.day;const daily=await call(\"/api/analytics?\"+new URLSearchParams({from:today,to:today,timeZone:nextZone}));if(requestId!==refreshRequestId)return;plans=collected.map(plan=>plan.status===\"RUNNING\"?{...plan,activeMs:plan.activeMs+Math.max(0,daily.serverNow-plan.serverNow),calendarMs:plan.calendarMs+Math.max(0,daily.serverNow-plan.serverNow),serverNow:daily.serverNow}:plan);activePlans=plans.filter(plan=>plan.status===\"RUNNING\");serverNow=daily.serverNow;receivedAt=Date.now();todayActiveMs=daily.totalActiveMs;todayDate=today;zone=nextZone;q(\"#who\").textContent=w.email||\"Личный аккаунт\";q(\"#tz\").value=zone;render();if(!q(\"#view-deleted\").classList.contains(\"hidden\"))await loadDeleted()}function openModal(){modalReturnFocus=document.activeElement;document.body.style.overflow=\"hidden\";q(\"#modal\").classList.remove(\"hidden\");q(\"#createdDate\").value=dateLocal(Date.now());q(\"#title\").focus();}function closeModal(){if(q(\"#create\").getAttribute(\"aria-busy\")===\"true\")return;q(\"#modal\").classList.add(\"hidden\");document.body.style.overflow=\"\";if(modalReturnFocus?.isConnected)modalReturnFocus.focus()}async function loadAnalytics(){const requestId=++analyticsRequestId;const d=new Date(),from=new Date(d);from.setDate(from.getDate()-29);if(!q(\"#from\").value)q(\"#from\").value=dateLocal(from);if(!q(\"#to\").value)q(\"#to\").value=dateLocal(d);const u=new URLSearchParams({from:q(\"#from\").value,to:q(\"#to\").value,timeZone:zone});let a;try{a=await call(\"/api/analytics?\"+u)}catch(error){if(requestId!==analyticsRequestId)return;throw error}if(requestId!==analyticsRequestId)return;const stats=q(\"#stats\");stats.replaceChildren();const medianText=duration(a.completedMedianActiveMs)+(a.completedMedianActiveMs==null?\"\":\" · \"+formatPlanSample(a.completedMeasuredN));[[\"Общее время за период\",duration(a.totalActiveMs)],[\"Завершено планов\",String(a.completedPlans)],[\"Медиана активного времени\",medianText],[\"Сумма времени планов\",duration(a.sumPlanActiveMs)]].forEach(([k,v],index)=>{const box=document.createElement(\"div\"),small=document.createElement(\"small\"),strong=document.createElement(\"strong\");box.className=\"metric\";small.textContent=k;strong.textContent=v;box.append(small,strong);if(index===2&&a.completedSmallSample){const note=document.createElement(\"small\");note.className=\"sample-note\";note.textContent=\"Малая выборка\";note.title=\"Медиана рассчитана по менее чем пяти завершённым планам.\";note.setAttribute(\"aria-label\",\"Малая выборка: менее пяти завершённых планов.\");box.append(note)}stats.append(box)});const chart=q(\"#chart\");chart.replaceChildren();const max=Math.max(1,...a.activeByDay.map(x=>x.activeMs));a.activeByDay.forEach(x=>{const row=document.createElement(\"div\"),date=document.createElement(\"span\"),bar=document.createElement(\"div\"),fill=document.createElement(\"span\"),v=document.createElement(\"span\");row.className=\"barrow\";bar.className=\"bar\";fill.style.width=(100*x.activeMs/max)+\"%\";bar.append(fill);date.textContent=x.date;v.textContent=duration(x.activeMs);row.append(date,bar,v);chart.append(row)});const list=q(\"#analyticPlans\");list.replaceChildren();if(!a.plans.length){const p=document.createElement(\"p\");p.className=\"muted\";p.textContent=\"За выбранный период данных нет.\";list.append(p)}else renderAnalyticsPlanCards(list,a)}function view(name){if(name!==\"detail\")detailRequestId++;all(\"[id^=view-]\").forEach(x=>x.classList.toggle(\"hidden\",x.id!==\"view-\"+name));all(\".nav button\").forEach(b=>b.setAttribute(\"aria-current\",b.dataset.view===(name===\"deleted\"||(name===\"detail\"&&detailReturnView===\"deleted\")?\"settings\":name===\"detail\"?\"plans\":name)?\"page\":\"false\"));if(name===\"deleted\")loadDeleted();if(name===\"analytics\")loadAnalytics().catch(e=>showToast(e.message,true));}all(\".nav button\").forEach(b=>b.onclick=()=>view(b.dataset.view));q(\"#backPlans\").onclick=()=>{view(detailReturnView);if(detailReturnView===\"deleted\")q(\"#deletedHeading\").focus()};q(\"#openDeleted\").onclick=()=>{view(\"deleted\");q(\"#deletedHeading\").focus()};q(\"#backSettings\").onclick=()=>{view(\"settings\");q(\"#openDeleted\").focus()};q(\"#newPlan\").onclick=openModal;q(\"#newPlan2\").onclick=openModal;q(\"#close\").onclick=closeModal;q(\"#cancel\").onclick=closeModal;q(\"#modal\").onclick=e=>{if(e.target.id===\"modal\")closeModal()};q(\"#create\").onsubmit=async e=>{e.preventDefault();const payload={title:q(\"#title\").value,planText:q(\"#description\").value,planCreatedAt:{precision:\"dateOnly\",on:q(\"#createdDate\").value,timeZone:zone}};try{await command(\"CreatePlan\",null,payload);e.target.removeAttribute(\"aria-busy\");closeModal();e.target.reset();showToast(\"План создан. Таймер не запущен.\")}catch(x){showToast((x.code||\"ERROR\")+\": \"+x.message,true)}};q(\"#apply\").onclick=()=>loadAnalytics().catch(e=>showToast(e.message,true));q(\"#settings\").onsubmit=async e=>{e.preventDefault();try{const r=await call(\"/api/settings\",{method:\"POST\",body:JSON.stringify({timezone:q(\"#tz\").value})});zone=normalizeZone(r.timezone);q(\"#tz\").value=zone;window.dispatchEvent(new CustomEvent(\"plan-time-zone-changed\",{detail:zone}));await refresh();showToast(\"Часовой пояс сохранён.\")}catch(x){showToast((x.code||\"ERROR\")+\": \"+x.message,true)}};setInterval(()=>{const elapsed=Math.max(0,Date.now()-receivedAt);for(const plan of activePlans){const clock=all(\"[data-clock-plan]\").find(node=>node.dataset.clockPlan===plan.planId);if(clock)clock.textContent=duration(plan.activeMs+elapsed)}if(todayDate&&dateLocal(serverNow+elapsed)!==todayDate){todayDate=null;refresh().catch(e=>showToast(e.message,true))}else if(q(\"#today\"))q(\"#today\").textContent=duration(todayActiveMs+(activePlans.length?elapsed:0))},1000);refresh().catch(e=>{q(\"#who\").textContent=\"Требуется вход\";showToast(e.message,true)})})();</script></body></html>"
+    "<script>(()=>{" + UI_ANALYTICS + "const q=s=>document.querySelector(s), all=s=>[...document.querySelectorAll(s)];const supportedZones=" + JSON.stringify(UI_TIME_ZONES.map((option) => option.value)) + ";const normalizeZone=value=>supportedZones.includes(value)?value:\"Asia/Omsk\";let plans=[],activePlans=[],deletedRequestId=0,currentDetailPlan=null,detailReturnView=\"plans\",receivedAt=Date.now(),todayActiveMs=0,todayDate=null,refreshRequestId=0,zone=\"Asia/Omsk\",serverNow=Date.now(),pending=new Map(),rejectedValidation=new Set(),rejectedVersion=new Map(),analyticsRequestId=0,detailRequestId=0,timer,modalReturnFocus=null;const uid=()=>crypto.randomUUID();const dateLocal=d=>{const value=Object.fromEntries(new Intl.DateTimeFormat(\"en-CA\",{timeZone:zone,year:\"numeric\",month:\"2-digit\",day:\"2-digit\"}).formatToParts(d).map(part=>[part.type,part.value]));return value.year+\"-\"+value.month+\"-\"+value.day};const duration=n=>{if(n==null)return\"—\";n=Math.max(0,Math.round(n/60000));const day=Math.floor(n/1440),h=Math.floor(n%1440/60),m=n%60;return day?day+\" д \"+h+\" ч \"+m+\" мин\":h?h+\" ч \"+m+\" мин\":m+\" мин\"};const formatPlanSample=n=>{const count=Number(n)||0,lastTwo=count%100;return\"по \"+count+\" \"+((lastTwo>=11&&lastTwo<=14)||count%10!==1?\"планам\":\"плану\")};const dateFmt=n=>n==null?\"—\":new Intl.DateTimeFormat(\"ru-RU\",{dateStyle:\"medium\",timeStyle:\"short\",timeZone:zone}).format(new Date(n));const statusText=status=>({PLANNED:\"Запланирован\",RUNNING:\"Выполняется\",PAUSED:\"На паузе\",COMPLETED:\"Завершён\"})[status]||status;function showToast(t,err){const x=q(\"#toast\");x.textContent=t;x.classList.toggle(\"error\",!!err);x.classList.remove(\"hidden\");clearTimeout(timer);timer=setTimeout(()=>x.classList.add(\"hidden\"),4500)}async function call(path,opt){const r=await fetch(path,{...opt,headers:{\"content-type\":\"application/json\",...(opt&&opt.headers||{})},cache:\"no-store\"});let v={};try{v=await r.json()}catch{}if(!r.ok){const e=new Error(v.error&&v.error.message||\"HTTP \"+r.status);e.status=r.status;e.code=v.error&&v.error.code;e.details=v.error&&v.error.details;throw e}return v}const rejectedTerminal=new Set();async function hasFinalPlanRejection(type,envelope,error){if(error.status!==409||!((type===\"FinishPlan\"&&error.code===\"CHECKPOINTS_INCOMPLETE\")||(type===\"DeletePlan\"&&error.code===\"PLAN_DELETED\")||(type===\"RestorePlan\"&&error.code===\"PLAN_NOT_DELETED\")))return false;try{const receipt=await call(\"/api/tracker/commands/\"+encodeURIComponent(envelope.commandId));return receipt.status===\"FINAL\"&&receipt.commandId===envelope.commandId&&receipt.commandType===envelope.commandType&&receipt.error?.code===error.code&&!receipt.result}catch{return false}}function makeCmd(type,plan,payload){const key=type+\":\"+(plan?plan.planId:\"new\"),nextPayload={...(plan?{planId:plan.planId}:{}),...(payload||{})};let c=pending.get(key);const newVersion=plan?plan.version:undefined;if(c&&rejectedTerminal.has(key)){c=null;pending.delete(key);rejectedTerminal.delete(key)}if(c&&rejectedValidation.has(key)&&JSON.stringify(c.payload)!==JSON.stringify(nextPayload)){c=null;pending.delete(key);rejectedValidation.delete(key)}if(c&&rejectedVersion.has(key)&&c.expectedVersion!==newVersion){c=null;pending.delete(key);rejectedVersion.delete(key)}if(c&&JSON.stringify(c.payload)!==JSON.stringify(nextPayload)){const e=new Error(\"Исход предыдущей команды неизвестен. Повторите её без изменения данных или обновите состояние перед новой командой.\");e.code=\"COMMAND_OUTCOME_UNKNOWN\";throw e}if(!c){c={schemaVersion:1,commandId:uid(),commandType:type,expectedVersion:newVersion,payload:nextPayload};pending.set(key,c)}return [key,c]}async function command(type,plan,payload){let prepared;try{prepared=makeCmd(type,plan,payload)}catch(e){showToast((e.code||\"ERROR\")+\": \"+e.message,true);throw e}const [key,c]=prepared;let r;try{r=await call(\"/api/commands\",{method:\"POST\",body:JSON.stringify(c)});if(r?.commandId!==c.commandId||r.outcome!==\"OK\"||typeof r.applied!==\"boolean\"||typeof r.replayed!==\"boolean\"||r.applied===r.replayed||!r.result||typeof r.result!==\"object\"||Array.isArray(r.result)||r.error){const e=new Error(\"Ответ команды не подтверждает её результат. Повторите запрос без изменения данных.\");e.code=\"COMMAND_OUTCOME_UNKNOWN\";throw e}}catch(e){if(e.code===\"VALIDATION_ERROR\")rejectedValidation.add(key);else if(await hasFinalPlanRejection(type,c,e))rejectedTerminal.add(key);if(e.code===\"VERSION_CONFLICT\"&&Number.isSafeInteger(e.details&&e.details.currentVersion)){rejectedVersion.set(key,e.details.currentVersion);if(plan)plan.version=e.details.currentVersion}showToast((e.code||\"ERROR\")+\": \"+e.message,true);if(e.code===\"VERSION_CONFLICT\")try{await refresh()}catch{}throw e}pending.delete(key);rejectedValidation.delete(key);rejectedVersion.delete(key);rejectedTerminal.delete(key);q(\"#toast\").classList.add(\"hidden\");q(\"#toast\").classList.remove(\"error\");try{await refresh()}catch{showToast(\"Изменение сохранено, но данные не обновились. Перезагрузите страницу.\",true)}return r}window.addEventListener(\"plan-time-tracker:command\",event=>{const detail=event.detail||{};command(detail.commandType,detail.plan,detail.payload).then(detail.resolve,detail.reject)});window.addEventListener(\"plan-time-tracker:refresh-plan\",event=>{const detail=event.detail||{},navigationToken=detailRequestId;(async()=>{await refresh();if(navigationToken===detailRequestId&&!q(\"#view-detail\").classList.contains(\"hidden\")&&q(\"#planDetail\").dataset.planId===detail.planId)await openPlan(detail.planId,detail.successMessage)})().then(detail.resolve,detail.reject)});function btn(text,fn,cls){const b=document.createElement(\"button\");b.textContent=text;if(cls)b.className=cls;b.onclick=async e=>{e.stopPropagation();if(b.disabled)return;b.disabled=true;try{await fn()}catch{}finally{b.disabled=false}};return b}function deletionButton(p){const restoring=p.deletedAt!=null;return btn(restoring?\"Восстановить\":\"Удалить\",async()=>{if(!window.confirm(restoring?\"Восстановить план «\"+p.title+\"»? Таймер останется остановленным.\":\"Удалить план «\"+p.title+\"»? Активное время и попытки будут остановлены. План можно восстановить в настройках, в разделе «Удалённые планы».\"))return;const navigationToken=detailRequestId;await command(restoring?\"RestorePlan\":\"DeletePlan\",p);if(navigationToken===detailRequestId&&q(\"#planDetail\").dataset.planId===p.planId&&!q(\"#view-detail\").classList.contains(\"hidden\"))await openPlan(p.planId)},restoring?\"\":\"danger\")}async function loadDeleted(){const requestId=++deletedRequestId,list=q(\"#deleted\");list.textContent=\"Загружаю удалённые планы…\";try{let page=await call(\"/api/plans?deleted=true&limit=100\"),collected=[...page.plans];while(page.nextCursor){page=await call(\"/api/plans?deleted=true&limit=100&cursor=\"+encodeURIComponent(page.nextCursor));if(requestId!==deletedRequestId)return;collected.push(...page.plans)}if(requestId!==deletedRequestId)return;list.replaceChildren();if(!collected.length)list.textContent=\"Удалённых планов нет.\";else collected.forEach(p=>list.append(card(p)))}catch(error){if(requestId!==deletedRequestId)return;list.textContent=\"Не удалось загрузить удалённые планы. \"+error.message;list.append(btn(\"Повторить\",loadDeleted));}}function finishButton(p,confirmation){let b;if(p.completion&&!p.completion.readyToFinish){b=btn(\"Условия завершения\",()=>openPlan(p.planId));b.title=\"Не выполнены условия этапов: \"+p.completion.incompleteStepCount}else b=btn(\"Завершить\",async()=>{if(!window.confirm(confirmation))return;try{await command(\"FinishPlan\",p)}finally{if(q(\"#planDetail\").dataset.planId===p.planId&&!q(\"#view-detail\").classList.contains(\"hidden\"))await openPlan(p.planId)}},\"danger\");b.dataset.finishPlan=p.planId;return b}window.addEventListener(\"plan-time-tracker:completion-updated\",event=>{const next=event.detail;if(!next?.completion)return;const summaries=[...plans,...activePlans,currentDetailPlan].filter(p=>p&&p.planId===next.planId);for(const p of summaries)p.completion=next.completion;const p=summaries[0];if(p)for(const button of all(\"[data-finish-plan]\"))if(button.dataset.finishPlan===p.planId)button.replaceWith(finishButton(p,\"Завершить план? Сервер остановит таймер.\"))});function card(p){const row=document.createElement(\"div\");row.className=\"row\";row.dataset.planId=p.planId;const left=document.createElement(\"button\"),title=document.createElement(\"span\"),meta=document.createElement(\"span\");left.type=\"button\";left.className=\"plan-open\";left.onclick=()=>openPlan(p.planId);left.setAttribute(\"aria-label\",p.title);title.className=\"row-title\";title.textContent=p.title;meta.className=\"row-meta\";meta.textContent=(p.status===\"RUNNING\"?\"Выполняется\":p.status===\"PAUSED\"?\"Пауза\":p.status===\"COMPLETED\"?\"Завершён\":\"Запланирован\")+\" · активно \"+duration(p.activeMs)+\" · создан \"+dateFmt(p.registeredAt);left.append(title,meta);const right=document.createElement(\"div\");right.className=\"row-right\";const badge=document.createElement(\"span\");badge.className=\"badge \"+p.status.toLowerCase();badge.textContent=statusText(p.status);right.append(badge);if(p.deletedAt!=null){badge.textContent=\"Удалён\";meta.textContent=\"Удалён \"+dateFmt(p.deletedAt)+\" · активно \"+duration(p.activeMs);right.append(deletionButton(p));row.append(left,right);return row}if(p.status===\"PLANNED\"){const start=btn(\"Запустить\",()=>command(\"StartPlan\",p),\"primary\");start.disabled=p.assessmentReadiness?.status!==\"READY\";if(start.disabled)start.title=\"Перед запуском откройте план и проверьте готовность оценки\";right.append(start)}if(p.status===\"RUNNING\")right.append(btn(\"Пауза\",()=>command(\"PausePlan\",p)));if(p.status===\"PAUSED\")right.append(btn(\"Продолжить\",()=>command(\"ResumePlan\",p),\"primary\"));if(p.status===\"RUNNING\"||p.status===\"PAUSED\")right.append(finishButton(p,\"Завершить план? Сервер остановит таймер.\"));right.append(deletionButton(p));row.append(left,right);return row}async function openPlan(planId,successMessage){const returnView=!q(\"#view-detail\").classList.contains(\"hidden\")?detailReturnView:!q(\"#view-deleted\").classList.contains(\"hidden\")?\"deleted\":\"plans\";const requestToken=++detailRequestId;try{const p=(await call(\"/api/plans/\"+encodeURIComponent(planId)+\"\")).plan;if(requestToken!==detailRequestId)return;detailReturnView=returnView;q(\"#backPlans\").textContent=returnView===\"deleted\"?\"← К удалённым планам\":\"← К планам\";currentDetailPlan=p;const box=q(\"#planDetail\");window.dispatchEvent(new CustomEvent(\"plan-time-tracker:plan-will-render\"));box.dataset.planId=planId;box.dataset.planStatus=p.status;box.dataset.deleted=String(p.deletedAt!=null);box.replaceChildren();const h=document.createElement(\"h2\");h.textContent=p.title;box.append(h);const m=document.createElement(\"p\");m.className=\"muted\";m.textContent=\"Дата плана: \"+(p.planCreatedAt.precision===\"dateOnly\"?p.planCreatedAt.on:dateFmt(Date.parse(p.planCreatedAt.value)))+\" · создан \"+dateFmt(p.registeredAt)+\" · \"+statusText(p.status);box.append(m);const deletionActions=document.createElement(\"div\");deletionActions.className=\"actions\";deletionActions.append(deletionButton(p));box.append(deletionActions);if(p.deletedAt!=null){const notice=document.createElement(\"p\");notice.className=\"notice\";notice.textContent=\"План удалён. История доступна только для чтения. Восстановление не запускает таймер.\";box.append(notice)}if(p.deletedAt==null&&(p.status===\"RUNNING\"||p.status===\"PAUSED\")){const actions=document.createElement(\"div\");actions.className=\"actions plan-completion-actions\";actions.append(finishButton(p,\"Завершить план? Сервер остановит таймер.\"));box.append(actions)}for(const label of [...(p.planText?[]:[p.description||\"Описание не задано.\",\"Критерии приёмки: \"+(p.acceptanceCriteria||\"не заданы\")]),\"Активно \"+duration(p.activeMs)+\"; календарное \"+duration(p.calendarMs)+\"; пауза \"+duration(p.pausedMs)]){const e=document.createElement(\"p\");e.textContent=label;box.append(e)}if(p.deletedAt==null){const edit=document.createElement(\"form\");edit.className=\"form\";edit.dataset.trackerForm=\"plan-metadata\";const title=document.createElement(\"input\");title.value=p.title;title.maxLength=200;title.setAttribute(\"aria-label\",\"Название плана\");const description=document.createElement(\"textarea\");description.value=p.description||\"\";description.maxLength=20000;description.setAttribute(\"aria-label\",\"Описание\");const criteria=document.createElement(\"textarea\");criteria.value=p.acceptanceCriteria||\"\";criteria.maxLength=20000;criteria.setAttribute(\"aria-label\",\"Критерии приёмки\");const date=document.createElement(\"input\");date.type=\"date\";date.value=p.planCreatedAt.precision===\"dateOnly\"?p.planCreatedAt.on:dateLocal(Date.parse(p.planCreatedAt.value));date.setAttribute(\"aria-label\",\"Дата составления\");const label=document.createElement(\"label\"),confirm=document.createElement(\"input\");confirm.type=\"checkbox\";confirm.dataset.draftField=\"confirmDateAnomaly\";label.className=\"checkbox-field\";const confirmText=document.createElement(\"span\");confirmText.textContent=\"Подтверждаю дату составления после первого старта\";label.append(confirm,confirmText);const save=document.createElement(\"button\");save.textContent=\"Сохранить изменения\";const labelled=(text,control)=>{const field=document.createElement(\"label\");field.className=\"field\";field.append(document.createTextNode(text),control);return field};edit.append(labelled(\"Название плана\",title),labelled(\"Описание\",description),labelled(\"Критерии приёмки\",criteria),labelled(\"Дата составления\",date),label,save);edit.onsubmit=async e=>{e.preventDefault();const draftSubmission={planId:p.planId,form:edit};window.dispatchEvent(new CustomEvent(\"plan-time-tracker:draft-submitted\",{detail:draftSubmission}));await command(\"UpdatePlanMetadata\",p,{title:title.value,description:description.value,acceptanceCriteria:criteria.value,planCreatedAt:p.planCreatedAt.precision===\"instant\"&&date.value===dateLocal(Date.parse(p.planCreatedAt.value))?p.planCreatedAt:{precision:\"dateOnly\",on:date.value,timeZone:zone},confirmDateAnomaly:confirm.checked});window.dispatchEvent(new CustomEvent(\"plan-time-tracker:draft-cleared\",{detail:{submission:draftSubmission.submission}}));await openPlan(p.planId)};if(p.planText){description.closest(\"label\").remove();criteria.closest(\"label\").remove();const metadata=document.createElement(\"details\"),summary=document.createElement(\"summary\");metadata.className=\"plan-metadata\";summary.textContent=\"Изменить название и дату\";metadata.append(summary,edit);box.append(metadata)}else box.append(edit);}const intervals=document.createElement(\"details\"),ih=document.createElement(\"summary\");ih.textContent=\"Интервалы работы\";intervals.append(ih);p.intervals.forEach(i=>{const e=document.createElement(\"p\");e.textContent=dateFmt(i.start_ms)+\" — \"+dateFmt(i.end_ms)+\" · \"+duration((i.end_ms||p.serverNow)-i.start_ms);intervals.append(e)});box.append(intervals);view(\"detail\");window.dispatchEvent(new CustomEvent(\"plan-time-tracker:plan-rendered\",{detail:{planId,successMessage}}))}catch(e){showToast((e.code||\"ERROR\")+\": \"+e.message,true)}}function renderActive(){const el=q(\"#active\");el.replaceChildren();q(\"#activeCount\").textContent=String(activePlans.length);if(!activePlans.length){if(plans.length){const p=document.createElement(\"p\");p.className=\"muted\";p.textContent=\"Активных планов нет. Создайте план и запустите, когда начнёте работу.\";el.append(p)}el.append(btn(\"Создать план\",openModal,\"primary\"));return}for(const plan of activePlans){const panel=document.createElement(\"section\");panel.className=\"active-plan\";panel.dataset.planId=plan.planId;panel.setAttribute(\"aria-label\",plan.title);const title=document.createElement(\"h3\");title.append(btn(plan.title,()=>openPlan(plan.planId),\"plan-open\"));const clock=document.createElement(\"div\");clock.className=\"timer\";clock.dataset.clockPlan=plan.planId;clock.setAttribute(\"aria-label\",\"Активное время: \"+plan.title);clock.textContent=duration(plan.activeMs+Math.max(0,Date.now()-receivedAt));const detail=document.createElement(\"div\");detail.className=\"muted\";detail.textContent=\"Начат \"+dateFmt(plan.firstStartedAt);const actions=document.createElement(\"div\");actions.className=\"actions\";actions.append(btn(\"Пауза\",()=>command(\"PausePlan\",plan)),finishButton(plan,\"Завершить план? Время будет остановлено сервером.\"),deletionButton(plan));panel.append(title,clock,detail,actions);el.append(panel)}}" + UI_PLAN_LISTS + "async function refresh(){const requestId=++refreshRequestId;const [first,w,settings]=await Promise.all([call(\"/api/plans?limit=100\"),call(\"/api/whoami\"),call(\"/api/settings\")]);let collected=[...first.plans],cursor=first.nextCursor;while(cursor){const page=await call(\"/api/plans?limit=100&cursor=\"+encodeURIComponent(cursor));if(requestId!==refreshRequestId)return;collected.push(...page.plans);cursor=page.nextCursor}const nextZone=normalizeZone(settings.timezone),dateParts=Object.fromEntries(new Intl.DateTimeFormat(\"en-CA\",{timeZone:nextZone,year:\"numeric\",month:\"2-digit\",day:\"2-digit\"}).formatToParts(first.serverNow).map(part=>[part.type,part.value])),today=dateParts.year+\"-\"+dateParts.month+\"-\"+dateParts.day;const daily=await call(\"/api/analytics?\"+new URLSearchParams({from:today,to:today,timeZone:nextZone}));if(requestId!==refreshRequestId)return;plans=collected.map(plan=>plan.status===\"RUNNING\"?{...plan,activeMs:plan.activeMs+Math.max(0,daily.serverNow-plan.serverNow),calendarMs:plan.calendarMs+Math.max(0,daily.serverNow-plan.serverNow),serverNow:daily.serverNow}:plan);activePlans=plans.filter(plan=>plan.status===\"RUNNING\");serverNow=daily.serverNow;receivedAt=Date.now();todayActiveMs=daily.totalActiveMs;todayDate=today;zone=nextZone;q(\"#who\").textContent=w.email||\"Личный аккаунт\";q(\"#tz\").value=zone;render();if(!q(\"#view-deleted\").classList.contains(\"hidden\"))await loadDeleted()}function openModal(){modalReturnFocus=document.activeElement;document.body.style.overflow=\"hidden\";q(\"#modal\").classList.remove(\"hidden\");q(\"#createdDate\").value=dateLocal(Date.now());q(\"#title\").focus();}function closeModal(){if(q(\"#create\").getAttribute(\"aria-busy\")===\"true\")return;q(\"#modal\").classList.add(\"hidden\");document.body.style.overflow=\"\";if(modalReturnFocus?.isConnected)modalReturnFocus.focus()}async function loadAnalytics(){const requestId=++analyticsRequestId;const d=new Date(),from=new Date(d);from.setDate(from.getDate()-29);if(!q(\"#from\").value)q(\"#from\").value=dateLocal(from);if(!q(\"#to\").value)q(\"#to\").value=dateLocal(d);const u=new URLSearchParams({from:q(\"#from\").value,to:q(\"#to\").value,timeZone:zone});let a;try{a=await call(\"/api/analytics?\"+u)}catch(error){if(requestId!==analyticsRequestId)return;throw error}if(requestId!==analyticsRequestId)return;const stats=q(\"#stats\");stats.replaceChildren();const medianText=duration(a.completedMedianActiveMs)+(a.completedMedianActiveMs==null?\"\":\" · \"+formatPlanSample(a.completedMeasuredN));[[\"Общее время за период\",duration(a.totalActiveMs)],[\"Завершено планов\",String(a.completedPlans)],[\"Медиана активного времени\",medianText],[\"Сумма времени планов\",duration(a.sumPlanActiveMs)]].forEach(([k,v],index)=>{const box=document.createElement(\"div\"),small=document.createElement(\"small\"),strong=document.createElement(\"strong\");box.className=\"metric\";small.textContent=k;strong.textContent=v;box.append(small,strong);if(index===2&&a.completedSmallSample){const note=document.createElement(\"small\");note.className=\"sample-note\";note.textContent=\"Малая выборка\";note.title=\"Медиана рассчитана по менее чем пяти завершённым планам.\";note.setAttribute(\"aria-label\",\"Малая выборка: менее пяти завершённых планов.\");box.append(note)}stats.append(box)});const chart=q(\"#chart\");chart.replaceChildren();const max=Math.max(1,...a.activeByDay.map(x=>x.activeMs));a.activeByDay.forEach(x=>{const row=document.createElement(\"div\"),date=document.createElement(\"span\"),bar=document.createElement(\"div\"),fill=document.createElement(\"span\"),v=document.createElement(\"span\");row.className=\"barrow\";bar.className=\"bar\";fill.style.width=(100*x.activeMs/max)+\"%\";bar.append(fill);date.textContent=x.date;v.textContent=duration(x.activeMs);row.append(date,bar,v);chart.append(row)});const list=q(\"#analyticPlans\");list.replaceChildren();if(!a.plans.length){const p=document.createElement(\"p\");p.className=\"muted\";p.textContent=\"За выбранный период данных нет.\";list.append(p)}else renderAnalyticsPlanCards(list,a)}function view(name){if(name!==\"detail\")detailRequestId++;all(\"[id^=view-]\").forEach(x=>x.classList.toggle(\"hidden\",x.id!==\"view-\"+name));all(\".nav button\").forEach(b=>b.setAttribute(\"aria-current\",b.dataset.view===(name===\"deleted\"||(name===\"detail\"&&detailReturnView===\"deleted\")?\"settings\":name===\"detail\"?\"plans\":name)?\"page\":\"false\"));if(name===\"deleted\")loadDeleted();if(name===\"analytics\")loadAnalytics().catch(e=>showToast(e.message,true));}all(\".nav button\").forEach(b=>b.onclick=()=>view(b.dataset.view));q(\"#backPlans\").onclick=()=>{view(detailReturnView);if(detailReturnView===\"deleted\")q(\"#deletedHeading\").focus()};q(\"#openDeleted\").onclick=()=>{view(\"deleted\");q(\"#deletedHeading\").focus()};q(\"#backSettings\").onclick=()=>{view(\"settings\");q(\"#openDeleted\").focus()};q(\"#newPlan\").onclick=openModal;q(\"#newPlan2\").onclick=openModal;q(\"#close\").onclick=closeModal;q(\"#cancel\").onclick=closeModal;q(\"#modal\").onclick=e=>{if(e.target.id===\"modal\")closeModal()};q(\"#create\").onsubmit=async e=>{e.preventDefault();const payload={title:q(\"#title\").value,planText:q(\"#description\").value,planCreatedAt:{precision:\"dateOnly\",on:q(\"#createdDate\").value,timeZone:zone}};try{await command(\"CreatePlan\",null,payload);e.target.removeAttribute(\"aria-busy\");closeModal();e.target.reset();showToast(\"План создан. Таймер не запущен.\")}catch(x){showToast((x.code||\"ERROR\")+\": \"+x.message,true)}};q(\"#apply\").onclick=()=>loadAnalytics().catch(e=>showToast(e.message,true));q(\"#settings\").onsubmit=async e=>{e.preventDefault();try{const r=await call(\"/api/settings\",{method:\"POST\",body:JSON.stringify({timezone:q(\"#tz\").value})});zone=normalizeZone(r.timezone);q(\"#tz\").value=zone;window.dispatchEvent(new CustomEvent(\"plan-time-zone-changed\",{detail:zone}));await refresh();showToast(\"Часовой пояс сохранён.\")}catch(x){showToast((x.code||\"ERROR\")+\": \"+x.message,true)}};setInterval(()=>{const elapsed=Math.max(0,Date.now()-receivedAt);for(const plan of activePlans){const clock=all(\"[data-clock-plan]\").find(node=>node.dataset.clockPlan===plan.planId);if(clock)clock.textContent=duration(plan.activeMs+elapsed)}if(todayDate&&dateLocal(serverNow+elapsed)!==todayDate){todayDate=null;refresh().catch(e=>showToast(e.message,true))}else if(q(\"#today\"))q(\"#today\").textContent=duration(todayActiveMs+(activePlans.length?elapsed:0))},1000);refresh().catch(e=>{q(\"#who\").textContent=\"Требуется вход\";showToast(e.message,true)})})();</script></body></html>"
   ].join("").replace("</head>", "<style>" + UI_FONT_CSS + UI_ANALYTICS_CSS + UI_PLAN_LISTS_CSS + "</style></head>").replace("</body></html>", "<script>" + UI_ENHANCEMENTS + "</script><script>" + UI_TRACKER + UI_ATLM + UI_EXPORT + "</script><script>" + UI_ACCESSIBILITY + "</script><style>" + UI_CONSOLE_PAPER_CSS + UI_TYPOGRAPHY_CSS + "</style></body></html>");
 }
 
@@ -3497,6 +3661,7 @@ function atlmDiagnostics(code, facts = {}) {
     if (facts[key] !== undefined && facts[key] !== null && (typeof facts[key] === "string" || Number.isFinite(facts[key]))) parameters[key] = facts[key];
   if (Array.isArray(facts.missingFields)) parameters.missingFields = facts.missingFields.filter(x => typeof x === "string").slice(0, 20);
   const messages = {
+    ...Object.fromEntries(["ASSESSMENT_REQUIRED","ASSESSMENT_INCOMPLETE","ASSESSMENT_INVALID","ASSESSMENT_SCHEMA_OUTDATED","ASSESSMENT_CONTEXT_CHANGED"].map(reason=>[reason,messageFor(reason)])),
     AVAILABLE:"Модель успешно обучена.",
     MISSING_FEATURES:"До первого запуска не сохранены исходные признаки задачи.",
     HISTORY_RESET:"Исходная оценка удалена при переходе на новую историю ATLM. Для уже начатого плана прогноз задним числом не создаётся.",
@@ -3638,7 +3803,7 @@ export async function getEstimationModelStatus(db, ownerId, nowMs) {
   else if (pending.length || triggerDue) status = "QUEUED";
   const nextAttemptAt = Math.min(...[...(trainPending && train?.next_attempt_at > nowMs ? [train.next_attempt_at] : []),
     ...pending.filter(job => job.status === "RETRY_WAIT" && job.next_attempt_at > nowMs).map(job => job.next_attempt_at)]);
-  return { method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v3", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
+  return { method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v4", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
     forecastScope: "FULL_FROM_FIRST_START", retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
     datasetRevision: state?.dataset_revision ?? 0, eligibleSampleCount: counts?.eligible ?? 0,
     excludedSampleCount: (counts?.total ?? 0) - (counts?.eligible ?? 0), newPlansSinceTraining: newPlans,
@@ -3671,7 +3836,7 @@ async function atlmEnqueueTraining(db, ownerId, nowMs) {
   await db.batch(atlmEnqueueTrainingStatements(db, ownerId, nowMs));
 }
 async function atlmReleaseSuperseded(db, ownerId, job, nowMs) {
-  await db.prepare(`UPDATE estimation_jobs SET status='QUEUED',executor_epoch=executor_epoch+1,lease_until=NULL,attempts=0,next_attempt_at=0,
+  await db.prepare(`UPDATE estimation_jobs SET status='QUEUED',executor_epoch=executor_epoch+2,lease_until=NULL,attempts=0,next_attempt_at=0,
     snapshot_json=NULL,checkpoint_json=NULL,last_error=NULL,updated_at=?
     WHERE owner_id=? AND job_key=? AND fence=? AND generation>? AND status='RUNNING' AND lease_until>?`)
     .bind(nowMs, ownerId, job.job_key, job.fence, job.generation, nowMs).run();
@@ -3679,7 +3844,7 @@ async function atlmReleaseSuperseded(db, ownerId, job, nowMs) {
 async function atlmCheckpoint(db, ownerId, job, checkpoint, nowMs, { snapshot, release = false } = {}) {
   const fields = ["checkpoint_json=?", "updated_at=?"], values = [JSON.stringify(checkpoint), nowMs];
   if (snapshot !== undefined) { fields.push("snapshot_json=?"); values.push(JSON.stringify(snapshot)); }
-  if (release) fields.push("status='QUEUED'", "executor_epoch=executor_epoch+1", "lease_until=NULL");
+  if (release) fields.push("status='QUEUED'", "executor_epoch=executor_epoch+2", "lease_until=NULL");
   return dbFirst(db, `UPDATE estimation_jobs SET ${fields.join(",")}
     WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>? RETURNING *`,
     ...values, ownerId, job.job_key, job.generation, job.fence, nowMs);
@@ -3810,7 +3975,7 @@ async function atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, resu
   if (result.activate) statements.push(db.prepare(`UPDATE estimation_owner_state SET active_model_id=? WHERE owner_id=? AND ${completedGuard}`)
     .bind(snapshot.modelId, ownerId, ...completedValues));
   // Pointer now names the candidate on success; use the same fence and immutable model receipt.
-  statements.push(db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+1,lease_until=NULL,next_attempt_at=0,last_error=?,
+  statements.push(db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+2,lease_until=NULL,next_attempt_at=0,last_error=?,
     checkpoint_json=?,updated_at=? WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?
     AND EXISTS(SELECT 1 FROM estimation_models WHERE owner_id=? AND model_id=? AND status=?)`)
     .bind(result.status === "FAILED" ? result.reason : null,
@@ -3837,7 +4002,7 @@ async function atlmSupersedeSnapshot(db, ownerId, job, snapshot, nowMs) {
       .bind(ownerId, snapshot.modelId, snapshot.modelVersion, JSON.stringify(snapshot.manifest),
         "sha256:" + await hashCommandInput({ manifest: snapshot.manifest, datasetRevision: snapshot.datasetRevision }),
         snapshot.trainCutoff, snapshot.manifest.length, nowMs, ATLM_METHOD.version, ATLM_FEATURE_VERSION, ...values),
-    db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,generation=generation+1,status='QUEUED',executor_epoch=executor_epoch+1,
+    db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,generation=generation+1,status='QUEUED',executor_epoch=executor_epoch+2,
       lease_until=NULL,attempts=0,next_attempt_at=0,snapshot_json=NULL,checkpoint_json=NULL,last_error=NULL,updated_at=?
       WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`)
       .bind(nowMs, ...values),
@@ -3868,7 +4033,7 @@ async function atlmRecordFailure(db, ownerId, job, error, nowMs) {
     manual_epoch=manual_epoch+1,forced_retrain=CASE WHEN NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END,updated_at=?
     WHERE owner_id=? AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?)`)
     .bind(snapshot?.newSampleCount ?? null, snapshot?.newSampleSequence ?? null, code, JSON.stringify(atlmAttemptDiagnostics({reason:code},snapshot,job,nowMs)), nowMs, ownerId, ownerId, job.job_key, job.generation, job.fence, nowMs));
-  statements.push(db.prepare(`UPDATE estimation_jobs SET status=?,executor_epoch=executor_epoch+1,lease_until=NULL,next_attempt_at=?,last_error=?,updated_at=?
+  statements.push(db.prepare(`UPDATE estimation_jobs SET status=?,executor_epoch=executor_epoch+2,lease_until=NULL,next_attempt_at=?,last_error=?,updated_at=?
     WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`)
     .bind(exhausted ? "FAILED" : "RETRY_WAIT", nextAttempt, code, nowMs, ownerId, job.job_key, job.generation, job.fence, nowMs));
   await db.batch(statements);
@@ -3904,7 +4069,7 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
       manual_epoch=manual_epoch+1,forced_retrain=CASE WHEN NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END
       WHERE owner_id=? AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key='train'
         AND status='RUNNING' AND lease_until<=? AND attempts>=4)`).bind(ownerId, expiredAt, ownerId, ownerId, expiredAt),
-    db.prepare(`UPDATE estimation_jobs SET status=CASE WHEN attempts>=4 THEN 'FAILED' WHEN attempts=0 THEN 'QUEUED' ELSE 'RETRY_WAIT' END,executor_epoch=executor_epoch+1,
+    db.prepare(`UPDATE estimation_jobs SET status=CASE WHEN attempts>=4 THEN 'FAILED' WHEN attempts=0 THEN 'QUEUED' ELSE 'RETRY_WAIT' END,executor_epoch=executor_epoch+2,
       next_attempt_at=CASE WHEN attempts>=4 OR attempts=0 THEN 0 ELSE lease_until+CASE attempts WHEN 1 THEN 60000 WHEN 2 THEN 300000 ELSE 900000 END END,
       lease_until=NULL,last_error=CASE WHEN attempts=0 THEN NULL ELSE 'LEASE_EXPIRED' END,updated_at=?
       WHERE owner_id=? AND status='RUNNING' AND lease_until<=?`).bind(expiredAt, ownerId, expiredAt),
@@ -3924,7 +4089,7 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
       if (job.kind === "REFRESH_SAMPLE") {
         const source = await readAtlmSampleSource(db, ownerId, job.plan_id, clock());
         await persistAtlmSample(db, ownerId, source, clock(), { generation: job.generation, fence: job.fence });
-        await db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+1,lease_until=NULL,next_attempt_at=0,last_error=NULL,updated_at=?
+        await db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+2,lease_until=NULL,next_attempt_at=0,last_error=NULL,updated_at=?
           WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`)
           .bind(clock(), ownerId, job.job_key, job.generation, job.fence, clock()).run();
         await atlmReleaseSuperseded(db, ownerId, job, clock());
@@ -4264,7 +4429,7 @@ function mcpTools() {
   return TOOL_NAMES.map((name) => {
     let inputSchema = { type: "object", additionalProperties: false };
     if (Object.hasOwn(ATLM_TOOL_SCHEMAS, name)) return { name, description: ({
-      CalculateAtlmEstimate: "Предпросмотр полного PLAN_ACTIVE до первого StartPlan: приоритет активной ATLM, при расчётной недоступности — явный historical-median по реальной истории. Факты agent-task-v3; без обучения и записи.",
+      CalculateAtlmEstimate: "Предпросмотр полного PLAN_ACTIVE до первого StartPlan: приоритет активной ATLM, при расчётной недоступности — явный historical-median по реальной истории. Факты agent-task-v4; без обучения и записи.",
       GetPlanEstimate: "Текущий read-only расчёт PLANNED (source=CURRENT_INPUT); recordedEstimation сохраняет исходную оценку для аудита. После первого запуска — frozen-снимок; legacy без снимка читает исходную assessment. История не переписывается.",
       GetEstimationModelStatus: "Состояние модели, накопление пригодных планов и очередь обучения владельца. Только чтение.",
       ProcessEstimationTraining: "Один ограниченный проход долговечной очереди владельца. Идемпотентная мутация без planId, с lease и fence; может потребоваться повторный проход.",

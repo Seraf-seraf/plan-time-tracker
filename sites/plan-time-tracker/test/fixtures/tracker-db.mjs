@@ -17,7 +17,12 @@ class Statement {
 }
 export function context(until = migrations.length, { databasePath = ":memory:" } = {}) {
   const sqlite = new DatabaseSync(databasePath);
-  for (const name of migrations.slice(0, until)) sqlite.exec(migration(name));
+  sqlite.exec("PRAGMA foreign_keys=ON");
+  for (const name of migrations.slice(0, until)) {
+    sqlite.exec("BEGIN");
+    try { sqlite.exec(migration(name)); sqlite.exec("COMMIT"); }
+    catch (error) { sqlite.exec("ROLLBACK"); sqlite.close(); throw error; }
+  }
   const db = { sqlite, prepare(sql) { return new Statement(this, sql); }, async batch(statements) {
     sqlite.exec("SAVEPOINT d1_batch");
     try {
@@ -58,6 +63,7 @@ export async function mcp(c, name, args = {}, owner) {
 export async function running(c, requiredChecks = ["unit"], planId = PLAN) {
   await ok(c, "CreatePlan", { planId, title: "Source evidence", planText:"# Source evidence\n\n## Этап 1. Verify source\nChecked source", planCreatedAt: { precision: "dateOnly", on: "2026-10-01", timeZone: "UTC" } });
   const stepId = c.db.sqlite.prepare("SELECT step_id FROM plan_steps WHERE plan_id=?").get(planId).step_id;
+  await assessForStart(c, planId);
   await ok(c, "StartPlan", { planId }, 0);
   await ok(c, "SetStepStatus", {stepId,status:"RUNNING"}, 1);
   return {stepId};
@@ -75,18 +81,18 @@ export const internalCommand = (c, type, payload, version, id) => executeCommand
 
 export function taskV4() {
   return {
-    schemaVersion: "agent-task-v3",
+    schemaVersion: "agent-task-v4",
     workUnits: [{ id: "feature", kind: "MODIFY", description: "Update behavior", evidence: "Requirement" }],
     doneBoundary: "LOCAL_VERIFIED", reuseLevel: 2,
-    components: [], contracts: [], integrations: [], migrationEntities: [], dataVolumeBand: "NONE",
+    components: [], contracts: [], systemBoundaries: [], migrationEntities: [], dataVolumeBand: "NONE",
     requirementsUncertainty: 0, solutionUncertainty: 1, diagnosisState: "NOT_APPLICABLE",
-    unfamiliarTechnologies: null, scopeChangeRisk: 0, verificationKinds: ["UNIT"],
+    learningTargets: [], scopeChangeRisk: 0, verificationKinds: ["UNIT"],
     verificationScenarios: [{ id: "check", description: "Check behavior", evidence: "Requirement" }],
     verificationReadiness: "ADAPT", requiredReviewPasses: 0, environmentReadiness: "READY",
     accessReadiness: "AVAILABLE", deploymentTargets: [],
     execution: { mode: "AI_AGENT", modelId: null, reasoningEffort: null, environmentId: "cloud_workspace", plannedParallelAgents: 1, codebaseFamiliarity: "MAPPED" },
-    evidence: Object.fromEntries(["doneBoundary", "reuseLevel", "dataVolumeBand", "requirementsUncertainty", "solutionUncertainty", "diagnosisState", "scopeChangeRisk", "verificationReadiness", "requiredReviewPasses", "environmentReadiness", "accessReadiness", "execution.mode", "execution.environmentId", "execution.plannedParallelAgents", "execution.codebaseFamiliarity"].map(key => [key, "Known from task"])),
-    unknownReasons: { unfamiliarTechnologies: "Not yet established", "execution.modelId": "Not disclosed", "execution.reasoningEffort": "Not disclosed" },
+    evidence: Object.fromEntries(["systemBoundaries", "learningTargets", "components", "contracts", "migrationEntities", "deploymentTargets", "verificationKinds.UNIT", "doneBoundary", "reuseLevel", "dataVolumeBand", "requirementsUncertainty", "solutionUncertainty", "diagnosisState", "scopeChangeRisk", "verificationReadiness", "requiredReviewPasses", "environmentReadiness", "accessReadiness", "execution.mode", "execution.environmentId", "execution.plannedParallelAgents", "execution.codebaseFamiliarity"].map(key => [key, "Acceptance criteria for local handler change"])),
+    unknownReasons: { "execution.modelId": {reason:"Model not disclosed", checkedSource:"Executor metadata"}, "execution.reasoningEffort": {reason:"Effort not disclosed", checkedSource:"Executor metadata"} },
   };
 }
 
@@ -97,11 +103,11 @@ export function legacyAtlmTask() {
     runtimeContext: { modelId: null, reasoningEffort: null, environmentId: null, plannedParallelAgents: null, provenance: "UNKNOWN" } };
 }
 export function atlmTask() { return taskV4(); }
-export async function atlmAssessment(c, planId = PLAN, task = atlmTask(), overrides = {}) {
-  const response = await mcp(c, "GetAssessment", { planId });
+export async function atlmAssessment(c, planId = PLAN, task = atlmTask(), overrides = {}, owner = OWNER) {
+  const response = await mcp(c, "GetAssessment", { planId }, owner);
   const expectedRequirementsDigest = response.value.result.structuredContent.currentRequirementsDigest;
   return { assessmentId: crypto.randomUUID(), planId, expectedRequirementsDigest, phase: "planning", context: { agentTask: task },
-    method: { id: "agent-task-features", version: "3", scale: { schema: "agent-task-v3" } },
+    method: { id: "agent-task-features", version: "4", scale: { schema: "agent-task-v4" } },
     complexity: { status: "UNKNOWN", value: null, rationale: "Descriptive inputs only" }, unknowns: [], assumptions: [], dependencies: [],
     forecast: { status: "UNKNOWN", metric: "PLAN_ACTIVE", lowerMs: null, upperMs: null, confidence: "UNKNOWN", basis: "No model yet", sampleCount: 0 },
     sources: [], approach: { description: "Modify and verify", rationale: "Existing mechanism" }, ...overrides };
@@ -109,7 +115,7 @@ export async function atlmAssessment(c, planId = PLAN, task = atlmTask(), overri
 export async function plannedAtlm(c, planId = PLAN, task = atlmTask()) {
   await ok(c, "CreatePlan", { planId, title: "ATLM synthetic feature", planText:"# ATLM synthetic feature\n\n## Этап 1. Feature\nChecked change", planCreatedAt: { precision: "dateOnly", on: "2027-01-01", timeZone: "UTC" } });
   const step = {stepId:c.db.sqlite.prepare("SELECT step_id FROM plan_steps WHERE plan_id=?").get(planId).step_id};
-  const assessment = await atlmAssessment(c, planId, task);
+  const assessment = await atlmAssessment(c, planId, task, {predictionRequest:{method:"ATLM",methodVersion:1}});
   await ok(c, "RecordAssessment", assessment, 0);
   return { step, assessment, planId };
 }
@@ -121,4 +127,11 @@ export async function completeAtlm(c, planned, elapsed = 1000) {
   await result(c, lease);
   await ok(c, "FinishPlan", { planId: planned.planId }, 1);
   return lease;
+}
+
+export async function assessForStart(c, planId = PLAN, owner = OWNER) {
+  const assessment = await atlmAssessment(c, planId, taskV4(), {predictionRequest:{method:"ATLM",methodVersion:1}},owner);
+  const saved=await command(c,"RecordAssessment",assessment,0,undefined,owner);
+  assert.equal(saved.status,200,JSON.stringify(saved.value));
+  return assessment;
 }

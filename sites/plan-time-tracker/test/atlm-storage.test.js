@@ -32,12 +32,9 @@ test("missing or outdated pre-start assessment cannot be repaired by a late revi
   try {
     await plannedAtlm(c);
     await ok(c, "UpdatePlanMetadata", { planId: PLAN, title: "Expanded before start" }, 0);
-    await ok(c, "StartPlan", { planId: PLAN }, 1);
-    assert.equal(input(c).selection_status, "MISSING_FEATURES");
-    await ok(c, "RecordAssessment", await atlmAssessment(c), 0);
-    const source = await readAtlmSampleSource(c.db, OWNER, PLAN, c.now());
-    assert.ok(source.reasons.includes("MISSING_FEATURES"));
-    assert.equal(input(c).assessment_sequence, null);
+    const rejected = await command(c, "StartPlan", {planId:PLAN}, 1);
+    assert.equal(rejected.value.error.code, "ASSESSMENT_CONTEXT_CHANGED");
+    assert.equal(input(c), undefined);
   } finally { c.close(); }
 });
 
@@ -89,14 +86,14 @@ test("used source invalidates active model atomically; deletion and restoration 
   try {
     await completeAtlm(c, await plannedAtlm(c));
     const first = await save(c);
-    c.db.sqlite.prepare("UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+1,lease_until=NULL WHERE owner_id=?").run(OWNER);
+    c.db.sqlite.prepare("UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+2,lease_until=NULL WHERE owner_id=?").run(OWNER);
     c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at) VALUES(?, 'model-a',1,'ACTIVE','{}',?,'digest',?,1,?)").run(OWNER, JSON.stringify([Number(first.sample.sampleId)]), c.now(), c.now());
     c.db.sqlite.prepare("UPDATE estimation_owner_state SET active_model_id='model-a' WHERE owner_id=?").run(OWNER);
     c.advance(1); await ok(c, "DeletePlan", { planId: PLAN }, 2);
     assert.equal(c.db.sqlite.prepare("SELECT status FROM estimation_models").get().status, "INVALIDATED");
     assert.equal(c.db.sqlite.prepare("SELECT forced_retrain FROM estimation_owner_state").get().forced_retrain, 1);
     const deleted = await save(c); assert.equal(deleted.sample.eligibility, "EXCLUDED");
-    c.db.sqlite.prepare("UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+1,lease_until=NULL WHERE owner_id=?").run(OWNER);
+    c.db.sqlite.prepare("UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+2,lease_until=NULL WHERE owner_id=?").run(OWNER);
     c.advance(1); await ok(c, "RestorePlan", { planId: PLAN }, 3);
     const restored = await save(c); assert.equal(restored.sample.eligibility, "ELIGIBLE"); assert.equal(restored.sample.firstEligible, false);
     assert.equal(c.db.sqlite.prepare("SELECT new_sample_count FROM estimation_owner_state").get().new_sample_count, 1);
@@ -127,7 +124,7 @@ test("queue bookkeeping cannot move source availability; checkpoint yields do no
     const first = await readAtlmSampleSource(c.db, OWNER, PLAN, c.now());
     const claimed = await claimAtlmJob(c.db, OWNER, 'refresh:' + PLAN, c.now());
     c.advance(500);
-    c.db.sqlite.prepare("UPDATE estimation_jobs SET status='QUEUED',executor_epoch=executor_epoch+1,checkpoint_json='{}',updated_at=? WHERE owner_id=?").run(c.now(), OWNER);
+    c.db.sqlite.prepare("UPDATE estimation_jobs SET status='QUEUED',executor_epoch=executor_epoch+2,checkpoint_json='{}',updated_at=? WHERE owner_id=?").run(c.now(), OWNER);
     const continued = await claimAtlmJob(c.db, OWNER, 'refresh:' + PLAN, c.now());
     assert.equal(continued.attempts, claimed.attempts);
     assert.equal((await readAtlmSampleSource(c.db, OWNER, PLAN, c.now())).sourceAvailableAt, first.sourceAvailableAt);
