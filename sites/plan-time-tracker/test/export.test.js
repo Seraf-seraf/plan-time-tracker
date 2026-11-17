@@ -9,7 +9,7 @@ test('export v2 contains current text/statuses and assessment requirements witho
   const before=rows(c),report=(await call(c,'/api/export')).value;
   assert.equal(report.formatVersion,2);assert.equal(report.plans.length,1);const plan=report.plans[0];
   assert.equal(plan.status,'COMPLETED');assert.equal(plan.activeMs,100);assert.equal(plan.steps[0].status,'DONE');assert.equal(plan.steps[0].version,4);assert.match(plan.steps[0].content,/Checked source/);
-  assert.equal(plan.assessments.length,1);assert.equal(plan.assessments[0].assessment.context.agentTask.schemaVersion,'agent-task-v1');
+  assert.equal(plan.assessments.length,1);assert.equal(plan.assessments[0].assessment.context.agentTask.schemaVersion,'agent-task-v3');
   const forbidden=new Set(['attempts','timeline','journal','events','checks','resultHistory','currentFence','currentResultRevision','leaseUntil','fence']);
   function inspect(value){if(Array.isArray(value))value.forEach(inspect);else if(value&&typeof value==='object')for(const [key,child]of Object.entries(value)){assert(!forbidden.has(key),key);inspect(child);}}inspect(report);
   assert.deepEqual(rows(c),before);

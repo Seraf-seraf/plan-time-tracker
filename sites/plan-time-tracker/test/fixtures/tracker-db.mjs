@@ -90,17 +90,18 @@ export function taskV4() {
   };
 }
 
-export function atlmTask() {
+export function legacyAtlmTask() {
   return { schemaVersion: "agent-task-v1", profile: { workKind: "MODIFY_MECHANISM", reuseState: "PARTIAL", doneBoundary: "LOCAL_VERIFIED" },
     outcomes: [{ id: "feature", description: "Change existing behavior", evidence: "Synthetic requirement" }], changedContracts: [], verificationKinds: ["UNIT"],
     profileEvidence: { workKind: "Existing behavior changes", reuseState: "Existing mechanism needs modification", doneBoundary: "Local checked result" },
     runtimeContext: { modelId: null, reasoningEffort: null, environmentId: null, plannedParallelAgents: null, provenance: "UNKNOWN" } };
 }
+export function atlmTask() { return taskV4(); }
 export async function atlmAssessment(c, planId = PLAN, task = atlmTask(), overrides = {}) {
   const response = await mcp(c, "GetAssessment", { planId });
   const expectedRequirementsDigest = response.value.result.structuredContent.currentRequirementsDigest;
   return { assessmentId: crypto.randomUUID(), planId, expectedRequirementsDigest, phase: "planning", context: { agentTask: task },
-    method: { id: "agent-task-features", version: "1", scale: { schema: "agent-task-v1" } },
+    method: { id: "agent-task-features", version: "3", scale: { schema: "agent-task-v3" } },
     complexity: { status: "UNKNOWN", value: null, rationale: "Descriptive inputs only" }, unknowns: [], assumptions: [], dependencies: [],
     forecast: { status: "UNKNOWN", metric: "PLAN_ACTIVE", lowerMs: null, upperMs: null, confidence: "UNKNOWN", basis: "No model yet", sampleCount: 0 },
     sources: [], approach: { description: "Modify and verify", rationale: "Existing mechanism" }, ...overrides };

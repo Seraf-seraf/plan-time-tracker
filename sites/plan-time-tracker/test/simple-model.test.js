@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync,readdirSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {context,ok,call,command,mcp,running,rows,PLAN,OWNER,migrations,atlmTask,plannedAtlm} from './fixtures/tracker-db.mjs';
-import {getEstimationModelStatus,predictWithActiveModel,normalizeAgentTaskV1,readAtlmSampleSource} from '../worker/index.js';
+import {getEstimationModelStatus,predictWithActiveModel,normalizeAgentTask,readAtlmSampleSource} from '../worker/index.js';
 
 const retiredTables=['step_attempts','tracker_sessions','tracker_journal','tracker_owner_state','tracker_plan_config','step_results','step_checks','step_acceptances','step_source_snapshots','step_source_checks','step_result_snapshots','step_snapshot_checks','plan_events','plan_document_sections','repositories','commits'];
 const retiredCommands=['CreateStep','UpdateStep','ClaimStepAttempt','RenewStepLease','CloseStepAttempt','StartStep','BlockStep','RecordStepResult','RecordCheck','AppendObservation'];
@@ -104,9 +104,9 @@ const canonicalDirectory=new URL('../drizzle/',import.meta.url);
 const canonicalPaths=migrations.map(name=>new URL(name,canonicalDirectory));
 const chains=[['canonical',canonicalPaths]];
 if(process.env.SITES_SOURCE_ROOT){const dir=resolve(process.env.SITES_SOURCE_ROOT,'drizzle');chains.push(['Sites',readdirSync(dir).filter(n=>n.endsWith('.sql')).sort().map(n=>resolve(dir,n))]);}
-for(const [name,paths] of chains)test(`${name} populated migration deletes the old model and preserves active plans, requirements, timers and ATLM artifacts`,async()=>{
+for(const [name,paths] of chains)test(`${name} populated migration preserves plans and timers while resetting incompatible ATLM history`,async()=>{
  const c=populatedContext(paths);try{
-  const preserved=['plans','work_intervals','plan_documents','plan_date_history','assessment_revisions','plan_estimation_inputs','estimation_samples','estimation_models','estimation_owner_state','estimation_jobs'];
+  const preserved=['plans','work_intervals','plan_documents','plan_date_history'];
   const before=Object.fromEntries(preserved.map(t=>[t,c.db.sqlite.prepare(`SELECT * FROM "${t}" ORDER BY rowid`).all()]));
   const requirements=c.db.sqlite.prepare('SELECT * FROM assessment_targets ORDER BY owner_id,plan_id,step_id').all(),steps=c.db.sqlite.prepare('SELECT owner_id,step_id,plan_id,ordinal,title,status,version FROM plan_steps ORDER BY step_id').all();
   c.db.sqlite.exec('BEGIN;');const sql=paths.slice(paths.findIndex(path=>String(path).endsWith('0021_simple_steps.sql'))).map(path=>readFileSync(path,'utf8')).join('\n');
@@ -115,21 +115,14 @@ for(const [name,paths] of chains)test(`${name} populated migration deletes the o
   c.db.sqlite.exec(sql);
   assert.deepEqual(c.db.sqlite.prepare('PRAGMA foreign_key_check').all(),[]);c.db.sqlite.exec('COMMIT;');
   for(const table of preserved){
-    const added=table==='estimation_owner_state'?{last_training_diagnostics_json:null}:table==='plan_estimation_inputs'?{forecast_json:null}:null;
-    const expected=added?before[table].map(row=>Object.assign(Object.create(Object.getPrototypeOf(row)),row,added)):before[table];
-    assert.deepEqual(c.db.sqlite.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all(),expected,table);
+    assert.deepEqual(c.db.sqlite.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all(),before[table],table);
   }
   assert.deepEqual(c.db.sqlite.prepare('SELECT * FROM assessment_targets ORDER BY owner_id,plan_id,step_id').all(),requirements);
   assert.deepEqual(c.db.sqlite.prepare('SELECT owner_id,step_id,plan_id,ordinal,title,status,version FROM plan_steps ORDER BY step_id').all(),steps);
-  const status=await getEstimationModelStatus(c.db,fixture.owner,c.now());assert.equal(status.activeModel,null);assert.equal(status.eligibleSampleCount,15);
-  assert.equal((await predictWithActiveModel(c.db,fixture.owner,normalizeAgentTaskV1(atlmTask()).features,c.now())).unavailableReason,'MODEL_INVALIDATED');
-  const retrained=await mcp(c,'StartTraining',{},fixture.owner);assert.equal(retrained.value.result.isError,undefined,JSON.stringify(retrained.value));
-  assert.equal(retrained.value.result.structuredContent.activeModel,null);
-  assert.equal(retrained.value.result.structuredContent.lastReason,'MEDIAN_BASELINE_NOT_WORSE','unchanged constant history ties the median');
-  const next=await plannedAtlm(c,crypto.randomUUID());
-  const preview=(await mcp(c,'EstimatePlanTime',{planId:next.planId,expectedRequirementsDigest:next.assessment.expectedRequirementsDigest,agentTask:atlmTask()},fixture.owner)).value.result.structuredContent;
-  assert.equal(preview.method.id,'historical-median');assert.equal(preview.pointMs,1000);
-  const completed=before.plans.find(p=>p.status==='COMPLETED'),source=await readAtlmSampleSource(c.db,fixture.owner,completed.plan_id,c.now());assert.equal(source.eligibility,'ELIGIBLE');assert.equal(source.actualMs,1000);
+  for (const table of ['assessment_revisions','plan_estimation_inputs','estimation_samples','estimation_models','estimation_jobs'])
+    assert.equal(c.db.sqlite.prepare(`SELECT COUNT(*) n FROM "${table}"`).get().n,0,table);
+  const status=await getEstimationModelStatus(c.db,fixture.owner,c.now());assert.equal(status.activeModel,null);assert.equal(status.eligibleSampleCount,0);
+  const completed=before.plans.find(p=>p.status==='COMPLETED'),source=await readAtlmSampleSource(c.db,fixture.owner,completed.plan_id,c.now());assert.equal(source.eligibility,'EXCLUDED');assert.equal(source.actualMs,1000);
   const current=(await call(c,`/api/tracker/plans/${fixture.runningPlanId}/execution`)).value;assert.equal(current.plan.status,'RUNNING');assert.equal(current.steps[0].status,'RUNNING');assert.equal(current.steps[0].content,'Original expected result');
   c.advance(25);await ok(c,'SetStepStatus',{stepId:current.steps[0].step_id,status:'DONE'},current.steps[0].version);await ok(c,'FinishPlan',{planId:fixture.runningPlanId},current.plan.version);
   assert.equal((await call(c,`/api/plans/${fixture.runningPlanId}`)).value.plan.activeMs,50);

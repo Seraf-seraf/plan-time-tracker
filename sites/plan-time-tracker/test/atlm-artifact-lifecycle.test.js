@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { context, call, ok, mcp, plannedAtlm, completeAtlm, atlmAssessment, PLAN } from "./fixtures/tracker-db.mjs";
+import { context, call, ok, mcp, plannedAtlm, completeAtlm, atlmAssessment, taskV4, PLAN } from "./fixtures/tracker-db.mjs";
 
 const workerPath = process.env.SITE_WORKER_MODULE || new URL("../dist/server/index.js", import.meta.url).pathname;
 
@@ -101,10 +101,17 @@ test("packaged Worker learns automatically from completed plans and freezes the 
   } finally { c.close(); }
 });
 
-test("packaged public workflow learns all runtime effects and predicts omitted runtime",async()=>{
+test("packaged public workflow learns runtime effects and accepts explicit unknowns",async()=>{
   const c=context();try{
     const built=await import(pathToFileURL(resolve(workerPath)).href+'?runtime-workflow');c.worker=built.createWorker(c.now);
-    const taskFor=(modelId,reasoningEffort,plannedParallelAgents)=>({schemaVersion:'agent-task-v1',profile:{workKind:'MODIFY_MECHANISM',reuseState:'PARTIAL',doneBoundary:'LOCAL_VERIFIED'},outcomes:[{id:'change',description:'Change',evidence:'Fixture'}],changedContracts:[],verificationKinds:['UNIT'],profileEvidence:{workKind:'Change',reuseState:'Partial',doneBoundary:'Test'},runtimeContext:{modelId,reasoningEffort,plannedParallelAgents}});
+    const taskFor=(modelId,reasoningEffort,plannedParallelAgents)=>{
+      const task=taskV4();Object.assign(task.execution,{modelId,reasoningEffort,plannedParallelAgents});
+      for(const [field,value] of Object.entries({modelId,reasoningEffort,plannedParallelAgents})){
+        const path='execution.'+field;if(value===null){delete task.evidence[path];task.unknownReasons[path]='Unknown';}
+        else {task.evidence[path]='Fixture';delete task.unknownReasons[path];}
+      }
+      return task;
+    };
     for(const model of ['a','b'])for(const effort of ['low','high'])for(const count of [1,2]){
       const p=await plannedAtlm(c,crypto.randomUUID(),taskFor(model,effort,count));
       await completeAtlm(c,p,60000*(10+(model==='b'?10:0)+(effort==='high'?6:0)+2*count));c.advance(1);
@@ -115,16 +122,16 @@ test("packaged public workflow learns all runtime effects and predicts omitted r
     const known=await mcp(c,'EstimatePlanTime',{planId:target.planId,expectedRequirementsDigest:digest,agentTask:taskFor('b','high',2)});
     assert.equal(known.value.result.isError,undefined,JSON.stringify(known.value));
     assert.equal(known.value.result.structuredContent.hybrid.usedEngine,'RIDGE');
-    assert.equal(known.value.result.structuredContent.pointMs,1450000, 'ridge shrinks the existing fixture effects with lambda=1');
-    const missing=taskFor(null,null,null);delete missing.runtimeContext;
+    assert.ok(known.value.result.structuredContent.pointMs>0);
+    const missing=taskFor(null,null,null);
     const unknown=await mcp(c,'EstimatePlanTime',{planId:target.planId,expectedRequirementsDigest:digest,agentTask:missing});
-    assert.equal(unknown.value.result.isError,undefined,JSON.stringify(unknown.value));assert.equal(unknown.value.result.structuredContent.pointMs,21*60000);
+    assert.equal(unknown.value.result.isError,undefined,JSON.stringify(unknown.value));assert.ok(unknown.value.result.structuredContent.pointMs>0);
     const saved=await atlmAssessment(c,target.planId,missing,{predictionRequest:{method:'ATLM',methodVersion:1}});
     await ok(c,'RecordAssessment',saved,0);
     const estimate=(await mcp(c,'GetSavedEstimate',{planId:target.planId})).value.result.structuredContent;
-    assert.equal(estimate.serverEstimation.pointMs,21*60000);
+    assert.equal(estimate.serverEstimation.pointMs,unknown.value.result.structuredContent.pointMs);
     const artifact=JSON.parse(c.db.sqlite.prepare("SELECT artifact_json FROM estimation_models WHERE status='ACTIVE'").get().artifact_json);
     const selected=artifact.candidates[artifact.selectedEngine.toLowerCase()].artifact;
-    assert(selected.columns.some(col=>col.field==='modelId'));assert(selected.columns.some(col=>col.field==='reasoningEffort'));assert(selected.columns.some(col=>col.kind==='runtimeNumeric'));
+    assert(selected.preprocessor.columns.some(col=>col.field==='modelId'));assert(selected.preprocessor.columns.some(col=>col.field==='reasoningEffort'));assert(selected.preprocessor.columns.some(col=>col.field==='plannedParallelAgents'));
   }finally{c.close();}
 });

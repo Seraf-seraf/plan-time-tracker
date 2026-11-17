@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { context, command, ok, mcp, atlmTask, taskV4, atlmAssessment, PLAN } from "./fixtures/tracker-db.mjs";
+import { context, command, ok, mcp, legacyAtlmTask, taskV4, atlmAssessment, PLAN } from "./fixtures/tracker-db.mjs";
 
 test("v4 normalizer rejects the retired task schema", async () => {
   const { normalizeAgentTask } = await import("../worker/index.js");
   assert.equal(typeof normalizeAgentTask, "function");
-  assert.throws(() => normalizeAgentTask(atlmTask()), error => error.code === "VALIDATION_ERROR");
+  assert.throws(() => normalizeAgentTask(legacyAtlmTask()), error => error.code === "VALIDATION_ERROR");
 });
 
 test("ATLM v4 distinguishes confirmed empty facts from missing facts", async () => {
@@ -131,7 +131,7 @@ test("MCP accepts a v4 task for a planned assessment", async () => {
     await ok(c, "CreatePlan", { planId: PLAN, title: "ATLM v4", planText: "# ATLM v4\n\n## Этап 1. Проверка\nИзменение", planCreatedAt: { precision: "dateOnly", on: "2027-01-01", timeZone: "UTC" } });
     const response = await command(c, "RecordAssessment", await atlmAssessment(c, PLAN, taskV4(), { predictionRequest: { method: "ATLM", methodVersion: 1 } }), 0);
     assert.equal(response.status, 200, JSON.stringify(response.value));
-    const old = await command(c, "RecordAssessment", await atlmAssessment(c, PLAN, atlmTask()), 0);
+    const old = await command(c, "RecordAssessment", await atlmAssessment(c, PLAN, legacyAtlmTask()), 0);
     assert.equal(old.status, 400);
     const digest = (await mcp(c, "GetAssessment", { planId: PLAN })).value.result.structuredContent.currentRequirementsDigest;
     const estimate = await mcp(c, "EstimatePlanTime", { planId: PLAN, expectedRequirementsDigest: digest, agentTask: taskV4() });

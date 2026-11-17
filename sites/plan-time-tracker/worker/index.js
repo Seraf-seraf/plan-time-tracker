@@ -898,6 +898,8 @@ function messageFor(code) {
     ATLM_MODEL_CHANGED: "Модель или исходная история изменились во время расчёта. Получите свежую оценку новой командой.",
     DATASET_CHANGED: "Набор обучающих данных изменился. Начните выгрузку заново.",
     ASSESSMENT_SOURCE_NOT_FOUND: "Исторический источник оценки недоступен.",
+    ASSESSMENT_SCHEMA_RETIRED: "Исходная оценка удалена при переходе на новую схему ATLM; повтор команды не создаёт оценку.",
+    ATLM_CLIENT_RETIRED: "Клиент использует прежний формат прогноза. Обновите приложение и повторите запуск плана.",
     PLAN_PAUSED: "План на паузе. Сначала явно возобновите его.",
     PLAN_COMPLETED: "Завершённый план не принимает новые этапы.",
     INVALID_TRANSITION: "Команда недоступна в текущем состоянии плана.",
@@ -940,6 +942,8 @@ function resultFromReceipt(row, replayed) {
 
 function mapDbError(error) {
   const message=String(error?.message||"");
+  if(message.includes("ATLM_CLIENT_RETIRED"))return appError("ATLM_CLIENT_RETIRED",messageFor("ATLM_CLIENT_RETIRED"),409);
+  if(message.includes("ASSESSMENT_SCHEMA_RETIRED"))return appError("ASSESSMENT_SCHEMA_RETIRED",messageFor("ASSESSMENT_SCHEMA_RETIRED"),409);
   if(message.includes("WORK_INTERVAL_OVERLAP"))return appError("VALIDATION_ERROR","Рабочие интервалы не могут пересекаться.");
   if(message.includes("CHECK constraint failed"))return appError("VALIDATION_ERROR","Данные нарушают ограничения модели.");
   return error;
@@ -1379,7 +1383,7 @@ export async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
 
 export async function claimAtlmJob(db, ownerId, jobKey, nowMs, leaseMs = 60000, { allowExpiredLease = true } = {}) {
   if (!Number.isSafeInteger(nowMs) || !Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw appError("VALIDATION_ERROR", "Invalid ATLM lease.");
-  return dbFirst(db, `UPDATE estimation_jobs SET status='RUNNING',lease_until=?,fence=fence+1,attempts=attempts+CASE WHEN status='QUEUED' AND checkpoint_json IS NOT NULL THEN 0 ELSE 1 END
+  return dbFirst(db, `UPDATE estimation_jobs SET status='RUNNING',lease_until=?,fence=fence+1,executor_epoch=executor_epoch+1,attempts=attempts+CASE WHEN status='QUEUED' AND checkpoint_json IS NOT NULL THEN 0 ELSE 1 END
     WHERE owner_id=? AND job_key=? AND generation>processed_generation AND next_attempt_at<=?
       AND status<>'FAILED' AND (attempts<4 OR (status='QUEUED' AND checkpoint_json IS NOT NULL AND attempts<=4))
       AND (? OR status<>'RUNNING') AND (status<>'RUNNING' OR lease_until<=?) RETURNING *`, nowMs + leaseMs, ownerId, jobKey, nowMs, allowExpiredLease ? 1 : 0, nowMs);
@@ -1494,7 +1498,7 @@ async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
   if (target.status !== "PLANNED" || target.first_started_at !== null) prediction = { status: "UNAVAILABLE", unavailableReason: "UNSUPPORTED_FORECAST_SCOPE", diagnostics:atlmDiagnostics("UNSUPPORTED_FORECAST_SCOPE",{status:target.status,firstStartedAt:target.first_started_at}) };
   else if (normalized.missingFields.length) prediction = { status: "UNAVAILABLE", unavailableReason: "MISSING_REQUIRED_FEATURES", missingFields: normalized.missingFields, diagnostics:atlmDiagnostics("MISSING_REQUIRED_FEATURES",{missingFields:normalized.missingFields}) };
   else prediction = await earlyForecast(db,ownerId,args.planId,await predictWithActiveModel(db, ownerId, normalized.features, nowMs),nowMs);
-  return { formatVersion: 1, metric: "PLAN_ACTIVE", forecastScope: "FULL_FROM_FIRST_START", method: prediction.method ?? { ...ATLM_METHOD },
+  return { formatVersion: 2, metric: "PLAN_ACTIVE", forecastScope: "FULL_FROM_FIRST_START", method: prediction.method ?? { ...ATLM_METHOD },
     status: prediction.status, pointMs: prediction.pointMs ?? null, modelId: prediction.modelId ?? null, modelVersion: prediction.modelVersion ?? null,
     requirementsDigest: target.requirementsDigest, featureDigest: "sha256:" + await hashCommandInput(normalized.features), calculatedAt: nowMs,
     sampleCount: prediction.sampleCount ?? 0, evaluation: prediction.evaluation ?? null,
@@ -1530,7 +1534,7 @@ async function currentPlanForecast(db, ownerId, planId, nowMs) {
     const assessment=input.assessment_json?JSON.parse(input.assessment_json):null;
     const digest="sha256:"+await hashCommandInput(JSON.parse(input.requirements_json));
     let estimation;
-    const unavailable=code=>({formatVersion:1,metric:"PLAN_ACTIVE",forecastScope:"FULL_FROM_FIRST_START",
+    const unavailable=code=>({formatVersion:2,metric:"PLAN_ACTIVE",forecastScope:"FULL_FROM_FIRST_START",
       method:{...ATLM_METHOD},status:"UNAVAILABLE",pointMs:null,modelId:null,modelVersion:null,requirementsDigest:digest,
       calculatedAt:nowMs,sampleCount:0,accuracy:"NOT_VALIDATED",evaluation:null,interval:null,confidence:"UNKNOWN",
       unavailableReason:code,diagnostics:atlmDiagnostics(code)});
@@ -1562,9 +1566,10 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
   const current = await currentPlanForecast(db,ownerId,args.planId,nowMs);
   if(current)return current.result;
   const row = await dbFirst(db, `SELECT p.status,p.first_started_at,p.deleted_at,t.requirements_json AS current_requirements_json,
-      a.assessment_id,a.revision,a.requirements_digest,a.assessment_json,i.forecast_json
+      a.assessment_id,a.revision,a.requirements_digest,a.assessment_json,i.forecast_json,i.requirements_json AS input_requirements_json,i.plan_id AS input_plan_id,o.data_reset_at
     FROM plans p JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id AND t.step_id IS NULL
     LEFT JOIN plan_estimation_inputs i ON i.owner_id=p.owner_id AND i.plan_id=p.plan_id
+    LEFT JOIN estimation_owner_state o ON o.owner_id=p.owner_id
     LEFT JOIN assessment_revisions a ON a.owner_id=p.owner_id AND a.plan_id=p.plan_id AND a.sequence=CASE
       WHEN p.first_started_at IS NOT NULL THEN i.assessment_sequence
       ELSE (SELECT MAX(latest.sequence) FROM assessment_revisions latest WHERE latest.owner_id=p.owner_id AND latest.plan_id=p.plan_id
@@ -1573,13 +1578,21 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
   if (!row) throw appError("PLAN_NOT_FOUND", messageFor("PLAN_NOT_FOUND"), 404);
   if(row.status==="PLANNED"&&row.first_started_at===null&&row.deleted_at===null)
     throw appError("ASSESSMENT_CONTEXT_CHANGED","Статус плана изменился. Повторите обновление прогноза.",409);
+  if (row.first_started_at !== null && row.input_plan_id === null && row.data_reset_at !== null && row.first_started_at <= row.data_reset_at) {
+    const diagnostics = atlmDiagnostics("HISTORY_RESET");
+    return { formatVersion: 1, planId: args.planId, assessmentId: null, assessmentRevision: null, source: "HISTORY_RESET",
+      serverEstimation: null, recordedEstimation: null, diagnostics,
+      forecastAvailability: { planStatus: row.status, deleted: row.deleted_at !== null, canCalculate: false, canRefreshSaved: false,
+        calculationMethod: null, reason: "HISTORY_RESET", diagnostics }, isStale: false, staleReasons: [], serverNow: nowMs };
+  }
   const recordedEstimation = row.assessment_json ? JSON.parse(row.assessment_json).serverEstimation ?? null : null;
   const serverEstimation = row.forecast_json !== null ? JSON.parse(row.forecast_json) : recordedEstimation;
   const staleReasons = [];
   if (serverEstimation) {
     if (row.deleted_at !== null) staleReasons.push("PLAN_DELETED");
     const digest = "sha256:" + await hashCommandInput(JSON.parse(row.current_requirements_json));
-    if (digest !== row.requirements_digest) staleReasons.push("SCOPE_CHANGED");
+    const frozenDigest = row.requirements_digest ?? (row.input_requirements_json ? "sha256:" + await hashCommandInput(JSON.parse(row.input_requirements_json)) : null);
+    if (digest !== frozenDigest) staleReasons.push("SCOPE_CHANGED");
     else if (row.first_started_at !== null && (await readAtlmSampleSource(db, ownerId, args.planId, nowMs)).reasons.includes("SCOPE_CHANGED")) staleReasons.push("SCOPE_CHANGED");
     if(serverEstimation.fallback?.kind==="HISTORICAL_MEDIAN"){
       const current=await historicalMedianForecast(db,ownerId,args.planId,nowMs);
@@ -1673,7 +1686,7 @@ async function executeAtlmTool(db, ownerId, name, args, nowMs, clock) {
   if (name === "StartEstimationTraining") {
     await db.batch([
       db.prepare("INSERT OR IGNORE INTO estimation_owner_state(owner_id) SELECT owner_id FROM owners WHERE owner_id=?").bind(ownerId),
-      db.prepare("UPDATE estimation_owner_state SET forced_retrain=1, updated_at=? WHERE owner_id=?").bind(nowMs, ownerId),
+      db.prepare("UPDATE estimation_owner_state SET forced_retrain=1, manual_epoch=manual_epoch+1, updated_at=? WHERE owner_id=?").bind(nowMs, ownerId),
     ]);
   }
   return processEstimationTraining(db, ownerId, nowMs, { clock });
@@ -2064,6 +2077,19 @@ function validateTrackerCommand(envelope) {
 }
 
 async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
+  // Retired receipts must be found before the new assessment schema rejects an
+  // otherwise identical retry of an old command.
+  if (envelope?.commandType === "RecordAssessment" && envelope.schemaVersion === 1 && UUID.test(envelope.commandId || "")
+    && Number.isSafeInteger(envelope.expectedVersion) && envelope.expectedVersion >= 0 && isPlainRecord(envelope.payload)) {
+    const retired = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=? AND outcome_code='ASSESSMENT_SCHEMA_RETIRED'", identity.ownerId, envelope.commandId);
+    if (retired) {
+      validateAssessmentValue(envelope.payload, {}, "payload");
+      const hash = await payloadHash(envelope);
+      if (envelope.payloadHash !== undefined && envelope.payloadHash !== hash) throw appError("VALIDATION_ERROR", "payloadHash не совпадает с конвертом.");
+      if (!await receiptMatchesCommand(retired, envelope, hash)) throw appError("IDEMPOTENCY_KEY_REUSED", messageFor("IDEMPOTENCY_KEY_REUSED"), 409);
+      return resultFromReceipt(retired, true);
+    }
+  }
   validateTrackerCommand(envelope);
   const hash = await payloadHash(envelope);
   let receipt = await dbFirst(db, "SELECT * FROM command_receipts WHERE owner_id=? AND command_id=?", identity.ownerId, envelope.commandId);
@@ -2218,7 +2244,7 @@ export async function executeCommand(db, identity, envelope, channel, nowMs) {
         if(error.code!=="SOURCE_UNAVAILABLE")throw error;
         const input=await currentForecastInput(db,identity.ownerId,planId);
         if(canonical(input)!==canonical(initial))throw appError("ASSESSMENT_CONTEXT_CHANGED",messageFor("ASSESSMENT_CONTEXT_CHANGED"),409);
-        current={input,result:{serverEstimation:{formatVersion:1,metric:"PLAN_ACTIVE",forecastScope:"FULL_FROM_FIRST_START",
+        current={input,result:{serverEstimation:{formatVersion:2,metric:"PLAN_ACTIVE",forecastScope:"FULL_FROM_FIRST_START",
           status:"UNAVAILABLE",pointMs:null,method:{...ATLM_METHOD},modelId:null,modelVersion:null,calculatedAt:nowMs,
           requirementsDigest:"sha256:"+await hashCommandInput(JSON.parse(input.requirements_json)),
           sampleCount:0,accuracy:"NOT_VALIDATED",evaluation:null,interval:null,confidence:"UNKNOWN",
@@ -3220,6 +3246,7 @@ function atlmDiagnostics(code, facts = {}) {
   const messages = {
     AVAILABLE:"Модель успешно обучена.",
     MISSING_FEATURES:"До первого запуска не сохранены исходные признаки задачи.",
+    HISTORY_RESET:"Исходная оценка удалена при переходе на новую историю ATLM. Для уже начатого плана прогноз задним числом не создаётся.",
     MISSING_REQUIRED_FEATURES:"Не заполнены обязательные параметры: " + (parameters.missingFields?.join(", ") || "workUnits, doneBoundary") + ".",
     SCOPE_CHANGED:"Требования плана изменились. Сохраните актуальную оценку исходных признаков: expectedRequirementsDigest не совпадает.",
     INCOMPLETE_FEATURES:"Не заполнены обязательные параметры: " + (parameters.missingFields?.join(", ") || "missingFields не сохранён") + ".",
@@ -3399,7 +3426,7 @@ async function atlmEnqueueTraining(db, ownerId, nowMs) {
   await db.batch(atlmEnqueueTrainingStatements(db, ownerId, nowMs));
 }
 async function atlmReleaseSuperseded(db, ownerId, job, nowMs) {
-  await db.prepare(`UPDATE estimation_jobs SET status='QUEUED',lease_until=NULL,attempts=0,next_attempt_at=0,
+  await db.prepare(`UPDATE estimation_jobs SET status='QUEUED',executor_epoch=executor_epoch+1,lease_until=NULL,attempts=0,next_attempt_at=0,
     snapshot_json=NULL,checkpoint_json=NULL,last_error=NULL,updated_at=?
     WHERE owner_id=? AND job_key=? AND fence=? AND generation>? AND status='RUNNING' AND lease_until>?`)
     .bind(nowMs, ownerId, job.job_key, job.fence, job.generation, nowMs).run();
@@ -3407,7 +3434,7 @@ async function atlmReleaseSuperseded(db, ownerId, job, nowMs) {
 async function atlmCheckpoint(db, ownerId, job, checkpoint, nowMs, { snapshot, release = false } = {}) {
   const fields = ["checkpoint_json=?", "updated_at=?"], values = [JSON.stringify(checkpoint), nowMs];
   if (snapshot !== undefined) { fields.push("snapshot_json=?"); values.push(JSON.stringify(snapshot)); }
-  if (release) fields.push("status='QUEUED'", "lease_until=NULL");
+  if (release) fields.push("status='QUEUED'", "executor_epoch=executor_epoch+1", "lease_until=NULL");
   return dbFirst(db, `UPDATE estimation_jobs SET ${fields.join(",")}
     WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>? RETURNING *`,
     ...values, ownerId, job.job_key, job.generation, job.fence, nowMs);
@@ -3525,14 +3552,14 @@ async function atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, resu
   const completedValues = [...guardValues, ownerId, snapshot.modelId, result.activate ? "ACTIVE" : "REJECTED"];
   statements.push(db.prepare(`UPDATE estimation_owner_state SET last_attempted_new_sample_count=MAX(last_attempted_new_sample_count,?),
     last_attempted_new_sample_sequence=MAX(last_attempted_new_sample_sequence,?),last_training_status=?,last_training_reason=?,last_training_diagnostics_json=?,updated_at=?,
-    forced_retrain=CASE WHEN dataset_revision=? AND NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END
+    manual_epoch=manual_epoch+1,forced_retrain=CASE WHEN dataset_revision=? AND NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END
     WHERE owner_id=? AND ${completedGuard}`)
     .bind(snapshot.newSampleCount, snapshot.newSampleSequence, result.status, result.reason, JSON.stringify(atlmAttemptDiagnostics(result,snapshot,job,nowMs)), nowMs, snapshot.datasetRevision, ownerId, ...completedValues));
   // Update the pointer last, after all guards which compare the old pointer.
   if (result.activate) statements.push(db.prepare(`UPDATE estimation_owner_state SET active_model_id=? WHERE owner_id=? AND ${completedGuard}`)
     .bind(snapshot.modelId, ownerId, ...completedValues));
   // Pointer now names the candidate on success; use the same fence and immutable model receipt.
-  statements.push(db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',lease_until=NULL,next_attempt_at=0,last_error=?,
+  statements.push(db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+1,lease_until=NULL,next_attempt_at=0,last_error=?,
     checkpoint_json=?,updated_at=? WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?
     AND EXISTS(SELECT 1 FROM estimation_models WHERE owner_id=? AND model_id=? AND status=?)`)
     .bind(result.status === "FAILED" ? result.reason : null,
@@ -3556,7 +3583,7 @@ async function atlmSupersedeSnapshot(db, ownerId, job, snapshot, nowMs) {
       .bind(ownerId, snapshot.modelId, snapshot.modelVersion, JSON.stringify(snapshot.manifest),
         "sha256:" + await hashCommandInput({ manifest: snapshot.manifest, datasetRevision: snapshot.datasetRevision }),
         snapshot.trainCutoff, snapshot.manifest.length, nowMs, ATLM_METHOD.version, ATLM_FEATURE_VERSION, ...values),
-    db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,generation=generation+1,status='QUEUED',
+    db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,generation=generation+1,status='QUEUED',executor_epoch=executor_epoch+1,
       lease_until=NULL,attempts=0,next_attempt_at=0,snapshot_json=NULL,checkpoint_json=NULL,last_error=NULL,updated_at=?
       WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`)
       .bind(nowMs, ...values),
@@ -3576,10 +3603,10 @@ async function atlmRecordFailure(db, ownerId, job, error, nowMs) {
     last_attempted_new_sample_count=MAX(last_attempted_new_sample_count,COALESCE(?,new_sample_count)),
     last_attempted_new_sample_sequence=MAX(last_attempted_new_sample_sequence,COALESCE(?,(SELECT MAX(sequence) FROM estimation_samples WHERE owner_id=estimation_owner_state.owner_id),0)),
     last_training_status='FAILED',last_training_reason=?,last_training_diagnostics_json=?,
-    forced_retrain=CASE WHEN NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END,updated_at=?
+    manual_epoch=manual_epoch+1,forced_retrain=CASE WHEN NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END,updated_at=?
     WHERE owner_id=? AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?)`)
     .bind(snapshot?.newSampleCount ?? null, snapshot?.newSampleSequence ?? null, code, JSON.stringify(atlmAttemptDiagnostics({reason:code},snapshot,job,nowMs)), nowMs, ownerId, ownerId, job.job_key, job.generation, job.fence, nowMs));
-  statements.push(db.prepare(`UPDATE estimation_jobs SET status=?,lease_until=NULL,next_attempt_at=?,last_error=?,updated_at=?
+  statements.push(db.prepare(`UPDATE estimation_jobs SET status=?,executor_epoch=executor_epoch+1,lease_until=NULL,next_attempt_at=?,last_error=?,updated_at=?
     WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`)
     .bind(exhausted ? "FAILED" : "RETRY_WAIT", nextAttempt, code, nowMs, ownerId, job.job_key, job.generation, job.fence, nowMs));
   await db.batch(statements);
@@ -3601,10 +3628,10 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
         COALESCE((SELECT json_extract(snapshot_json,'$.newSampleSequence') FROM estimation_jobs WHERE owner_id=estimation_owner_state.owner_id AND job_key='train'),
           (SELECT MAX(sequence) FROM estimation_samples WHERE owner_id=estimation_owner_state.owner_id),0)),
       last_training_status='FAILED',last_training_reason='LEASE_EXPIRED',updated_at=?,
-      forced_retrain=CASE WHEN NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END
+      manual_epoch=manual_epoch+1,forced_retrain=CASE WHEN NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END
       WHERE owner_id=? AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key='train'
         AND status='RUNNING' AND lease_until<=? AND attempts>=4)`).bind(ownerId, expiredAt, ownerId, ownerId, expiredAt),
-    db.prepare(`UPDATE estimation_jobs SET status=CASE WHEN attempts>=4 THEN 'FAILED' WHEN attempts=0 THEN 'QUEUED' ELSE 'RETRY_WAIT' END,
+    db.prepare(`UPDATE estimation_jobs SET status=CASE WHEN attempts>=4 THEN 'FAILED' WHEN attempts=0 THEN 'QUEUED' ELSE 'RETRY_WAIT' END,executor_epoch=executor_epoch+1,
       next_attempt_at=CASE WHEN attempts>=4 OR attempts=0 THEN 0 ELSE lease_until+CASE attempts WHEN 1 THEN 60000 WHEN 2 THEN 300000 ELSE 900000 END END,
       lease_until=NULL,last_error=CASE WHEN attempts=0 THEN NULL ELSE 'LEASE_EXPIRED' END,updated_at=?
       WHERE owner_id=? AND status='RUNNING' AND lease_until<=?`).bind(expiredAt, ownerId, expiredAt),
@@ -3622,7 +3649,7 @@ export async function processEstimationTraining(db, ownerId, nowMs, options = {}
       if (job.kind === "REFRESH_SAMPLE") {
         const source = await readAtlmSampleSource(db, ownerId, job.plan_id, clock());
         await persistAtlmSample(db, ownerId, source, clock(), { generation: job.generation, fence: job.fence });
-        await db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',lease_until=NULL,next_attempt_at=0,last_error=NULL,updated_at=?
+        await db.prepare(`UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+1,lease_until=NULL,next_attempt_at=0,last_error=NULL,updated_at=?
           WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`)
           .bind(clock(), ownerId, job.job_key, job.generation, job.fence, clock()).run();
         await atlmReleaseSuperseded(db, ownerId, job, clock());
