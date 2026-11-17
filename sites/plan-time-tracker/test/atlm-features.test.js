@@ -15,12 +15,12 @@ test("ATLM v4 distinguishes confirmed empty facts from missing facts", async () 
   const result = normalizeAgentTask(input);
   assert.deepEqual(input, original);
   assert.deepEqual(result.agentTask.components, []);
-  assert.equal(result.agentTask.unfamiliarTechnologies, null);
+  assert.deepEqual(result.agentTask.learningTargets, []);
   assert.equal(result.features.reuseLevel, 2);
   assert.equal(result.features.requiredReviewPasses, 0);
   assert.equal(result.features["workUnits.MODIFY"], 1);
   assert.equal(result.features["components.CREATE"], 0);
-  assert.equal(result.features.unfamiliarTechnologies, null);
+  assert.equal(result.features["learningTargets.OTHER"], 0);
   assert.equal(result.features["verificationKinds.UNIT"], 1);
   assert.equal(result.features["verificationKinds.UI_E2E"], 0);
   const badDebug = structuredClone(input);
@@ -34,8 +34,13 @@ test("ATLM v4 distinguishes confirmed empty facts from missing facts", async () 
   assert.equal(normalizeAgentTask(duplicates).features["workUnits.MODIFY"], 1);
   duplicates.workUnits[1].evidence = "Conflicting evidence";
   assert.throws(() => normalizeAgentTask(duplicates), error => error.code === "VALIDATION_ERROR");
+  for (const placeholder of ["из задачи", "проверено", "неизвестно", " TODO ", "Evidence", "TBD", "…"]) {
+    const task = structuredClone(input); task.evidence.doneBoundary = placeholder;
+    assert.throws(() => normalizeAgentTask(task), error => error.details?.readiness === "INCOMPLETE");
+  }
   const many = structuredClone(input);
   many.components = Array.from({ length: 101 }, (_, i) => ({ key: `component-${i}`, change: "MODIFY", evidence: "Requirement" }));
+  delete many.evidence.components;
   assert.equal(normalizeAgentTask(many).features["components.MODIFY"], 101);
   const knownId = structuredClone(input);
   knownId.execution.modelId = "UNKNOWN";
@@ -53,8 +58,8 @@ test("v4 preprocessing fits imputation and open categories on the training prefi
   const base = normalizeAgentTask(taskV4()).features;
   const prefix = [
     { "components.MODIFY": 0, reuseLevel: 1, modelId: "known" },
-    { "components.MODIFY": 3, reuseLevel: null, modelId: "known" },
-    { "components.MODIFY": null, reuseLevel: 3, modelId: "known" },
+    { "components.MODIFY": 3, reuseLevel: 2, modelId: "known" },
+    { "components.MODIFY": 1, reuseLevel: 3, modelId: "known" },
     { "components.MODIFY": 1, reuseLevel: 2, modelId: null },
   ].map(row => ({ ...base, ...row }));
   const result = fitAtlmV4Preprocessor(prefix);
@@ -68,7 +73,7 @@ test("v4 preprocessing fits imputation and open categories on the training prefi
   const after = fitAtlmV4Preprocessor([...prefix, { ...prefix[0], modelId: "future" }]);
   assert.deepEqual(encodeAtlmV4Features({ ...prefix[0], modelId: "unseen" }, result.manifest), before);
   assert.notDeepEqual(after.manifest, result.manifest);
-  assert.ok(result.manifest.columns.some(column => column.kind === "missing" && column.field === "reuseLevel"));
+  assert.ok(result.manifest.droppedColumns.some(column => column.kind === "missing" && column.field === "reuseLevel"));
   const reserved = fitAtlmV4Preprocessor(["OTHER", "OTHER", "OTHER", "UNKNOWN", "UNKNOWN", "UNKNOWN", null].map(modelId => ({ ...base, modelId })));
   assert.deepEqual(reserved.manifest.openCategories.modelId, ["OTHER", "UNKNOWN"]);
   assert.notDeepEqual(encodeAtlmV4Features({ ...base, modelId: "UNKNOWN" }, reserved.manifest).row,
@@ -91,16 +96,9 @@ test("v4 OLS and ridge use the full feature manifest and log1p target", async ()
   const ols = await fitAtlmV4Regression(rows, "OLS");
   assert.equal(ols.status, "AVAILABLE");
   assert.equal(predictAtlmV4Regression(ols.artifact, rows[1].features).pointMs, 60000);
-  const expectedFields = [
-    ...['CREATE','MODIFY','DEBUG','REFACTOR','MIGRATE','VERIFY','ANALYZE','OPERATE'].map(kind => `workUnits.${kind}`),
-    'doneBoundary', 'reuseLevel', ...['CREATE','MODIFY','REMOVE'].map(kind => `components.${kind}`),
-    ...['API','MCP','EVENT','STORAGE','UI','CONFIG','BREAKING','REMOVE'].map(kind => `contracts.${kind}`),
-    ...['USE','CHANGE','ADD'].map(kind => `integrations.${kind}`), 'migrationEntities', 'dataVolumeBand',
-    'requirementsUncertainty', 'solutionUncertainty', 'diagnosisState', 'unfamiliarTechnologies', 'scopeChangeRisk',
-    ...['BUILD_STATIC','UNIT','INTEGRATION','UI_E2E','DEPLOY_SMOKE'].map(kind => `verificationKinds.${kind}`),
-    'verificationScenarios', 'verificationReadiness', 'requiredReviewPasses', 'environmentReadiness', 'accessReadiness',
-    'deploymentTargets', 'mode', 'modelId', 'reasoningEffort', 'environmentId', 'plannedParallelAgents', 'codebaseFamiliarity',
-  ].sort();
+  const expectedFields = Object.keys(base).sort();
+  for (const field of ["writeRatio", "writeCount", "work.MODIFY", "role.SDK", "learningTargets.TOOLING", "idempotency.EXISTING", "recovery.IMPLEMENT"])
+    assert.ok(expectedFields.includes(field), field);
   assert.deepEqual(ols.artifact.preprocessor.fields, expectedFields);
   const represented = new Set([...ols.artifact.preprocessor.columns, ...ols.artifact.preprocessor.droppedColumns].map(column => column.field));
   for (const field of expectedFields) assert.ok(represented.has(field), field);
@@ -138,7 +136,7 @@ test("MCP accepts a v4 task for a planned assessment", async () => {
     assert.equal(estimate.value.result.isError, undefined, JSON.stringify(estimate.value));
     const incomplete = taskV4(); incomplete.workUnits = null; incomplete.unknownReasons.workUnits = "Results not specified";
     const missing = await mcp(c, "EstimatePlanTime", { planId: PLAN, expectedRequirementsDigest: digest, agentTask: incomplete });
-    assert.equal(missing.value.result.structuredContent.unavailableReason, "MISSING_REQUIRED_FEATURES");
+    assert.equal(missing.value.result.isError, true);
   } finally { c.close(); }
 });
 
@@ -163,13 +161,61 @@ test("v4 assessment stores normalized facts and keeps receipt identity", async (
 
 test("v4 environmentId is a closed enum and missing is explicit", async () => {
   const { normalizeAgentTask } = await import("../worker/index.js");
-  for (const value of ["local", "cloud_workspace", null]) {
+  for (const value of ["local", "cloud_workspace"]) {
     const task = taskV4(); task.execution.environmentId = value;
-    if (value === null) task.unknownReasons["execution.environmentId"] = "Not known";
     assert.equal(normalizeAgentTask(task).agentTask.execution.environmentId, value);
   }
-  for (const value of ["UNKNOWN", "local workspace", " local ", "", { name: "local" }]) {
+  for (const value of [null, "UNKNOWN", "local workspace", " local ", "", { name: "local" }]) {
     const task = taskV4(); task.execution.environmentId = value;
     assert.throws(() => normalizeAgentTask(task), error => error.code === "VALIDATION_ERROR");
   }
+});
+
+test("v4 schema requires bounded operations and independent learning targets", async () => {
+  const { AGENT_TASK_SCHEMA: schema } = await import("../worker/index.js");
+  const { goldenCases, exceptionalCases } = await import("./fixtures/atlm-v4-golden.mjs");
+  assert.ok(goldenCases.length + exceptionalCases.length >= 20);
+  assert.deepEqual(schema.properties.schemaVersion.enum, ["agent-task-v4"]);
+  assert.deepEqual(schema.required.slice().sort(), Object.keys(schema.properties).sort());
+  const operation = schema.properties.systemBoundaries.items.properties.operations.items;
+  assert.deepEqual(operation.required.slice().sort(), Object.keys(operation.properties).sort());
+  assert.deepEqual(operation.properties.action.enum, ["READ","WRITE"]);
+  assert.equal(operation.additionalProperties, false);
+  assert.equal(schema.properties.learningTargets.type, "array");
+});
+
+test("canonical operation features distinguish volume, mix and ownership", async () => {
+  const { goldenCases, goldenBoundary, exceptionalCases } = await import("./fixtures/atlm-v4-golden.mjs");
+  const { normalizeAgentTask } = await import("../worker/index.js");
+  function input(row) {
+    const task = taskV4();
+    task.systemBoundaries = goldenBoundary(row);
+    if (task.systemBoundaries.length) delete task.evidence.systemBoundaries;
+    return task;
+  }
+  for (const row of goldenCases) {
+    const task = input(row);
+    const normalized = normalizeAgentTask(task);
+    const [, , control, , reads, writes] = row;
+    assert.deepEqual([normalized.features.readCount, normalized.features.writeCount, normalized.features.foreignWriteCount],
+      [reads, writes, control === "FOREIGN" ? writes : 0], row[0]);
+    assert.equal(normalized.features.writeRatio, writes / (reads + writes || 1));
+    task.systemBoundaries[0]?.operations.reverse();
+    assert.deepEqual(normalizeAgentTask(task), normalized);
+  }
+  for (const [requirement, mutate, expected] of exceptionalCases) {
+    const task = input(goldenCases[0]);
+    mutate(task, task.systemBoundaries[0].operations[0]);
+    if (expected === "READY") assert.equal(normalizeAgentTask(task).features.operationCount, 10);
+    else assert.throws(() => normalizeAgentTask(task), err => err.details?.readiness === expected, requirement);
+  }
+});
+
+test("diagnostics keep unrecognized evidence keys out of field paths", async () => {
+  const {normalizeAgentTask} = await import("../worker/index.js");
+  const task = taskV4();
+  const unknownKey = "untrusted\nfield";
+  task.unknownReasons[unknownKey] = {};
+  assert.throws(() => normalizeAgentTask(task), error =>
+    error.code === "VALIDATION_ERROR" && error.details?.path === "agentTask.unknownReasons");
 });
