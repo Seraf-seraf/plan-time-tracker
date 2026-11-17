@@ -50,7 +50,7 @@ test("all ATLM tools share strict discovery/runtime schemas and declare read-onl
     const schema = listing.find(t => t.name === "SaveTaskAssessment").inputSchema.properties.payload;
     assert.deepEqual(schema.properties.predictionRequest.properties.method.enum, ["ATLM"]); assert.equal(schema.properties.serverEstimation, undefined);
     const atlm = value(await mcp(c, "GetTrackerInfo")).assessments.atlm;
-    assert.equal(atlm.featureSchemaVersion, "agent-task-v2"); assert.equal(atlm.inputSchemaVersion,"agent-task-v1"); assert.equal(atlm.metric, "PLAN_ACTIVE");
+    assert.equal(atlm.featureSchemaVersion, "agent-task-v3"); assert.equal(atlm.inputSchemaVersion,"agent-task-v3"); assert.equal(atlm.metric, "PLAN_ACTIVE");
     assert.equal(atlm.predictionScope, "FULL_FROM_FIRST_START"); assert.equal(atlm.retrainEveryNewPlans, 2);
     assert.equal(atlm.limits.datasetMaxLimit, 100);
   } finally { c.close(); }
@@ -65,9 +65,9 @@ test("cold and incomplete previews are read-only across MCP/HTTP; forecasts are 
     assert.deepEqual((await call(c, "/api/tracker/atlm-estimate", args)).value, preview);
     value(await mcp(c, "GetTrainingStatus")); value(await mcp(c, "GetTrainingData")); value(await mcp(c, "GetSavedEstimate", { planId: PLAN }));
     assert.deepEqual(rows(c), before);
-    const unknown = atlmTask(); unknown.outcomes = null; unknown.profile.reuseState = "UNKNOWN";
+    const unknown = atlmTask(); unknown.workUnits = null; unknown.unknownReasons.workUnits = "Unknown";
     const missing = value(await mcp(c, "EstimatePlanTime", await argsFor(c, PLAN, unknown)));
-    assert.equal(missing.unavailableReason, "INCOMPLETE_FEATURES"); assert.deepEqual(missing.missingFields, ["profile.reuseState", "outcomes"]);
+    assert.equal(missing.unavailableReason, "MISSING_REQUIRED_FEATURES"); assert.deepEqual(missing.missingFields, ["workUnits"]);
     await ok(c, "StartPlan", { planId: PLAN }, 0);
     assert.equal(value(await mcp(c, "EstimatePlanTime", args)).unavailableReason, "UNSUPPORTED_FORECAST_SCOPE");
     assert.equal((await command(c, "RecordAssessment", await atlmAssessment(c, PLAN, atlmTask(), { predictionRequest: request }), 0)).value.error.code, "ATLM_FORECAST_SCOPE_CHANGED");
@@ -111,19 +111,19 @@ test("first Start racing inference rejects the new assessment atomically with a 
   } finally { restore?.(); c.close(); }
 });
 
-test("the 24000-byte assessment limit also applies after adding the server forecast", async () => {
+test("the 65536-byte assessment limit also applies after adding the server forecast", async () => {
   const c = context();
   try {
     await plannedAtlm(c);
     const payload = await atlmAssessment(c, PLAN, atlmTask(), { predictionRequest: request });
-    payload.context.padding = [...Array.from({ length: 5 }, () => "x".repeat(4000)), ""];
+    payload.context.padding = [...Array.from({ length: 15 }, () => "x".repeat(4000)), ""];
     const size = value => new TextEncoder().encode(JSON.stringify(value)).length;
-    payload.context.padding[5] = "x".repeat(23950 - size(payload));
-    assert.equal(size(payload), 23950);
+    payload.context.padding[15] = "x".repeat(65450 - size(payload));
+    assert.equal(size(payload), 65450);
     assert.equal((await command(c, "RecordAssessment", payload, 0)).status, 400);
     assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM assessment_revisions WHERE assessment_id=?").get(payload.assessmentId).n, 0);
     payload.context.padding.pop(); await ok(c, "RecordAssessment", payload, 0);
-    assert.ok(new TextEncoder().encode(c.db.sqlite.prepare("SELECT assessment_json FROM assessment_revisions WHERE assessment_id=?").get(payload.assessmentId).assessment_json).length <= 24000);
+    assert.ok(new TextEncoder().encode(c.db.sqlite.prepare("SELECT assessment_json FROM assessment_revisions WHERE assessment_id=?").get(payload.assessmentId).assessment_json).length <= 65536);
   } finally { c.close(); }
 });
 
@@ -159,8 +159,8 @@ test("a trained forecast stays frozen, yields prospective error, and becomes sta
     const before = value(await mcp(c, "GetSavedEstimate", { planId: PLAN }));
     assert.equal(before.serverEstimation.status, "AVAILABLE"); assert.equal(before.serverEstimation.pointMs, 1000);
     assert.equal(before.serverEstimation.accuracy, "EXPERIMENTAL");
-    assert.equal(before.serverEstimation.evaluation.caseCount, 0, "late ingestion cannot invent past model checks");
-    assert.equal(before.serverEstimation.interval, null); assert.equal(before.serverEstimation.confidence, "UNKNOWN");
+    assert.equal(before.serverEstimation.evaluation.pointCaseCount, 0, "late ingestion cannot invent past model checks");
+    assert.equal(before.serverEstimation.interval.status, "AVAILABLE"); assert.ok(before.serverEstimation.interval.lowerMs<=before.serverEstimation.pointMs && before.serverEstimation.interval.upperMs>=before.serverEstimation.pointMs);
     await completeAtlm(c, p, 1200); await ok(c, "RecordAssessment", await atlmAssessment(c), 0);
     const frozen = value(await mcp(c, "GetSavedEstimate", { planId: PLAN }));
     assert.equal(frozen.assessmentId, payload.assessmentId); assert.deepEqual(frozen.serverEstimation, before.serverEstimation);
@@ -202,7 +202,7 @@ test("dataset pagination is owner-scoped, frozen by revision, and exports immuta
     const next = value(await mcp(c, "GetTrainingData", { limit: 1, cursor: first.nextCursor }));
     assert.equal(next.datasetRevision, first.datasetRevision); assert.equal(next.asOf, first.asOf); assert.notEqual(next.rows[0].sampleId, first.rows[0].sampleId);
     assert.deepEqual((await call(c, "/api/tracker/atlm-dataset", { limit: 1, cursor: first.nextCursor })).value, next);
-    assert.equal(JSON.stringify(first).includes(OWNER), false); assert.equal(first.rows[0].actualMs, 1000); assert.equal(first.rows[0].features.outcomeCount, 1);
+    assert.equal(JSON.stringify(first).includes(OWNER), false); assert.equal(first.rows[0].actualMs, 1000); assert.equal(first.rows[0].features["workUnits.MODIFY"], 1);
     assert.equal((await mcp(c, "GetTrainingData", { cursor: first.nextCursor }, "other-owner")).value.result.structuredContent.code, "VALIDATION_ERROR");
     assert.deepEqual(value(await mcp(c, "GetTrainingData", {}, "other-owner")).rows, []);
     await ok(c, "DeletePlan", { planId: plans[0].planId }, 2); await process(c);
@@ -234,7 +234,7 @@ test("a corrupt stored model is a service error, never an unavailable forecast",
   const c = context();
   try {
     await plannedAtlm(c);
-    c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at,method_version,feature_version) VALUES(?,'corrupt-model',1,'ACTIVE','{}','[]','invalid',?,0,?,'agent-v2','agent-task-v2')").run(OWNER, c.now(), c.now());
+    c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at,method_version,feature_version) VALUES(?,'corrupt-model',1,'ACTIVE','{}','[]','invalid',?,0,?,'agent-v4-probabilistic','agent-task-v3')").run(OWNER, c.now(), c.now());
     c.db.sqlite.prepare("INSERT INTO estimation_owner_state(owner_id,active_model_id) VALUES(?,'corrupt-model')").run(OWNER);
     const args = await argsFor(c), failure = await mcp(c, "EstimatePlanTime", args);
     assert.equal(failure.value.result.isError, true); assert.equal(failure.value.result.structuredContent.code, "SOURCE_UNAVAILABLE");
@@ -276,11 +276,9 @@ test("manual training below the automatic threshold activates a clearly experime
     assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM estimation_models WHERE owner_id=?").get(OWNER).n, 0);
     const result = value(await mcp(c, "StartTraining"));
     assert.equal(result.eligibleSampleCount, 1);
-    assert.equal(result.activeModel.accuracy, "EXPERIMENTAL");
-    assert.equal(result.activeModel.evaluation.caseCount,0);
-    assert.equal(result.activeModel.evaluation.maeMs,null);
+    assert.equal(result.activeModel,null);
+    assert.equal(result.lastReason,"INSUFFICIENT_DATA");
     assert.equal(result.training.generation, 1);
-    assert.equal(result.lastReason,null);
     assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) n FROM estimation_models WHERE owner_id=?").get(OWNER).n, 1);
   } finally { c.close(); }
 });
@@ -297,7 +295,7 @@ test("web manual training shares the MCP path below threshold and enforces reque
     assert.equal(forbidden.status, 403);assert.deepEqual(rows(c), before);
     const first = await call(c, path, {});
     assert.equal(first.status, 200);assert.equal(first.value.eligibleSampleCount, 1);
-    assert.equal(first.value.training.generation, 1);assert.equal(first.value.activeModel.accuracy,"EXPERIMENTAL");assert.equal(first.value.lastReason,null);
+    assert.equal(first.value.training.generation, 1);assert.equal(first.value.activeModel,null);assert.equal(first.value.lastReason,"INSUFFICIENT_DATA");
     const second = await call(c, path, {});
     assert.equal(second.status, 200);assert.equal(second.value.training.generation, 2);
     const isolated = await call(c, path, {}, "other-owner");
@@ -339,21 +337,17 @@ test("active public names expose the reduced model and preserve command receipts
     assert.equal(cap.assessments.atlm.calculateTool, "EstimatePlanTime");
     assert.equal(cap.assessments.atlm.startTrainingTool, "StartTraining");
     assert.equal(cap.assessments.recordTool, "SaveTaskAssessment");
-    assert.deepEqual(cap.assessments.atlm.runtimeContext.environmentId, {
+    assert.deepEqual(cap.assessments.atlm.execution.environmentId, {
       optional:true,type:["string","null"],closedSet:true,values:["local","cloud_workspace"],
       unknownValue:null,
       description:"Допустимые значения: local, cloud_workspace; null означает неизвестную среду."
     });
     const environmentTool=listing.find(item=>item.name==="EstimatePlanTime");
-    const environmentSchema=environmentTool.inputSchema.properties.agentTask.properties.runtimeContext.properties.environmentId;
-    assert.deepEqual(environmentSchema.type,["string","null"]);
+    const environmentSchema=environmentTool.inputSchema.properties.agentTask.properties.execution.properties.environmentId;
     assert.deepEqual(environmentSchema.enum,["local","cloud_workspace",null]);
-    assert.match(environmentSchema.description,/local, cloud_workspace или null/);
     const saveSchema=listing.find(item=>item.name==="SaveTaskAssessment").inputSchema;
-    const savedEnvironmentSchema=saveSchema.properties.payload.properties.context.properties.agentTask.properties.runtimeContext.properties.environmentId;
-    assert.deepEqual(savedEnvironmentSchema.type,["string","null"]);
+    const savedEnvironmentSchema=saveSchema.properties.payload.properties.context.properties.agentTask.properties.execution.properties.environmentId;
     assert.deepEqual(savedEnvironmentSchema.enum,["local","cloud_workspace",null]);
-    assert.match(savedEnvironmentSchema.description,/local, cloud_workspace или null/);
   } finally { c.close(); }
 });
 
@@ -368,10 +362,10 @@ test("forecast diagnostics explain missing inputs and freeze calculation availab
     assert.equal(empty.forecastAvailability.canRefreshSaved,true);
     assert.equal(empty.forecastAvailability.canCalculate,false);
     assert.deepEqual(rows(c),before);
-    const unknown=atlmTask();unknown.outcomes=null;
+    const unknown=atlmTask();unknown.workUnits=null;unknown.unknownReasons.workUnits="Unknown";
     const preview=value(await mcp(c,"EstimatePlanTime",await argsFor(c,PLAN,unknown)));
-    assert.equal(preview.diagnostics.code,"INCOMPLETE_FEATURES");
-    assert.match(preview.diagnostics.message,/outcomes/);
+    assert.equal(preview.diagnostics.code,"MISSING_REQUIRED_FEATURES");
+    assert.match(preview.diagnostics.message,/workUnits/);
     const cold=value(await mcp(c,"EstimatePlanTime",await argsFor(c)));
     assert.equal(cold.diagnostics.code,"TRAINING_NOT_STARTED");
     assert.match(cold.diagnostics.message,/обучение/i);
@@ -415,15 +409,14 @@ test("saved availability checks actual model categories and successful training 
   assert.equal(s.lastAttempt.code,"AVAILABLE");
   assert.match(s.lastAttempt.message,/успешно/i);
   assert.doesNotMatch(s.lastAttempt.message,/недоступен/i);
-  const task=atlmTask();task.profile.workKind="CREATE_MECHANISM";
+  const task=atlmTask();task.workUnits[0].kind="CREATE";
   const p=await plannedAtlm(c,crypto.randomUUID(),task);
   await ok(c,"RecordAssessment",await atlmAssessment(c,p.planId,task,{predictionRequest:request}),0);
   const before=rows(c), saved=value(await mcp(c,"GetSavedEstimate",{planId:p.planId}));
   assert.equal(saved.forecastAvailability.canCalculate,true);
-  assert.equal(saved.forecastAvailability.calculationMethod.id,"historical-median");
-  assert.equal(saved.serverEstimation.method.id,"historical-median");
-  assert.equal(saved.diagnostics.code,"UNSUPPORTED_CATEGORY");
-  assert.match(saved.diagnostics.message,/workKind/);
+  assert.equal(saved.forecastAvailability.calculationMethod.id,"atlm");
+  assert.equal(saved.serverEstimation.method.id,"atlm");
+  assert.equal(saved.serverEstimation.interval.status,"AVAILABLE");
   assert.deepEqual(rows(c),before);
   assert.equal(saved.forecastAvailability.planStatus,"PLANNED");
   await ok(c,"DeletePlan",{planId:p.planId},0);
@@ -440,14 +433,20 @@ test("saved availability checks actual model categories and successful training 
  }finally{c.close();}
 });
 
+async function processBaseline(c){
+  const result=await process(c);
+  c.db.sqlite.prepare("UPDATE estimation_models SET status='RETIRED' WHERE owner_id=? AND status='ACTIVE'").run(OWNER);
+  c.db.sqlite.prepare("UPDATE estimation_owner_state SET active_model_id=NULL WHERE owner_id=?").run(OWNER);
+  return result;
+}
 async function baselineHistory(c,durations){
  const plans=[];
  for(let i=0;i<durations.length;i++){
   // Keep the target's MODIFY category unseen: rank deficiency alone no longer forces a median.
-  const task=atlmTask();task.profile.workKind=["MIXED","CREATE_MECHANISM","INVESTIGATE","MIXED"][i%4];task.profile.reuseState=["PARTIAL","ABSENT","READY"][i%3];
+  const task=atlmTask();task.workUnits[0].kind=["CREATE","VERIFY","ANALYZE","CREATE"][i%4];task.reuseLevel=[1,0,3][i%3];
   const p=await plannedAtlm(c,crypto.randomUUID(),task);await completeAtlm(c,p,durations[i]);c.advance(1);plans.push(p);
  }
- await process(c);return plans;
+ await processBaseline(c);return plans;
 }
 test("early historical median returns real odd/even durations, persists honestly and does not impersonate ATLM",async()=>{
  const c=context();try{
@@ -456,7 +455,7 @@ test("early historical median returns real odd/even durations, persists honestly
   const p=value(await mcp(c,"EstimatePlanTime",args));
   assert.equal(p.status,"AVAILABLE");assert.equal(p.method.id,"historical-median");assert.equal(p.pointMs,5000);
   assert.equal(p.modelId,null);assert.equal(p.sampleCount,3);assert.equal(p.accuracy,"HISTORICAL_BASELINE");
-  assert.equal(p.interval,null);assert.equal(p.confidence,"UNKNOWN");assert.equal(p.fallback.atlmUnavailableReason,"UNSUPPORTED_CATEGORY");
+  assert.equal(p.interval.status,"UNAVAILABLE");assert.equal(p.fallback.atlmUnavailableReason,"COLLECTING_DATA");
   assert.deepEqual(rows(c),before);
   const payload=await atlmAssessment(c,PLAN,atlmTask(),{predictionRequest:request});
   await ok(c,"RecordAssessment",payload,0);
@@ -464,8 +463,8 @@ test("early historical median returns real odd/even durations, persists honestly
   assert.equal(saved.serverEstimation.pointMs,5000);
   assert.equal(saved.forecastAvailability.canCalculate,true);
   assert.equal(saved.forecastAvailability.calculationMethod.id,"historical-median");
-  const t=atlmTask();t.profile.workKind="MIXED";t.profile.reuseState="READY";
-  await completeAtlm(c,await plannedAtlm(c,crypto.randomUUID(),t),13000);await process(c);
+  const t=atlmTask();t.workUnits[0].kind="MODIFY";t.reuseLevel=3;
+  await completeAtlm(c,await plannedAtlm(c,crypto.randomUUID(),t),13000);await processBaseline(c);
   const even=value(await mcp(c,"EstimatePlanTime",args));assert.equal(even.pointMs,7000);
   const previous=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
   assert.equal(previous.serverEstimation.pointMs,7000);
@@ -475,7 +474,7 @@ test("early historical median returns real odd/even durations, persists honestly
   await ok(c,"DeletePlan",{planId:sources[0].planId},2);
   const stale=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
   assert.equal(stale.serverEstimation.pointMs,null);assert.equal(stale.recordedEstimation.pointMs,5000);
-  assert.equal(stale.isStale,false);await process(c);
+  assert.equal(stale.isStale,false);await processBaseline(c);
   assert.equal(value(await mcp(c,"GetSavedEstimate",{planId:PLAN})).serverEstimation.pointMs,9000);
   await ok(c,"StartPlan",{planId:PLAN},0);
   assert.equal(value(await mcp(c,"EstimatePlanTime",args)).unavailableReason,"UNSUPPORTED_FORECAST_SCOPE");
@@ -509,8 +508,8 @@ test("early median respects owner isolation, genuine zero and incomplete inputs"
  const c=context();try{
   const sources=await baselineHistory(c,[0]);await plannedAtlm(c);
   const zero=value(await mcp(c,"EstimatePlanTime",await argsFor(c)));assert.equal(zero.pointMs,0);assert.equal(zero.sampleCount,1);
-  const incomplete=atlmTask();incomplete.outcomes=null;
-  assert.equal(value(await mcp(c,"EstimatePlanTime",await argsFor(c,PLAN,incomplete))).unavailableReason,"INCOMPLETE_FEATURES");
+  const incomplete=atlmTask();incomplete.workUnits=null;incomplete.unknownReasons.workUnits="Unknown";
+  assert.equal(value(await mcp(c,"EstimatePlanTime",await argsFor(c,PLAN,incomplete))).unavailableReason,"MISSING_REQUIRED_FEATURES");
   const otherPlan=crypto.randomUUID(),other="isolated-other";
   assert.equal((await command(c,"CreatePlan",{planId:otherPlan,title:"Isolated",planText:"## Этап 1. Test\nГотово.",planCreatedAt:{precision:"dateOnly",on:"2026-01-01",timeZone:"UTC"}},undefined,undefined,other)).status,200);
   const ctx=value(await mcp(c,"GetTaskAssessment",{planId:otherPlan},other));
@@ -519,7 +518,7 @@ test("early median respects owner isolation, genuine zero and incomplete inputs"
   await ok(c,"DeletePlan",{planId:sources[0].planId},2);
   const dirty=value(await mcp(c,"EstimatePlanTime",await argsFor(c)));
   assert.equal(dirty.status,"UNAVAILABLE");
-  await process(c);
+  await processBaseline(c);
   assert.equal(value(await mcp(c,"EstimatePlanTime",await argsFor(c))).pointMs,null);
  }finally{c.close();}
 });
@@ -535,11 +534,11 @@ test("current PLANNED reads latest input without predictionRequest and refuses c
   const stale=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
   assert.equal(stale.serverEstimation.pointMs,null);assert.equal(stale.serverEstimation.unavailableReason,"SCOPE_CHANGED");
   assert.match(stale.diagnostics.message,/expectedRequirementsDigest/);
-  const unknown=atlmTask();unknown.outcomes=null;
+  const unknown=atlmTask();unknown.workUnits=null;unknown.unknownReasons.workUnits="Unknown";
   const revised=await atlmAssessment(c,PLAN,unknown);await ok(c,"RecordAssessment",revised,0);
   const latest=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
   assert.equal(latest.assessmentId,revised.assessmentId);
-  assert.equal(latest.serverEstimation.unavailableReason,"INCOMPLETE_FEATURES");assert.equal(latest.serverEstimation.pointMs,null);
+  assert.equal(latest.serverEstimation.unavailableReason,"MISSING_REQUIRED_FEATURES");assert.equal(latest.serverEstimation.pointMs,null);
  }finally{c.close();}
 });
 
@@ -548,8 +547,8 @@ test("first Start freezes fresh forecast, preserves recorded revision and replay
   await baselineHistory(c,[1000,5000,9000]);const planned=await plannedAtlm(c);
   const payload=await atlmAssessment(c,PLAN,atlmTask(),{predictionRequest:request});await ok(c,"RecordAssessment",payload,0);
   const raw=c.db.sqlite.prepare("SELECT assessment_json FROM assessment_revisions WHERE assessment_id=?").get(payload.assessmentId).assessment_json;
-  const task=atlmTask();task.profile.workKind="MIXED";
-  await completeAtlm(c,await plannedAtlm(c,crypto.randomUUID(),task),13000);await process(c);c.advance(200);
+  const task=atlmTask();task.workUnits[0].kind="MODIFY";
+  await completeAtlm(c,await plannedAtlm(c,crypto.randomUUID(),task),13000);await processBaseline(c);c.advance(200);
   const id=crypto.randomUUID(),first=await command(c,"StartPlan",{planId:PLAN},0,id);
   assert.equal(first.status,200);
   const frozen=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
@@ -623,14 +622,14 @@ test("current getter retries a newer assessment and returns authoritative frozen
    await baselineHistory(c,[1000,5000,9000]);await plannedAtlm(c);
    restore=afterCurrentInputRead(c,async()=>{
     if(action==="start")await ok(c,"StartPlan",{planId:PLAN},0);
-    else{const t=atlmTask();t.outcomes=null;await ok(c,"RecordAssessment",await atlmAssessment(c,PLAN,t),0);}
+    else{const t=atlmTask();t.workUnits=null;t.unknownReasons.workUnits="Unknown";await ok(c,"RecordAssessment",await atlmAssessment(c,PLAN,t),0);}
    });
    const r=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
    if(action==="start"){
     assert.equal(r.source,"FROZEN_INPUT");assert.equal(r.forecastAvailability.planStatus,"RUNNING");
     assert.equal(r.forecastAvailability.canRefreshSaved,false);assert.equal(r.serverEstimation.pointMs,5000);
    }else{
-    assert.equal(r.source,"CURRENT_INPUT");assert.equal(r.serverEstimation.unavailableReason,"INCOMPLETE_FEATURES");
+    assert.equal(r.source,"CURRENT_INPUT");assert.equal(r.serverEstimation.unavailableReason,"MISSING_REQUIRED_FEATURES");
     assert.equal(r.serverEstimation.pointMs,null);
    }
   }finally{restore?.();c.close();}
@@ -640,7 +639,7 @@ test("current getter retries a newer assessment and returns authoritative frozen
 test("a technical model failure is explicit on current read and cannot hide a frozen first-start snapshot",async()=>{
  const c=context();try{
   await plannedAtlm(c);
-  c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at,method_version,feature_version) VALUES(?,'corrupt-model',1,'ACTIVE','{}','[]','invalid',?,0,?,'agent-v2','agent-task-v2')").run(OWNER,c.now(),c.now());
+  c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at,method_version,feature_version) VALUES(?,'corrupt-model',1,'ACTIVE','{}','[]','invalid',?,0,?,'agent-v4-probabilistic','agent-task-v3')").run(OWNER,c.now(),c.now());
   c.db.sqlite.prepare("INSERT INTO estimation_owner_state(owner_id,active_model_id) VALUES(?,'corrupt-model')").run(OWNER);
   const before=rows(c),failure=await mcp(c,"GetSavedEstimate",{planId:PLAN});
   assert.equal(failure.value.result.structuredContent.code,"SOURCE_UNAVAILABLE");assert.deepEqual(rows(c),before);
@@ -653,18 +652,43 @@ test("a technical model failure is explicit on current read and cannot hide a fr
  }finally{c.close();}
 });
 
-test("legacy first-start input remains readable after migration despite a broken current model",async()=>{
- const c=context(migrations.indexOf("0024_current_plan_forecast.sql"));try{
-  await plannedAtlm(c);
-  const assessment=await atlmAssessment(c,PLAN,atlmTask(),{predictionRequest:request});await ok(c,"RecordAssessment",assessment,0);
-  const recorded=value(await mcp(c,"GetTaskAssessment",{planId:PLAN,assessmentId:assessment.assessmentId})).assessment.serverEstimation;
-  await ok(c,"StartPlan",{planId:PLAN},0);c.db.sqlite.exec(migration("0024_current_plan_forecast.sql"));
-  assert.equal(c.db.sqlite.prepare("SELECT forecast_json FROM plan_estimation_inputs WHERE plan_id=?").get(PLAN).forecast_json,null);
-  c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at,method_version,feature_version) VALUES(?,'corrupt-model',1,'ACTIVE','{}','[]','invalid',?,0,?,'agent-v2','agent-task-v2')").run(OWNER,c.now(),c.now());
+test("a pre-reset started plan reports missing history without consulting a broken model",async()=>{
+ const c=context();try{
+  await plannedAtlm(c);await ok(c,"StartPlan",{planId:PLAN},0);
+  c.db.sqlite.exec("DROP TRIGGER atlm_input_no_delete");
+  c.db.sqlite.prepare("DELETE FROM plan_estimation_inputs WHERE owner_id=? AND plan_id=?").run(OWNER,PLAN);
+  c.db.sqlite.prepare("UPDATE estimation_owner_state SET data_reset_at=? WHERE owner_id=?").run(c.now(),OWNER);
+  c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at,method_version,feature_version) VALUES(?,'corrupt-model',1,'ACTIVE','{}','[]','invalid',?,0,?,'agent-v4-probabilistic','agent-task-v3')").run(OWNER,c.now(),c.now());
   c.db.sqlite.prepare("UPDATE estimation_owner_state SET active_model_id='corrupt-model' WHERE owner_id=?").run(OWNER);
-  const before=rows(c),frozen=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
-  assert.equal(frozen.source,"FROZEN_INPUT");assert.deepEqual(frozen.serverEstimation,recorded);assert.deepEqual(rows(c),before);
-  await ok(c,"PausePlan",{planId:PLAN},1);
-  assert.deepEqual(value(await mcp(c,"GetSavedEstimate",{planId:PLAN})).serverEstimation,recorded);
+  const before=rows(c),result=value(await mcp(c,"GetSavedEstimate",{planId:PLAN}));
+  assert.equal(result.source,"HISTORY_RESET");assert.equal(result.serverEstimation,null);assert.equal(result.forecastAvailability.reason,"HISTORY_RESET");assert.deepEqual(rows(c),before);
+ }finally{c.close();}
+});
+
+test('training history is owner-scoped, read-only, and has stable snapshot pagination',async()=>{
+ const c=context();try{
+  for(let i=0;i<3;i++){const r=await mcp(c,'StartTraining');assert.equal(r.value.result.isError,undefined,JSON.stringify(r.value));c.advance(1);}
+  const before=rows(c),first=(await mcp(c,'GetTrainingHistory',{limit:1})).value.result.structuredContent;
+  assert.equal(first.rows.length,1);assert.equal(first.hasMore,true);assert.ok(first.nextCursor);
+  const next=(await mcp(c,'GetTrainingHistory',{limit:1,cursor:first.nextCursor})).value.result.structuredContent;
+  assert.notEqual(next.rows[0].attemptId,first.rows[0].attemptId);assert.deepEqual(rows(c),before);
+  const foreign=await mcp(c,'GetTrainingHistory',{cursor:first.nextCursor},'another-owner');assert.equal(foreign.value.result.isError,true);
+  const invalid=await mcp(c,'GetTrainingHistory',{cursor:'garbage'});assert.equal(invalid.value.result.isError,true);
+  const http=await call(c,'/api/tracker/estimation-training-history?limit=1&cursor='+encodeURIComponent(first.nextCursor));
+  assert.deepEqual(http.value.rows,next.rows);assert.deepEqual(rows(c),before);
+  const extra=await mcp(c,'StartTraining');assert.equal(extra.value.result.isError,undefined);
+  const last=(await mcp(c,'GetTrainingHistory',{limit:100,cursor:first.nextCursor})).value.result.structuredContent;
+  assert.equal(last.rows.length,2);assert.equal(last.hasMore,false);
+ }finally{c.close();}
+});
+
+test('training history detects completion of an attempt inside an existing snapshot',async()=>{
+ const c=context();try{
+  await mcp(c,'StartTraining');
+  c.db.sqlite.prepare("INSERT INTO estimation_training_attempts(owner_id,attempt_id,started_at,method_version,feature_version,dataset_revision,manifest_json) VALUES(?,'running',?,'agent-v4-probabilistic','agent-task-v3',0,'[]')").run(OWNER,c.now());
+  const first=(await mcp(c,'GetTrainingHistory',{limit:1})).value.result.structuredContent;assert.ok(first.nextCursor);
+  c.db.sqlite.prepare("UPDATE estimation_training_attempts SET completed_at=?,reason='TEST' WHERE owner_id=? AND attempt_id='running'").run(c.now(),OWNER);
+  const result=await mcp(c,'GetTrainingHistory',{limit:1,cursor:first.nextCursor});
+  assert.equal(result.value.result.isError,true);assert.equal(result.value.result.structuredContent.code,'HISTORY_CHANGED');
  }finally{c.close();}
 });

@@ -8,7 +8,7 @@ const isSnapshotDigest = value => typeof value === "string" && value.length === 
 const WRITE_COMMANDS = new Set(["CreatePlan", "StartPlan", "PausePlan", "ResumePlan", "FinishPlan", "UpdatePlanMetadata", "DeletePlan", "RestorePlan"]);
 const TRACKER_COMMANDS = new Set(["SetStepStatus", "RecordAssessment"]);
 const TRACKER_VERSIONED_COMMANDS = new Set(["SetStepStatus"]);
-const TRACKER_READ_TOOLS = new Set(["GetTrackerCapabilities", "GetPlanExecutionSnapshot", "GetCommandReceipt", "GetAssessment", "GetEstimationHistory", "CalculateAtlmEstimate", "GetPlanEstimate", "GetEstimationModelStatus", "GetAtlmDataset"]);
+const TRACKER_READ_TOOLS = new Set(["GetTrackerCapabilities", "GetPlanExecutionSnapshot", "GetCommandReceipt", "GetAssessment", "GetEstimationHistory", "CalculateAtlmEstimate", "GetPlanEstimate", "GetEstimationModelStatus", "GetAtlmDataset", "GetEstimationTrainingHistory"]);
 const ENVIRONMENT_IDS = Object.freeze(["local", "cloud_workspace"]);
 const UI_TIME_ZONES = [{ value: "Europe/Moscow", label: "Москва (UTC+3)" }, { value: "Asia/Omsk", label: "Омск (UTC+6)" }];
 export function resolveUiTimeZone(value) { return UI_TIME_ZONES.some((option) => option.value === value) ? value : "Asia/Omsk"; }
@@ -149,275 +149,15 @@ export function median(values) {
   return sorted.length % 2 ? sorted[middle] : sorted[middle - 1] + Math.round((sorted[middle] - sorted[middle - 1]) / 2);
 }
 
-const ESTIMATE_METHOD = Object.freeze({ id: "reference-class-median", version: "1" });
-const ESTIMATE_PROFILE_FIELDS = Object.freeze(["workKind", "reuseState", "doneBoundary"]);
-const ESTIMATE_WORK_KINDS = new Set(["CREATE_MECHANISM", "MODIFY_MECHANISM", "RUN_EXISTING_PROCESS", "VERIFY_EXISTING", "MIGRATE_DATA", "INVESTIGATE", "MIXED", "UNKNOWN"]);
-const ESTIMATE_REUSE_STATES = new Set(["ABSENT", "PARTIAL", "READY", "UNKNOWN"]);
-const ESTIMATE_DONE_BOUNDARIES = new Set(["ANALYSIS", "LOCAL_VERIFIED", "LOCAL_STAGED", "PUBLISHED", "DEPLOYED_VERIFIED", "UNKNOWN"]);
-const ESTIMATE_DECISIONS = new Set(["INCLUDE", "DESCRIPTIVE", "EXCLUDE"]);
-const ESTIMATE_STATUSES = new Set(["PLANNED", "RUNNING", "PAUSED", "COMPLETED"]);
-const ESTIMATE_AUTHORITIES = new Set(["SERVER_PLAN_INTERVALS", "EXTERNAL_FIXTURE"]);
-const ESTIMATE_MAX_CANDIDATES = 1000;
-const ESTIMATE_MAX_CASES = 1000;
+const V4_DONE_BOUNDARIES = ["ANALYSIS","LOCAL_VERIFIED","LOCAL_STAGED","PUBLISHED","DEPLOYED_VERIFIED","UNKNOWN"];
 const ESTIMATE_ID = /^[\x20-\x7e]{1,128}$/;
-
-function estimateValidation(message) {
-  throw new AppError("VALIDATION_ERROR", message);
-}
-
-function invalidEstimateSource(message) {
-  throw new AppError("INVALID_ESTIMATION_SOURCE", message);
-}
-
 function isPlainRecord(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+  const prototype=Object.getPrototypeOf(value);
+  return prototype===Object.prototype || prototype===null;
 }
+function isNonnegativeSafeInteger(value) { return Number.isSafeInteger(value) && value>=0; }
 
-function hasExactKeys(value, keys, message) {
-  if (!isPlainRecord(value)) estimateValidation(message);
-  const actual = Object.keys(value).sort();
-  const expected = [...keys].sort();
-  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) estimateValidation(message);
-}
-
-function isNonnegativeSafeInteger(value) {
-  return Number.isSafeInteger(value) && value >= 0;
-}
-
-function validateEstimateId(value, message) {
-  if (typeof value !== "string" || !ESTIMATE_ID.test(value)) estimateValidation(message);
-}
-
-function validateEstimateDigest(value, nullable, message) {
-  if (nullable && value === null) return;
-  if (!isSnapshotDigest(value)) estimateValidation(message);
-}
-
-function validateEstimateProfile(profile) {
-  hasExactKeys(profile, ESTIMATE_PROFILE_FIELDS, "profile должен содержать ровно три поля.");
-  if (!ESTIMATE_WORK_KINDS.has(profile.workKind) || !ESTIMATE_REUSE_STATES.has(profile.reuseState)
-    || !ESTIMATE_DONE_BOUNDARIES.has(profile.doneBoundary)) {
-    estimateValidation("profile содержит неизвестное значение.");
-  }
-}
-
-function validateEstimateCandidate(candidate, sourceAuthority) {
-  if (!isPlainRecord(candidate)) estimateValidation("candidate должен быть объектом.");
-  validateEstimateId(candidate.planId, "planId кандидата должен быть непустым ASCII ID до 128 символов.");
-  if (candidate.deleted === true) {
-    hasExactKeys(candidate, ["planId", "deleted"], "Удалённый кандидат содержит только planId и deleted=true.");
-    return;
-  }
-
-  hasExactKeys(candidate, [
-    "planId", "requirementsDigest", "profile", "decision", "scopeStability", "timeCoverage", "rationale", "deleted",
-    "planStatus", "firstStartedAtMs", "finishedAtMs", "sourceAvailableAtMs", "checksConfirmed", "measurement", "activeMs",
-    "intervalCount", "intervalsDigest",
-  ], "candidate содержит отсутствующие или неизвестные поля.");
-  if (candidate.deleted !== false) estimateValidation("deleted должен быть boolean.");
-  validateEstimateDigest(candidate.requirementsDigest, sourceAuthority === "EXTERNAL_FIXTURE", "requirementsDigest некорректен.");
-  validateEstimateProfile(candidate.profile);
-  if (!ESTIMATE_DECISIONS.has(candidate.decision)) estimateValidation("decision кандидата некорректен.");
-  if (!["STABLE", "CHANGED", "UNKNOWN"].includes(candidate.scopeStability)) estimateValidation("scopeStability некорректен.");
-  if (!["COMPLETE", "PARTIAL", "UNKNOWN"].includes(candidate.timeCoverage)) estimateValidation("timeCoverage некорректен.");
-  if (typeof candidate.rationale !== "string" || candidate.rationale.trim().length === 0 || Array.from(candidate.rationale).length > 128) {
-    estimateValidation("rationale должен содержать от 1 до 128 символов.");
-  }
-  if (!ESTIMATE_STATUSES.has(candidate.planStatus)) estimateValidation("planStatus некорректен.");
-  for (const field of ["firstStartedAtMs", "finishedAtMs", "activeMs"]) {
-    if (candidate[field] !== null && !isNonnegativeSafeInteger(candidate[field])) estimateValidation(`${field} должен быть null или неотрицательным safe integer.`);
-  }
-  if (!isNonnegativeSafeInteger(candidate.sourceAvailableAtMs) || !isNonnegativeSafeInteger(candidate.intervalCount)) {
-    estimateValidation("sourceAvailableAtMs и intervalCount должны быть неотрицательными safe integer.");
-  }
-  if (typeof candidate.checksConfirmed !== "boolean") estimateValidation("checksConfirmed должен быть boolean.");
-  if (!["COMPLETE", "MISSING", "INCOMPLETE"].includes(candidate.measurement)) estimateValidation("measurement некорректен.");
-  validateEstimateDigest(candidate.intervalsDigest, true, "intervalsDigest некорректен.");
-
-  if (sourceAuthority === "SERVER_PLAN_INTERVALS") {
-    if (candidate.requirementsDigest === null) estimateValidation("Серверный источник требует requirementsDigest.");
-    if (candidate.firstStartedAtMs !== null && candidate.sourceAvailableAtMs < candidate.firstStartedAtMs) {
-      invalidEstimateSource("sourceAvailableAtMs предшествует первому запуску.");
-    }
-    if (candidate.finishedAtMs !== null && candidate.sourceAvailableAtMs < candidate.finishedAtMs) {
-      invalidEstimateSource("sourceAvailableAtMs предшествует завершению.");
-    }
-    if (candidate.firstStartedAtMs !== null && candidate.finishedAtMs !== null && candidate.finishedAtMs < candidate.firstStartedAtMs) {
-      invalidEstimateSource("Граница завершения предшествует первому запуску.");
-    }
-    if (candidate.intervalCount === 0 ? candidate.intervalsDigest !== null : candidate.intervalsDigest === null) {
-      invalidEstimateSource("intervalCount не согласован с intervalsDigest.");
-    }
-    if (candidate.measurement === "MISSING" && candidate.intervalCount > 0) {
-      invalidEstimateSource("MISSING измерение не может содержать интервалы.");
-    }
-    if (candidate.measurement === "INCOMPLETE" && (candidate.firstStartedAtMs === null || candidate.intervalCount === 0)) {
-      invalidEstimateSource("INCOMPLETE измерение требует первого запуска и хотя бы одного интервала.");
-    }
-    if (candidate.measurement === "COMPLETE") {
-      if (candidate.planStatus !== "COMPLETED" || candidate.firstStartedAtMs === null || candidate.finishedAtMs === null
-        || candidate.intervalCount === 0 || candidate.activeMs === null) {
-        invalidEstimateSource("Полное серверное измерение требует завершённый план, границы и закрытые интервалы.");
-      }
-      if (candidate.activeMs > candidate.finishedAtMs - candidate.firstStartedAtMs) {
-        invalidEstimateSource("PLAN_ACTIVE превышает интервал между запуском и завершением.");
-      }
-    } else if (candidate.activeMs !== null) {
-      invalidEstimateSource("Неполное измерение не может содержать activeMs.");
-    }
-    if (candidate.planStatus !== "COMPLETED" && candidate.finishedAtMs !== null) {
-      invalidEstimateSource("Незавершённый план не может содержать finishedAtMs.");
-    }
-  } else {
-    if (candidate.firstStartedAtMs !== null || candidate.finishedAtMs !== null || candidate.intervalCount !== 0 || candidate.intervalsDigest !== null) {
-      estimateValidation("EXTERNAL_FIXTURE не должен заявлять серверные границы или интервалы.");
-    }
-    if (candidate.measurement === "COMPLETE" ? candidate.activeMs === null : candidate.activeMs !== null) {
-      estimateValidation("activeMs не согласован с внешним measurement.");
-    }
-  }
-}
-
-function validateEstimateSnapshot(snapshot) {
-  hasExactKeys(snapshot, ["methodVersion", "metric", "referenceCutoffMs", "sourceAuthority", "target", "candidates"], "snapshot содержит отсутствующие или неизвестные поля.");
-  if (snapshot.methodVersion !== 1 || snapshot.metric !== "PLAN_ACTIVE") estimateValidation("Неподдерживаемые methodVersion или metric.");
-  if (!isNonnegativeSafeInteger(snapshot.referenceCutoffMs)) estimateValidation("referenceCutoffMs должен быть неотрицательным safe integer.");
-  if (!ESTIMATE_AUTHORITIES.has(snapshot.sourceAuthority)) estimateValidation("sourceAuthority некорректен.");
-  hasExactKeys(snapshot.target, ["planId", "expectedRequirementsDigest", "profile"], "target содержит отсутствующие или неизвестные поля.");
-  validateEstimateId(snapshot.target.planId, "planId цели должен быть непустым ASCII ID до 128 символов.");
-  validateEstimateDigest(snapshot.target.expectedRequirementsDigest, snapshot.sourceAuthority === "EXTERNAL_FIXTURE", "expectedRequirementsDigest некорректен.");
-  validateEstimateProfile(snapshot.target.profile);
-  if (!Array.isArray(snapshot.candidates) || snapshot.candidates.length > ESTIMATE_MAX_CANDIDATES) {
-    estimateValidation(`candidates должен быть массивом не более ${ESTIMATE_MAX_CANDIDATES} записей.`);
-  }
-  const ids = new Set();
-  for (const candidate of snapshot.candidates) {
-    validateEstimateCandidate(candidate, snapshot.sourceAuthority);
-    if (candidate.planId === snapshot.target.planId) estimateValidation("target нельзя включать в candidates.");
-    if (ids.has(candidate.planId)) estimateValidation("planId кандидата повторяется.");
-    ids.add(candidate.planId);
-  }
-}
-
-function profileMatchReasons(target, source) {
-  const hasUnknown = ESTIMATE_PROFILE_FIELDS.some((field) => target[field] === "UNKNOWN" || source[field] === "UNKNOWN");
-  const hasMismatch = ESTIMATE_PROFILE_FIELDS.some((field) => target[field] !== "UNKNOWN" && source[field] !== "UNKNOWN" && target[field] !== source[field]);
-  return { hasUnknown, hasMismatch };
-}
-
-// Adapted from HoboStank/agent-eta forecast.py blob b6022b3ffb4f4e16ba1ba467cd607cea5c99f91e; see docs/assessments.md for scope and semantic changes.
-export function calculateComparableEstimate(snapshot) {
-  validateEstimateSnapshot(snapshot);
-  const candidates = snapshot.candidates.slice().sort((left, right) => left.planId < right.planId ? -1 : left.planId > right.planId ? 1 : 0);
-  const included = [];
-  const excluded = [];
-  for (const candidate of candidates) {
-    const reasons = [];
-    if (candidate.deleted === true) {
-      reasons.push("DELETED_SOURCE");
-    } else {
-      if (candidate.decision === "EXCLUDE") reasons.push("AGENT_EXCLUDED");
-      else if (candidate.decision === "DESCRIPTIVE") reasons.push("DESCRIPTIVE_ONLY");
-      const profile = profileMatchReasons(snapshot.target.profile, candidate.profile);
-      if (profile.hasUnknown) reasons.push("UNKNOWN_PROFILE");
-      if (profile.hasMismatch) reasons.push("PROFILE_MISMATCH");
-      if (candidate.scopeStability === "CHANGED") reasons.push("SCOPE_CHANGED");
-      else if (candidate.scopeStability === "UNKNOWN") reasons.push("SCOPE_UNCONFIRMED");
-      if (candidate.timeCoverage !== "COMPLETE") reasons.push("TIME_COVERAGE_UNCONFIRMED");
-      if (candidate.planStatus !== "COMPLETED" || (snapshot.sourceAuthority === "SERVER_PLAN_INTERVALS" && candidate.finishedAtMs === null)) {
-        reasons.push("NOT_COMPLETED");
-      }
-      if (!candidate.checksConfirmed) reasons.push("CHECKS_UNCONFIRMED");
-      if (candidate.measurement === "MISSING") reasons.push("NO_MEASUREMENT");
-      else if (candidate.measurement === "INCOMPLETE") reasons.push("INCOMPLETE_INTERVALS");
-      if (candidate.sourceAvailableAtMs >= snapshot.referenceCutoffMs) reasons.push("AFTER_CUTOFF");
-    }
-    if (reasons.length > 0) excluded.push({ planId: candidate.planId, reasons });
-    else included.push({ planId: candidate.planId, activeMs: candidate.activeMs });
-  }
-
-  const pointMs = median(included.map((candidate) => candidate.activeMs));
-  return {
-    formatVersion: 1,
-    method: ESTIMATE_METHOD,
-    metric: "PLAN_ACTIVE",
-    estimand: "ACCEPTED_UNCHANGED_SCOPE",
-    status: included.length === 0 ? "INSUFFICIENT_DATA" : "AVAILABLE",
-    referenceKind: included.length === 0 ? "NONE" : included.length === 1 ? "SINGLE_REFERENCE" : "HISTORICAL_REFERENCE",
-    pointMs,
-    observedRange: included.length === 0 ? null : {
-      minMs: Math.min(...included.map((candidate) => candidate.activeMs)),
-      maxMs: Math.max(...included.map((candidate) => candidate.activeMs)),
-      kind: "OBSERVED_SAMPLE",
-    },
-    sampleCount: included.length,
-    accuracy: "NOT_VALIDATED",
-    intervalCoverage: null,
-    includedPlanIds: included.map((candidate) => candidate.planId),
-    excluded,
-    selectionAuthority: "agent",
-  };
-}
-
-function addSafeInteger(total, value) {
-  const result = total + value;
-  if (!Number.isSafeInteger(result)) estimateValidation("Сумма ошибок или фактов превышает safe integer.");
-  return result;
-}
-
-// Adapted from the selected Agent ETA test invariants; no Store, clock, or source lifecycle is included.
-export function scoreEstimateCases(cases) {
-  if (!Array.isArray(cases) || cases.length > ESTIMATE_MAX_CASES) estimateValidation(`cases должен быть массивом не более ${ESTIMATE_MAX_CASES} записей.`);
-  const ids = new Set();
-  let actualKnownCount = 0;
-  let predictionCount = 0;
-  let scoredCount = 0;
-  let missingActualCount = 0;
-  let missingPredictionCount = 0;
-  let actualSumMs = 0;
-  let absoluteErrorSumMs = 0;
-  let signedErrorSumMs = 0;
-
-  for (const item of cases) {
-    hasExactKeys(item, ["caseId", "actualMs", "predictedMs"], "Оценочный случай содержит отсутствующие или неизвестные поля.");
-    validateEstimateId(item.caseId, "caseId должен быть непустым ASCII ID до 128 символов.");
-    if (ids.has(item.caseId)) estimateValidation("caseId повторяется.");
-    ids.add(item.caseId);
-    for (const field of ["actualMs", "predictedMs"]) {
-      if (item[field] !== null && !isNonnegativeSafeInteger(item[field])) estimateValidation(`${field} должен быть null или неотрицательным safe integer.`);
-    }
-    if (item.actualMs === null) missingActualCount += 1;
-    else {
-      actualKnownCount += 1;
-      if (item.predictedMs !== null) actualSumMs = addSafeInteger(actualSumMs, item.actualMs);
-    }
-    if (item.predictedMs === null) missingPredictionCount += 1;
-    else predictionCount += 1;
-    if (item.actualMs !== null && item.predictedMs !== null) {
-      scoredCount += 1;
-      const difference = item.predictedMs - item.actualMs;
-      absoluteErrorSumMs = addSafeInteger(absoluteErrorSumMs, Math.abs(difference));
-      signedErrorSumMs = addSafeInteger(signedErrorSumMs, difference);
-    }
-  }
-
-  return {
-    caseCount: cases.length,
-    actualKnownCount,
-    predictionCount,
-    scoredCount,
-    missingActualCount,
-    missingPredictionCount,
-    forecastRate: cases.length === 0 ? null : predictionCount / cases.length,
-    maeMs: scoredCount === 0 ? null : absoluteErrorSumMs / scoredCount,
-    wapePercent: scoredCount === 0 || actualSumMs === 0 ? null : 100 * absoluteErrorSumMs / actualSumMs,
-    signedBiasPercent: scoredCount === 0 || actualSumMs === 0 ? null : 100 * signedErrorSumMs / actualSumMs,
-  };
-}
-
-// All preprocessing and selection decisions belong to the observed training prefix.
 const ATLM_METHOD = Object.freeze({ id: "atlm", version: "agent-v4-probabilistic" });
 const ATLM_OLS_METHOD = ATLM_METHOD;
 const ATLM_RIDGE_METHOD = Object.freeze({ id: "atlm-ridge", version: "1" });
@@ -538,8 +278,8 @@ function atlmManifestValid(manifest, n) {
 }
 
 export async function fitAtlm(rows, options) { return fitHybridAtlm(rows, options); }
-export function predictAtlm(artifact, features) { return artifact?.kind === "HYBRID" ? predictHybridAtlm(artifact, features) : predictAtlmV4Regression(artifact, features); }
-function atlmArtifactValid(artifact) { return artifact?.kind === "HYBRID" ? atlmHybridArtifactValid(artifact) : atlmV4RegressionArtifactValid(artifact); }
+export function predictAtlm(artifact, features) { return predictHybridAtlm(artifact, features); }
+function atlmArtifactValid(artifact) { return atlmHybridArtifactValid(artifact); }
 
 function atlmScore(cases, method) {
   const scored = cases.filter(item => item[method].pointMs !== null);
@@ -1067,7 +807,7 @@ const V4_TASK_SCHEMA = {
   properties: {
     schemaVersion: { enum: ["agent-task-v3"] },
     workUnits: V4_TASK_LIST(V4_TASK_ITEM({ id: V4_TASK_KEY, kind: { enum: V4_WORK_KINDS }, description: V4_TASK_TEXT, evidence: V4_TASK_TEXT })),
-    doneBoundary: { enum: [...ESTIMATE_DONE_BOUNDARIES] },
+    doneBoundary: { enum: [...V4_DONE_BOUNDARIES] },
     reuseLevel: { type: ["integer", "null"], minimum: 0, maximum: 3 },
     components: V4_TASK_LIST(V4_TASK_ITEM({ key: V4_TASK_KEY, change: { enum: ["CREATE", "MODIFY", "REMOVE"] }, evidence: V4_TASK_TEXT })),
     contracts: V4_TASK_LIST(V4_TASK_ITEM({ kind: { enum: ["API", "MCP", "EVENT", "STORAGE", "UI", "CONFIG"] }, key: V4_TASK_KEY, change: { enum: ["ADD", "COMPATIBLE", "BREAKING", "REMOVE"] }, evidence: V4_TASK_TEXT })),
@@ -1148,7 +888,7 @@ export function normalizeAgentTask(input) {
 // history. Keep all candidate columns in the manifest, including constants.
 const V4_ORDINAL_FIELDS = ["reuseLevel", "requirementsUncertainty", "solutionUncertainty", "scopeChangeRisk"];
 const V4_CATEGORY_FIELDS = {
-  doneBoundary: [...ESTIMATE_DONE_BOUNDARIES],
+  doneBoundary: [...V4_DONE_BOUNDARIES],
   dataVolumeBand: ["NONE", "LE_1K", "LE_100K", "LE_10M", "GT_10M", "UNKNOWN"],
   diagnosisState: ["NOT_APPLICABLE", "PROVEN", "HYPOTHESIS", "UNKNOWN"],
   verificationReadiness: ["READY", "ADAPT", "CREATE", "NONE_REQUIRED", "UNKNOWN"],
@@ -1907,6 +1647,9 @@ const ATLM_TOOL_SCHEMAS = Object.freeze({
   } },
   GetPlanEstimate: { type: "object", additionalProperties: false, required: ["planId"], properties: { planId: { type: "string", format: "uuid" } } },
   GetEstimationModelStatus: { type: "object", additionalProperties: false, properties: {} },
+  GetEstimationTrainingHistory: { type: "object", additionalProperties: false, properties: {
+    limit:{type:"integer",minimum:1,maximum:100,default:50},cursor:{type:"string",minLength:1,maxLength:1024},
+  } },
   ProcessEstimationTraining: { type: "object", additionalProperties: false, properties: {} },
   StartEstimationTraining: { type: "object", additionalProperties: false, properties: {} },
   GetAtlmDataset: { type: "object", additionalProperties: false, properties: {
@@ -2016,7 +1759,7 @@ async function currentPlanForecast(db, ownerId, planId, nowMs) {
     let estimation;
     const unavailable=code=>({formatVersion:2,metric:"PLAN_ACTIVE",forecastScope:"FULL_FROM_FIRST_START",
       method:{...ATLM_METHOD},status:"UNAVAILABLE",pointMs:null,modelId:null,modelVersion:null,requirementsDigest:digest,
-      calculatedAt:nowMs,sampleCount:0,accuracy:"NOT_VALIDATED",evaluation:null,interval:null,confidence:"UNKNOWN",
+      calculatedAt:nowMs,sampleCount:0,accuracy:"NOT_VALIDATED",evaluation:null,pointEngine:null,interval:atlmUnavailableInterval("BAYESIAN_PREDICTIVE",code),
       unavailableReason:code,diagnostics:atlmDiagnostics(code)});
     if(!assessment?.context?.agentTask)estimation=unavailable("MISSING_FEATURES");
     else if(input.requirements_digest!==digest)estimation=unavailable("SCOPE_CHANGED");
@@ -2157,11 +1900,40 @@ async function getAtlmDataset(db, ownerId, args, nowMs) {
     afterSequence: Number(rows.at(-1).sampleId), throughSequence: cursor?.throughSequence ?? snapshot.through_sequence }) : null;
   return { formatVersion: 1, datasetRevision: snapshot.revision, asOf, rows, hasMore, nextCursor, serverNow: nowMs };
 }
+async function getEstimationTrainingHistory(db,ownerId,args,nowMs) {
+  validateAssessmentValue(args,ATLM_TOOL_SCHEMAS.GetEstimationTrainingHistory);
+  const limit=args.limit ?? 50, ownerScope=await hashCommandInput({purpose:"atlm-training-history-v1",ownerId});
+  let cursor=null;
+  if(args.cursor!==undefined){
+    try{cursor=JSON.parse(args.cursor);}catch{throw appError("VALIDATION_ERROR","Invalid training history cursor.");}
+    if(!isPlainRecord(cursor) || Object.keys(cursor).length!==5 || cursor.version!==1 || cursor.ownerScope!==ownerScope
+      || ![cursor.after,cursor.through,cursor.completed].every(isNonnegativeSafeInteger) || cursor.after>cursor.through)
+      throw appError("VALIDATION_ERROR","Invalid training history cursor.");
+  }
+  const result=await dbFirst(db,`WITH bounds AS (
+      SELECT COALESCE(?,(SELECT COALESCE(MAX(rowid),0) FROM estimation_training_attempts WHERE owner_id=?)) AS high
+    ), counts AS (
+      SELECT high,(SELECT COUNT(*) FROM estimation_training_attempts WHERE owner_id=? AND rowid<=high AND completed_at IS NOT NULL) AS completed FROM bounds
+    ), page AS (
+      SELECT rowid AS seq,* FROM estimation_training_attempts WHERE owner_id=? AND rowid>? AND rowid<=(SELECT high FROM counts)
+      ORDER BY rowid LIMIT ?
+    ) SELECT high,completed,(SELECT json_group_array(json_object('seq',seq,'attemptId',attempt_id,'startedAt',started_at,'completedAt',completed_at,
+       'methodVersion',method_version,'featureVersion',feature_version,'datasetRevision',dataset_revision,'manifest',manifest_json,
+       'diagnostics',diagnostics_json,'cases',case_ids_json,'metrics',metrics_json,'selected',selected_json,'reason',reason)) FROM page) AS rows_json FROM counts`,
+    cursor?.through ?? null,ownerId,ownerId,ownerId,cursor?.after ?? 0,limit+1);
+  if(cursor && result.completed!==cursor.completed) throw appError("HISTORY_CHANGED","История обучения изменилась; начните просмотр заново.",409);
+  const values=JSON.parse(result.rows_json),hasMore=values.length>limit;if(hasMore)values.pop();
+  const rows=values.map(({seq,...row})=>({...row,manifest:JSON.parse(row.manifest),diagnostics:parseColumn(row.diagnostics),
+    cases:parseColumn(row.cases),metrics:parseColumn(row.metrics),selected:parseColumn(row.selected)}));
+  const nextCursor=hasMore?JSON.stringify({version:1,ownerScope,after:values.at(-1).seq,through:result.high,completed:result.completed}):null;
+  return {formatVersion:1,rows,hasMore,nextCursor,serverNow:nowMs};
+}
 async function executeAtlmTool(db, ownerId, name, args, nowMs, clock) {
   validateAssessmentValue(args, ATLM_TOOL_SCHEMAS[name]);
   if (name === "CalculateAtlmEstimate") return calculateAtlmEstimate(db, ownerId, args, nowMs);
   if (name === "GetPlanEstimate") return getPlanEstimate(db, ownerId, args, nowMs);
   if (name === "GetAtlmDataset") return getAtlmDataset(db, ownerId, args, nowMs);
+  if (name === "GetEstimationTrainingHistory") return getEstimationTrainingHistory(db,ownerId,args,nowMs);
   if (name === "GetEstimationModelStatus") return getEstimationModelStatus(db, ownerId, nowMs);
   if (name === "StartEstimationTraining") {
     await db.batch([
@@ -2256,36 +2028,6 @@ const getAssessmentSchema = { type: "object", additionalProperties: false, requi
   planId: { type: "string", format: "uuid" }, stepId: { type: "string", format: "uuid", description: "Context-only read; omit assessmentId and revision" },
   assessmentId: { type: "string", format: "uuid" }, revision: { type: "integer", minimum: 1 },
 } };
-const estimateWorkProfileSchema = { type: "object", additionalProperties: false, required: ESTIMATE_PROFILE_FIELDS, properties: {
-  workKind: { enum: [...ESTIMATE_WORK_KINDS] },
-  reuseState: { enum: [...ESTIMATE_REUSE_STATES] },
-  doneBoundary: { enum: [...ESTIMATE_DONE_BOUNDARIES] },
-} };
-const estimateCandidateInputSchema = { type: "object", additionalProperties: false,
-  required: ["planId", "expectedRequirementsDigest", "profile", "decision", "scopeStability", "timeCoverage", "rationale"],
-  properties: {
-    planId: { type: "string", format: "uuid" },
-    expectedRequirementsDigest: { type: "string", minLength: 71, maxLength: 71, pattern: "^sha256:[a-f0-9]{64}$" },
-    profile: estimateWorkProfileSchema,
-    decision: { enum: [...ESTIMATE_DECISIONS] },
-    scopeStability: { enum: ["STABLE", "CHANGED", "UNKNOWN"] },
-    timeCoverage: { enum: ["COMPLETE", "PARTIAL", "UNKNOWN"] },
-    rationale: { type: "string", minLength: 1, maxLength: 128 },
-  },
-};
-const estimateCalculatorSchema = { type: "object", additionalProperties: false,
-  required: ["methodVersion", "metric", "referenceCutoffMs", "target", "candidates"],
-  properties: {
-    methodVersion: { enum: [1] }, metric: { enum: ["PLAN_ACTIVE"] },
-    referenceCutoffMs: { type: "integer", minimum: 0 },
-    target: { type: "object", additionalProperties: false, required: ["planId", "expectedRequirementsDigest", "profile"], properties: {
-      planId: { type: "string", format: "uuid" },
-      expectedRequirementsDigest: { type: "string", minLength: 71, maxLength: 71, pattern: "^sha256:[a-f0-9]{64}$" },
-      profile: estimateWorkProfileSchema,
-    } },
-    candidates: { type: "array", maxItems: 20, items: estimateCandidateInputSchema },
-  },
-};
 async function readAssessment(db, ownerId, args, nowMs) {
   validateAssessmentValue(args, getAssessmentSchema);
   if (args.assessmentId === undefined) {
@@ -2304,185 +2046,6 @@ async function readAssessment(db, ownerId, args, nowMs) {
   const row = args.revision === undefined ? rows[0] : await dbFirst(db, "SELECT * FROM assessment_revisions WHERE owner_id=? AND plan_id=? AND assessment_id=? AND revision=?", ownerId, args.planId, args.assessmentId, args.revision);
   if (!row) throw appError("ASSESSMENT_NOT_FOUND", "Assessment revision not found.", 404);
   return { ...await assessmentView(db, ownerId, row), revisionCount: rows[0].revision, serverNow: nowMs };
-}
-
-function estimateTimestamp(value, label, nowMs, nullable = false) {
-  if (nullable && value === null) return null;
-  if (!isNonnegativeSafeInteger(value) || value > nowMs) invalidEstimateSource(`${label} должен быть безопасным timestamp не позднее серверного времени.`);
-  return value;
-}
-
-function estimateSourceSnapshotSql(requestCount) {
-  const requestedValues = Array.from({ length: requestCount }, (_, index) => index === 0 ? "(?,1)" : "(?,0)").join(",");
-  return `WITH owner_scope(owner_id) AS (VALUES (?)),
-    requested(plan_id,is_target) AS (VALUES ${requestedValues})
-    SELECT r.plan_id AS requested_plan_id,r.is_target,
-      (SELECT COUNT(*) FROM plans matching WHERE matching.owner_id=(SELECT owner_id FROM owner_scope)
-        AND lower(matching.plan_id)=r.plan_id) AS matching_plan_count,
-      p.plan_id,p.owner_id,
-      CASE WHEN p.deleted_at IS NULL THEN p.status ELSE NULL END AS status,p.deleted_at,
-      CASE WHEN p.deleted_at IS NULL THEN p.first_started_at ELSE NULL END AS first_started_at,
-      CASE WHEN p.deleted_at IS NULL THEN p.finished_at ELSE NULL END AS finished_at,
-      CASE WHEN p.deleted_at IS NULL THEN p.registered_at ELSE NULL END AS registered_at,
-      CASE WHEN p.deleted_at IS NULL THEN target.requirements_json ELSE NULL END AS requirements_json,
-      CASE WHEN p.deleted_at IS NULL AND EXISTS(SELECT 1 FROM plan_steps config WHERE config.owner_id=p.owner_id AND config.plan_id=p.plan_id) THEN 1 ELSE 0 END AS tracker_enabled,
-      CASE WHEN p.deleted_at IS NULL THEN (SELECT COUNT(*) FROM plan_steps step
-        WHERE step.owner_id=p.owner_id AND step.plan_id=p.plan_id) ELSE 0 END AS step_count,
-      CASE WHEN p.deleted_at IS NULL THEN (SELECT COUNT(*) FROM tracker_incomplete_steps incomplete
-        WHERE incomplete.owner_id=p.owner_id AND incomplete.plan_id=p.plan_id) ELSE 0 END AS incomplete_step_count,
-      CASE WHEN p.deleted_at IS NULL THEN MAX(
-        p.registered_at,COALESCE(p.finished_at,p.registered_at),
-        COALESCE((SELECT MAX(r.server_now_ms) FROM command_receipts r WHERE r.owner_id=p.owner_id AND r.plan_id=p.plan_id AND r.outcome_code='OK' AND r.command_type IN ('StartPlan','ResumePlan','PausePlan','FinishPlan','UpdatePlanMetadata','DeletePlan','RestorePlan')),p.registered_at),
-        COALESCE((SELECT MAX(step.created_at) FROM plan_steps step WHERE step.owner_id=p.owner_id AND step.plan_id=p.plan_id),p.registered_at),
-        COALESCE((SELECT MAX(step.updated_at) FROM plan_steps step WHERE step.owner_id=p.owner_id AND step.plan_id=p.plan_id),p.registered_at),
-        COALESCE((SELECT source_changed_at FROM estimation_jobs j WHERE j.owner_id=p.owner_id AND j.job_key='refresh:'||p.plan_id),p.registered_at)
-      ) ELSE NULL END AS source_available_at,
-      intervals.interval_id,intervals.start_ms,intervals.end_ms
-    FROM requested r
-    LEFT JOIN plans p ON p.owner_id=(SELECT owner_id FROM owner_scope) AND lower(p.plan_id)=r.plan_id
-    LEFT JOIN assessment_targets target ON target.owner_id=p.owner_id AND target.plan_id=p.plan_id AND target.step_id IS NULL AND p.deleted_at IS NULL
-    LEFT JOIN work_intervals intervals ON intervals.owner_id=p.owner_id AND intervals.plan_id=p.plan_id AND p.deleted_at IS NULL
-    ORDER BY r.is_target DESC,r.plan_id,intervals.start_ms,intervals.end_ms`;
-}
-
-async function readCalculatedEstimate(db, ownerId, args, nowMs) {
-  validateAssessmentValue(args, estimateCalculatorSchema);
-  if (!Number.isSafeInteger(args.methodVersion) || args.methodVersion !== 1 || args.metric !== "PLAN_ACTIVE") {
-    estimateValidation("Неподдерживаемые methodVersion или metric.");
-  }
-  if (!isSnapshotDigest(args.target.expectedRequirementsDigest)
-    || args.candidates.some(candidate => !isSnapshotDigest(candidate.expectedRequirementsDigest))) {
-    estimateValidation("expectedRequirementsDigest должен иметь формат sha256:64 lowercase hex.");
-  }
-  if (args.candidates.some(candidate => Array.from(candidate.rationale).length > 128)) {
-    estimateValidation("rationale не должен превышать 128 символов.");
-  }
-  if (args.referenceCutoffMs > nowMs) estimateValidation("referenceCutoffMs не может быть позже серверного времени.");
-
-  const targetId = args.target.planId.toLowerCase();
-  const candidates = args.candidates.map(candidate => ({ ...candidate, planId: candidate.planId.toLowerCase() }));
-  if (candidates.some(candidate => candidate.planId === targetId)) estimateValidation("target нельзя включать в candidates.");
-  if (new Set(candidates.map(candidate => candidate.planId)).size !== candidates.length) estimateValidation("planId кандидата повторяется.");
-  candidates.sort((left, right) => left.planId < right.planId ? -1 : left.planId > right.planId ? 1 : 0);
-
-  const requested = [{ planId: targetId, isTarget: true }, ...candidates.map(candidate => ({ planId: candidate.planId, isTarget: false }))];
-  const queryResult = await db.prepare(estimateSourceSnapshotSql(requested.length))
-    .bind(ownerId, ...requested.map(item => item.planId)).all();
-  const sources = new Map();
-  for (const row of queryResult.results || []) {
-    if (!sources.has(row.requested_plan_id)) {
-      sources.set(row.requested_plan_id, {
-        matchingPlanCount: row.matching_plan_count, planId: row.plan_id, ownerId: row.owner_id,
-        status: row.status, deletedAt: row.deleted_at, firstStartedAtMs: row.first_started_at,
-        finishedAtMs: row.finished_at, registeredAtMs: row.registered_at, requirementsJson: row.requirements_json,
-        trackerEnabled: row.tracker_enabled, stepCount: row.step_count, incompleteStepCount: row.incomplete_step_count,
-        sourceAvailableAtMs: row.source_available_at, intervals: [],
-      });
-    }
-    const source = sources.get(row.requested_plan_id);
-    if (!Number.isSafeInteger(source.matchingPlanCount) || source.matchingPlanCount > 1) {
-      invalidEstimateSource("Владелец содержит неоднозначные UUID плана без учёта регистра.");
-    }
-    if (row.interval_id !== null) source.intervals.push({ startMs: row.start_ms, endMs: row.end_ms });
-  }
-
-  for (const item of requested) {
-    const source = sources.get(item.planId);
-    if (!source || source.matchingPlanCount !== 1 || source.planId === null || source.ownerId !== ownerId) {
-      throw appError("PLAN_NOT_FOUND", messageFor("PLAN_NOT_FOUND"), 404);
-    }
-    source.deletedAt = estimateTimestamp(source.deletedAt, "deleted_at", nowMs, true);
-    if (item.isTarget && source.deletedAt !== null) throw appError("PLAN_DELETED", messageFor("PLAN_DELETED"), 409);
-    if (source.deletedAt === null) {
-      source.registeredAtMs = estimateTimestamp(source.registeredAtMs, "registered_at", nowMs);
-      source.firstStartedAtMs = estimateTimestamp(source.firstStartedAtMs, "first_started_at", nowMs, true);
-      source.finishedAtMs = estimateTimestamp(source.finishedAtMs, "finished_at", nowMs, true);
-      source.sourceAvailableAtMs = estimateTimestamp(source.sourceAvailableAtMs, "sourceAvailableAtMs", nowMs);
-      if (source.sourceAvailableAtMs < source.registeredAtMs) invalidEstimateSource("sourceAvailableAtMs предшествует registered_at.");
-      if (source.finishedAtMs !== null && source.sourceAvailableAtMs < source.finishedAtMs) invalidEstimateSource("sourceAvailableAtMs предшествует finished_at.");
-      if (source.firstStartedAtMs !== null && source.sourceAvailableAtMs < source.firstStartedAtMs) invalidEstimateSource("sourceAvailableAtMs предшествует first_started_at.");
-      if (source.finishedAtMs !== null && source.firstStartedAtMs !== null && source.finishedAtMs < source.firstStartedAtMs) {
-        invalidEstimateSource("finished_at предшествует first_started_at.");
-      }
-      if (!isNonnegativeSafeInteger(source.stepCount) || !isNonnegativeSafeInteger(source.incompleteStepCount)
-        || source.incompleteStepCount > source.stepCount) invalidEstimateSource("Счётчики подтверждения результата повреждены.");
-    }
-  }
-
-  const targetSource = sources.get(targetId);
-  if (typeof targetSource.requirementsJson !== "string") invalidEstimateSource("Не найден snapshot requirements целевого плана.");
-  const targetDigest = "sha256:" + await hashCommandInput(JSON.parse(targetSource.requirementsJson));
-  if (targetDigest !== args.target.expectedRequirementsDigest) {
-    throw appError("ASSESSMENT_CONTEXT_CHANGED", messageFor("ASSESSMENT_CONTEXT_CHANGED"), 409);
-  }
-
-  const inputCandidates = [];
-  for (const input of candidates) {
-    const source = sources.get(input.planId);
-    if (source.deletedAt !== null) {
-      inputCandidates.push({ planId: input.planId, deleted: true });
-      continue;
-    }
-    if (typeof source.requirementsJson !== "string") invalidEstimateSource("Не найден snapshot requirements исходного плана.");
-    const requirementsDigest = "sha256:" + await hashCommandInput(JSON.parse(source.requirementsJson));
-    if (requirementsDigest !== input.expectedRequirementsDigest) {
-      throw appError("ASSESSMENT_CONTEXT_CHANGED", messageFor("ASSESSMENT_CONTEXT_CHANGED"), 409);
-    }
-
-    const firstStartedAtMs = source.firstStartedAtMs;
-    const finishedAtMs = source.finishedAtMs;
-    const sourceAvailableAtMs = source.sourceAvailableAtMs;
-
-    const intervalPairs = source.intervals.map(interval => {
-      const startMs = estimateTimestamp(interval.startMs, "work_intervals.start_ms", nowMs);
-      const endMs = estimateTimestamp(interval.endMs, "work_intervals.end_ms", nowMs, true);
-      if (endMs !== null && endMs < startMs) invalidEstimateSource("work_intervals.end_ms предшествует start_ms.");
-      if (firstStartedAtMs === null || startMs < firstStartedAtMs) invalidEstimateSource("Интервал предшествует первому запуску плана.");
-      if (finishedAtMs !== null && endMs !== null && endMs > finishedAtMs) invalidEstimateSource("Интервал позже завершения плана.");
-      if (source.status === "COMPLETED" && endMs === null) invalidEstimateSource("Завершённый план содержит открытый work interval.");
-      return [startMs, endMs];
-    }).sort((left, right) => {
-      if (left[0] !== right[0]) return left[0] - right[0];
-      if (left[1] === null || right[1] === null) return left[1] === right[1] ? 0 : left[1] === null ? 1 : -1;
-      return left[1] - right[1];
-    });
-    const intervalsDigest = intervalPairs.length === 0 ? null : "sha256:" + await hashCommandInput(intervalPairs);
-    let measurement = "MISSING";
-    let activeMs = null;
-    if (firstStartedAtMs !== null && intervalPairs.length > 0) {
-      if (source.status === "COMPLETED" && finishedAtMs !== null && intervalPairs.every(pair => pair[1] !== null)) {
-        measurement = "COMPLETE";
-        const merged = unionIntervals(intervalPairs.map(([startMs, endMs]) => [startMs, endMs]));
-        activeMs = 0;
-        for (const [startMs, endMs] of merged) {
-          const duration = endMs - startMs;
-          if (!isNonnegativeSafeInteger(duration) || !Number.isSafeInteger(activeMs + duration)) {
-            invalidEstimateSource("Объединённое время превышает safe integer.");
-          }
-          activeMs += duration;
-        }
-      } else {
-        measurement = "INCOMPLETE";
-      }
-    }
-    inputCandidates.push({
-      planId: input.planId, requirementsDigest, profile: input.profile, decision: input.decision,
-      scopeStability: input.scopeStability, timeCoverage: input.timeCoverage, rationale: input.rationale,
-      deleted: false, planStatus: source.status, firstStartedAtMs, finishedAtMs, sourceAvailableAtMs,
-      checksConfirmed: Boolean(source.trackerEnabled) && source.stepCount > 0 && source.incompleteStepCount === 0,
-      measurement, activeMs, intervalCount: intervalPairs.length, intervalsDigest,
-    });
-  }
-
-  const inputSnapshot = {
-    methodVersion: args.methodVersion, metric: args.metric, referenceCutoffMs: args.referenceCutoffMs,
-    sourceAuthority: "SERVER_PLAN_INTERVALS",
-    target: { planId: targetId, expectedRequirementsDigest: targetDigest, profile: args.target.profile },
-    candidates: inputCandidates,
-  };
-  const calculation = calculateComparableEstimate(inputSnapshot);
-  const calculationDigest = "sha256:" + await hashCommandInput({ inputSnapshot, calculation });
-  return { ...calculation, inputSnapshot, calculationDigest, readAtMs: nowMs };
 }
 
 const estimationHistorySchema = { type: "object", additionalProperties: false, required: ["targets", "from", "to", "timeZone"], properties: {
@@ -2727,7 +2290,7 @@ export async function executeCommand(db, identity, envelope, channel, nowMs) {
         current={input,result:{serverEstimation:{formatVersion:2,metric:"PLAN_ACTIVE",forecastScope:"FULL_FROM_FIRST_START",
           status:"UNAVAILABLE",pointMs:null,method:{...ATLM_METHOD},modelId:null,modelVersion:null,calculatedAt:nowMs,
           requirementsDigest:"sha256:"+await hashCommandInput(JSON.parse(input.requirements_json)),
-          sampleCount:0,accuracy:"NOT_VALIDATED",evaluation:null,interval:null,confidence:"UNKNOWN",
+          sampleCount:0,accuracy:"NOT_VALIDATED",evaluation:null,pointEngine:null,interval:atlmUnavailableInterval("BAYESIAN_PREDICTIVE","SOURCE_UNAVAILABLE"),
           unavailableReason:"SOURCE_UNAVAILABLE",diagnostics:atlmDiagnostics("SOURCE_UNAVAILABLE")}}};
       }
       if(current){
@@ -2867,7 +2430,11 @@ const EXPORT_SOURCES={
  stepIntervals:["step_work_intervals","step_id,start_ms,end_ms"],
  intervals:["work_intervals","interval_id,plan_id,start_ms,end_ms"],dates:["plan_date_history","history_id,plan_id,old_precision,old_at_ms,old_on,old_timezone,changed_at,reason"],
  assessments:["assessment_revisions","assessment_id,revision,plan_id,step_id,recorded_at,requirements_digest,requirements_json,assessment_json"],targets:["assessment_targets","plan_id,step_id,requirements_json"],
- exceptions:["tracker_finish_exceptions","plan_id,reason,created_at"]
+ exceptions:["tracker_finish_exceptions","plan_id,reason,created_at"],
+ frozen:["plan_estimation_inputs","plan_id,selection_status,first_started_at,forecast_json"],
+ samples:["estimation_samples","sequence,plan_id,input_assessment_sequence,source_digest,source_generation,eligibility,reasons_json,features_json,issued_prediction_json,actual_ms,captured_at,source_available_at,observed_at,is_first_eligible"],
+ models:["estimation_models","model_id,model_version,status,method_version,feature_version,manifest_json,dataset_digest,train_cutoff,metrics_json,sample_count,reason,created_at,activated_at"],
+ attempts:["estimation_training_attempts","attempt_id,started_at,completed_at,method_version,feature_version,dataset_revision,manifest_json,diagnostics_json,case_ids_json,metrics_json,selected_json,reason"]
 };
 function groupExportRows(rows,key){const groups=new Map();for(const row of rows){const value=groups.get(row[key])||[];value.push(row);groups.set(row[key],value);}return groups;}
 function exportPlanDate(precision,at,on,timeZone){return precision==="instant"?{precision,value:new Date(at).toISOString(),timeZone}:{precision,on,timeZone};}
@@ -2884,6 +2451,7 @@ async function buildExportReport(db,ownerId,clock){
  if(snapshot.success===false||!Array.isArray(snapshot.results))throw appError("INTERNAL_ERROR","Не удалось прочитать полный отчёт.",500);
  const data=Object.fromEntries(Object.keys(EXPORT_SOURCES).map(key=>[key,[]]));for(const row of snapshot.results)data[row.kind].push(JSON.parse(row.record));
  const related=Object.fromEntries(["steps","intervals","dates","assessments","exceptions"].map(key=>[key,groupExportRows(data[key],"plan_id")]));
+ const frozen=new Map(data.frozen.map(row=>[row.plan_id,row]));
  const documents=new Map(data.documents.map(d=>[d.plan_id,d.markdown])),digests=new Map();for(const t of data.targets)digests.set(t.plan_id+":"+(t.step_id||""),"sha256:"+await hashCommandInput(JSON.parse(t.requirements_json)));
  const assessments=rows=>rows.map(row=>{const {assessmentId,planId,stepId,expectedRequirementsDigest,...assessment}=JSON.parse(row.assessment_json);return {assessmentId:row.assessment_id,revision:row.revision,recordedAt:row.recorded_at,requirements:JSON.parse(row.requirements_json),needsRevision:row.requirements_digest!==digests.get(row.plan_id+":"+(row.step_id||"")),assessment:{formatVersion:1,...assessment}};});
  const plans=data.plans.sort((a,b)=>a.registered_at-b.registered_at||a.plan_id.localeCompare(b.plan_id)).map(row=>{
@@ -2893,10 +2461,19 @@ async function buildExportReport(db,ownerId,clock){
    dateHistory:get("dates").sort((a,b)=>a.changed_at-b.changed_at).map(d=>({previous:exportPlanDate(d.old_precision,d.old_at_ms,d.old_on,d.old_timezone),changedAt:d.changed_at,reason:d.reason})),
    assessments:assessments(get("assessments").filter(a=>a.step_id==null)),
    steps:steps.map(step=>({stepId:step.step_id,ordinal:step.ordinal,title:step.title,content:step.content,status:step.status,version:step.version,createdAt:step.created_at,updatedAt:step.updated_at,readyToFinish:step.status==="DONE",intervals:data.stepIntervals.filter(i=>i.step_id===step.step_id).sort((a,b)=>a.start_ms-b.start_ms).map(i=>({startMs:i.start_ms,endMs:i.end_ms})),assessments:assessments(get("assessments").filter(a=>a.step_id===step.step_id))})),
+   frozenForecast:frozen.has(row.plan_id) ? parseColumn(frozen.get(row.plan_id).forecast_json) : null,
    finishExceptions:get("exceptions").map(e=>({reason:e.reason,recordedAt:e.created_at}))};
  });
  const included=plans.filter(p=>p.deletedAt==null),measured=included.filter(p=>p.activeMs!=null),union=unionIntervals(included.flatMap(p=>p.intervals.map(i=>[i.startMs,i.endMs??nowMs])));
- return {formatVersion:2,exportedAt:nowMs,timezone:data.settings[0]?.timezone||"UTC",summary:{planCount:included.length,deletedPlanCount:plans.length-included.length,measuredPlanCount:measured.length,totalActiveMs:measured.length?union.reduce((n,[a,b])=>n+Math.max(0,b-a),0):null,sumPlanActiveMs:measured.length?measured.reduce((n,p)=>n+p.activeMs,0):null},plans};
+ const training={samples:data.samples.map(atlmSampleView),models:data.models.filter(m=>m.method_version===ATLM_METHOD.version && m.feature_version===ATLM_FEATURE_VERSION).map(m=>({
+   modelId:m.model_id,modelVersion:m.model_version,status:m.status,methodVersion:m.method_version,featureVersion:m.feature_version,
+   manifest:parseColumn(m.manifest_json),datasetDigest:m.dataset_digest,trainCutoff:m.train_cutoff,evaluation:parseColumn(m.metrics_json),
+   sampleCount:m.sample_count,reason:m.reason,createdAt:m.created_at,activatedAt:m.activated_at})),
+   attempts:data.attempts.filter(a=>a.method_version===ATLM_METHOD.version && a.feature_version===ATLM_FEATURE_VERSION).map(a=>({
+     attemptId:a.attempt_id,startedAt:a.started_at,completedAt:a.completed_at,methodVersion:a.method_version,featureVersion:a.feature_version,
+     datasetRevision:a.dataset_revision,manifest:parseColumn(a.manifest_json),diagnostics:parseColumn(a.diagnostics_json),cases:parseColumn(a.case_ids_json),
+     metrics:parseColumn(a.metrics_json),selected:parseColumn(a.selected_json),reason:a.reason}))};
+ return {formatVersion:3,training,exportedAt:nowMs,timezone:data.settings[0]?.timezone||"UTC",summary:{planCount:included.length,deletedPlanCount:plans.length-included.length,measuredPlanCount:measured.length,totalActiveMs:measured.length?union.reduce((n,[a,b])=>n+Math.max(0,b-a),0):null,sumPlanActiveMs:measured.length?measured.reduce((n,p)=>n+p.activeMs,0):null},plans};
 }
 
 async function readTrackerCapabilities(db,ownerId){return {
@@ -2907,21 +2484,21 @@ async function readTrackerCapabilities(db,ownerId){return {
       contextRead: { tool: "GetAssessment", omitAssessmentId: true }, expectedRequirementsDigestRequired: true,
       historyMaxTargets: 20, historyMaxLimit: 100, methodologyControlsExecution: false,
       atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v3", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
-        policyVersion: ATLM_POLICY_VERSION, engines: ["OLS", "RIDGE"],
-        runtimeContext: { environmentId: { optional: true, type: ["string", "null"], closedSet: true,
+        policyVersion: ATLM_POLICY_VERSION, engines: ["OLS", "RIDGE", "BAYESIAN"], intervalEngines:["BAYESIAN_PREDICTIVE","BAYES_QUANTILE"],
+        execution: { environmentId: { optional: true, type: ["string", "null"], closedSet: true,
           values: [...ENVIRONMENT_IDS], unknownValue: null,
           description: "Допустимые значения: local, cloud_workspace; null означает неизвестную среду." } },
         predictionScope: "FULL_FROM_FIRST_START", plannedForecastMode:"CURRENT_READ_ONLY", firstStartForecast:"FROZEN_SNAPSHOT", earlyForecastMethod:{...HISTORICAL_MEDIAN_METHOD}, retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
         calculateTool: "CalculateAtlmEstimate", planEstimateTool: "GetPlanEstimate", modelStatusTool: "GetEstimationModelStatus",
-        processTool: "ProcessEstimationTraining", startTrainingTool: "StartEstimationTraining", datasetTool: "GetAtlmDataset", predictionRequest: { method: "ATLM", methodVersion: 1 },
-        limits: { maxTrainingSamples: 5000, datasetDefaultLimit: 50, datasetMaxLimit: 100, maxOutcomes: 20, maxChangedContracts: 20, maxVerificationKinds: 5 } },
+        processTool: "ProcessEstimationTraining", startTrainingTool: "StartEstimationTraining", datasetTool: "GetAtlmDataset", historyTool:"GetEstimationTrainingHistory", predictionRequest: { method: "ATLM", methodVersion: 1 },
+        limits: { maxTrainingSamples: 5000, datasetDefaultLimit: 50, datasetMaxLimit: 100, historyDefaultLimit:50, historyMaxLimit:100 } },
       },
 
  planDocuments:{available:true,format:"markdown",createField:"planText",stageHeadings:"## Этап 1. Название",statusTool:"SetStepStatus",statuses:["PENDING","RUNNING","BLOCKED","FAILED","DONE"],preservesOriginal:true},
  steps:{model:"current-state",statusHistory:false,versionRequired:true,timing:{available:true,unit:"ms",startStatus:"RUNNING",excludesPlanPauses:true,historyBackfilled:false}},
  planDeletion:{softDelete:true,deleteTool:"DeletePlan",restoreTool:"RestorePlan",deletedFilter:"deleted",restoreStartsTimer:false},
  parallelPlans:true,planList:{tool:"ListPlans",statuses:PLAN_STATUSES,defaultLimit:50,maxLimit:MAX_PLAN_PAGE_SIZE,order:PLAN_LIST_ORDER,deletedDefault:false},
- analytics:{totalActiveMs:"union of owner intervals",activeByDay:"union by local day",sumPlanActiveMs:"sum of per-plan intervals"},exportFormatVersion:2
+ analytics:{totalActiveMs:"union of owner intervals",activeByDay:"union by local day",sumPlanActiveMs:"sum of per-plan intervals"},exportFormatVersion:3
 };}
 async function readPlanExecutionSnapshot(db,ownerId,planId,nowMs){
  if(!UUID.test(planId||""))throw appError("VALIDATION_ERROR","planId должен быть UUID.");
@@ -3730,7 +3307,6 @@ function atlmDiagnostics(code, facts = {}) {
   for (const key of ["sampleCount","p","residualDegreesOfFreedom","rank","limit","status","firstStartedAt"])
     if (facts[key] !== undefined && facts[key] !== null && (typeof facts[key] === "string" || Number.isFinite(facts[key]))) parameters[key] = facts[key];
   if (Array.isArray(facts.missingFields)) parameters.missingFields = facts.missingFields.filter(x => typeof x === "string").slice(0, 20);
-  if(Array.isArray(facts.unsupportedFields))parameters.unsupportedFields=facts.unsupportedFields.filter(field=>ESTIMATE_PROFILE_FIELDS.includes(field));
   const messages = {
     AVAILABLE:"Модель успешно обучена.",
     MISSING_FEATURES:"До первого запуска не сохранены исходные признаки задачи.",
@@ -4381,6 +3957,12 @@ async function apiRoute(request, env, url, channel, now, clock = () => now, ctx)
     return json(await buildExportReport(env.DB, identity.ownerId, clock), 200,
       { "content-disposition": "attachment; filename=plan-time-tracker-export.json" });
   }
+  if (request.method === "GET" && url.pathname === "/api/tracker/estimation-training-history") {
+    const args={};for(const key of url.searchParams.keys()) if(!["limit","cursor"].includes(key)) throw appError("VALIDATION_ERROR","Неизвестный параметр истории обучения.");
+    if(url.searchParams.has("limit"))args.limit=Number(url.searchParams.get("limit"));
+    if(url.searchParams.has("cursor"))args.cursor=url.searchParams.get("cursor");
+    return json(await getEstimationTrainingHistory(env.DB,identity.ownerId,args,now));
+  }
   await ensureOwner(env.DB, identity, now);
   if (request.method === "GET" && url.pathname === "/api/whoami") return json({ userId: identity.ownerId, email: identity.email, serverNow: now });
   if (request.method === "GET" && url.pathname === "/api/settings") {
@@ -4456,7 +4038,7 @@ const MCP_PUBLIC_NAMES = Object.freeze({
   GetPlanExecutionSnapshot: "GetPlanProgress", GetCommandReceipt: "GetCommandResult",
   CalculateAtlmEstimate: "EstimatePlanTime", GetPlanEstimate: "GetSavedEstimate",
   GetEstimationModelStatus: "GetTrainingStatus", StartEstimationTraining: "StartTraining",
-  ProcessEstimationTraining: "ContinueTraining", GetAtlmDataset: "GetTrainingData",
+  ProcessEstimationTraining: "ContinueTraining", GetAtlmDataset: "GetTrainingData", GetEstimationTrainingHistory:"GetTrainingHistory",
   RecordAssessment: "SaveTaskAssessment", GetAssessment: "GetTaskAssessment",
   GetEstimationHistory: "GetTimeHistory",
 });
@@ -4480,6 +4062,7 @@ const MCP_DESCRIPTIONS = Object.freeze({
   StartEstimationTraining: "По прямой просьбе пользователя запросить новую попытку обучения на доступных данных.",
   ProcessEstimationTraining: "Продолжить подготовку данных или уже запущенное обучение одним ограниченным проходом.",
   GetAtlmDataset: "Посмотреть сохранённые примеры обучения и причины исключения, с пагинацией.",
+  GetEstimationTrainingHistory: "Прочитать историю попыток обучения с постраничным снимком.",
 });
 function mcpTools() {
   const writeNames = new Set([...WRITE_COMMANDS, ...TRACKER_COMMANDS]);
@@ -4487,16 +4070,16 @@ function mcpTools() {
     RecordAssessment: "Записать оценку или неизменяемую ревизию. expectedVersion=0 создаёт серию; для новой ревизии передайте текущий номер ревизии в expectedVersion и причину в payload.reason. Метод и шкалу выбирает агент, прогноз отдельно в ms. Обязателен expectedRequirementsDigest из GetAssessment без assessmentId, прочитанный до анализа. Таймер не запускается.",
     GetAssessment: "Без assessmentId: прочитать текущие requirements/currentRequirementsDigest для анализа до первой оценки или пересмотра; stepId необязателен. С assessmentId: прочитать сохранённую ревизию (revision необязателен) и needsRevision; requirements в этом ответе относятся к сохранённому снимку.",
     GetEstimationHistory: "Факты и оценки по явным targets. Метрики ms раздельны, общий активный итог — объединение интервалов родителей. При пагинации сохраняйте asOf, throughSequence и nextAfterSequence как afterSequence. Окно дат относится к фактам времени, оценки читаются до asOf. Статистики относятся ко всей выборке фактов; readiness текущая. Время плана рассчитывается по рабочим интервалам.",
-    CalculateEstimate: "Рассчитать медиану явных сопоставимых завершённых планов по серверным интервалам PLAN_ACTIVE. Профиль, отбор и покрытие являются утверждениями агента; текущие requirements и полное содержимое исходников проверяются на сервере. Read-only.",
   };
   return TOOL_NAMES.map((name) => {
     let inputSchema = { type: "object", additionalProperties: false };
     if (Object.hasOwn(ATLM_TOOL_SCHEMAS, name)) return { name, description: ({
-      CalculateAtlmEstimate: "Предпросмотр полного PLAN_ACTIVE до первого StartPlan: приоритет активной ATLM, при расчётной недоступности — явный historical-median по реальной истории. Факты AgentTaskV1; без обучения и записи.",
+      CalculateAtlmEstimate: "Предпросмотр полного PLAN_ACTIVE до первого StartPlan: приоритет активной ATLM, при расчётной недоступности — явный historical-median по реальной истории. Факты agent-task-v3; без обучения и записи.",
       GetPlanEstimate: "Текущий read-only расчёт PLANNED (source=CURRENT_INPUT); recordedEstimation сохраняет исходную оценку для аудита. После первого запуска — frozen-снимок; legacy без снимка читает исходную assessment. История не переписывается.",
       GetEstimationModelStatus: "Состояние модели, накопление пригодных планов и очередь обучения владельца. Только чтение.",
       ProcessEstimationTraining: "Один ограниченный проход долговечной очереди владельца. Идемпотентная мутация без planId, с lease и fence; может потребоваться повторный проход.",
       StartEstimationTraining: "По явной просьбе пользователя запросить обучение на доступных данных независимо от порога двух планов. Возвращает состояние очереди; качество и достаточность данных проверяются сервером.",
+      GetEstimationTrainingHistory: "История попыток обучения владельца, включая ошибки и отказанные модели; nextCursor фиксирует границу среза.",
       GetAtlmDataset: "Приватная постраничная выгрузка неизменяемых sample-версий. Сохраняйте nextCursor; DATASET_CHANGED требует начать заново. Используется последняя версия каждого плана, только если она пригодна.",
     })[name], inputSchema: ATLM_TOOL_SCHEMAS[name], annotations: { readOnlyHint: !["ProcessEstimationTraining", "StartEstimationTraining"].includes(name), destructiveHint: false, idempotentHint: name !== "StartEstimationTraining", openWorldHint: false } };
     if (name === "GetPlan") inputSchema = { type: "object", required: ["planId"], properties: { planId: { type: "string", format: "uuid" } }, additionalProperties: false };
@@ -4512,7 +4095,6 @@ function mcpTools() {
     else if (name === "GetTimeReport") inputSchema = { type: "object", required: ["from", "to", "timeZone"], properties: { from: { type: "string", format: "date" }, to: { type: "string", format: "date" }, timeZone: { type: "string" } }, additionalProperties: false };
     else if (name === "GetAssessment") inputSchema = getAssessmentSchema;
     else if (name === "GetEstimationHistory") inputSchema = estimationHistorySchema;
-    else if (name === "CalculateEstimate") inputSchema = estimateCalculatorSchema;
     else if (name === "RecordAssessment") inputSchema = { type: "object", additionalProperties: false,
       required: ["schemaVersion", "commandId", "expectedVersion", "payload"], properties: {
         schemaVersion: { const: 1 }, commandId: { type: "string", format: "uuid" }, expectedVersion: { type: "integer", minimum: 0 },
@@ -4572,8 +4154,7 @@ function mcpTools() {
         }, additionalProperties: false,
       };
     }
-    if (assessmentDescriptions[name]) return { name, description: assessmentDescriptions[name], inputSchema,
-      ...(name === "CalculateEstimate" ? { annotations: { readOnlyHint: true, destructiveHint: false } } : {}) };
+    if (assessmentDescriptions[name]) return { name, description: assessmentDescriptions[name], inputSchema };
     return { name: name, description: name === "DeletePlan" ? "Переместить план в удалённые: остановить его таймер, сохранить план. Требует явной просьбы пользователя и текущей версии." : name === "RestorePlan" ? "Восстановить удалённый план без запуска таймера. Требует явной просьбы пользователя и текущей версии." : name === "ListPlans" ? "Список планов владельца с фильтрами statuses, deleted (по умолчанию false) и стабильной пагинацией nextCursor; RUNNING возвращает все активные планы. Не выбирает план для исполнителя." : name === "GetTimeReport" ? "Отчёт о фактически затраченном времени за период: totalActiveMs и activeByDay объединяют пересекающиеся интервалы, sumPlanActiveMs суммирует время планов. Это не прогноз. Значения в миллисекундах." : ["StartPlan", "ResumePlan", "PausePlan", "FinishPlan"].includes(name) ? name + ": меняет только указанный planId; другие планы продолжаются независимо." : name === "CreatePlan" ? "Сохранить готовый план целиком в planText и создать его этапы из заголовков. Таймер не запускается." : name + " через общий командный/API слой Sites.", inputSchema: inputSchema };
   }).map(tool => ({ ...tool, name: MCP_PUBLIC_NAMES[tool.name] || tool.name, description: Object.entries(MCP_PUBLIC_NAMES).reduce((text, [oldName, newName]) => text.replaceAll(oldName, newName), MCP_DESCRIPTIONS[tool.name] || tool.description) }));
 }
@@ -4607,12 +4188,11 @@ async function mcpRoute(request, env, now, ctx, clock = () => now) {
     if(!TOOL_NAMES.includes(name)) throw appError("FEATURE_REMOVED","Инструмент недоступен в текущем контракте.",410);
     if(name==="GetTimeReport" && Object.hasOwn(args,"repositoryIds")) throw appError("VALIDATION_ERROR","Фильтр удален из текущего контракта.");
     if(WRITE_COMMANDS.has(name)||TRACKER_COMMANDS.has(name)) validatePublicCommand({...args,commandType:name});
-    await ensureOwner(env.DB, identity, now);
+    if(name!=="GetEstimationTrainingHistory") await ensureOwner(env.DB, identity, now);
     let result;
     if (Object.hasOwn(ATLM_TOOL_SCHEMAS, name)) result = await executeAtlmTool(env.DB, identity.ownerId, name, rpc.params?.arguments === undefined ? {} : rpc.params.arguments, now, clock);
     else if (name === "GetPlan") result = await readPlan(env.DB, identity.ownerId, args.planId, now);
     else if (name === "GetAssessment") result = await readAssessment(env.DB, identity.ownerId, args, now);
-    else if (name === "CalculateEstimate") result = await readCalculatedEstimate(env.DB, identity.ownerId, args, now);
     else if (name === "GetEstimationHistory") result = await readEstimationHistory(env.DB, identity.ownerId, args, now);
     else if (name === "ListPlans") result = await listPlans(env.DB, identity.ownerId, now, args);
     else if (name === "GetTimeReport") result = await buildAnalytics(env.DB, identity.ownerId, args, now);

@@ -1,16 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {context,ok,call,running,atlmAssessment,rows,PLAN,OWNER} from './fixtures/tracker-db.mjs';
+import {context,ok,call,running,atlmAssessment,rows,PLAN,OWNER,mcp,plannedAtlm,completeAtlm} from './fixtures/tracker-db.mjs';
 
-test('export v2 contains current text/statuses and assessment requirements without attempt or status histories',async()=>{
+test('export v3 contains current text/statuses and assessment requirements',async()=>{
  const c=context();try{
   const step=await running(c);await ok(c,'RecordAssessment',await atlmAssessment(c),0);c.advance(100);
   await ok(c,'SetStepStatus',{...step,status:'BLOCKED'},2);await ok(c,'SetStepStatus',{...step,status:'DONE'},3);await ok(c,'FinishPlan',{planId:PLAN},1);
   const before=rows(c),report=(await call(c,'/api/export')).value;
-  assert.equal(report.formatVersion,2);assert.equal(report.plans.length,1);const plan=report.plans[0];
+  assert.equal(report.formatVersion,3);assert.equal(report.plans.length,1);const plan=report.plans[0];
   assert.equal(plan.status,'COMPLETED');assert.equal(plan.activeMs,100);assert.equal(plan.steps[0].status,'DONE');assert.equal(plan.steps[0].version,4);assert.match(plan.steps[0].content,/Checked source/);
   assert.equal(plan.assessments.length,1);assert.equal(plan.assessments[0].assessment.context.agentTask.schemaVersion,'agent-task-v3');
-  const forbidden=new Set(['attempts','timeline','journal','events','checks','resultHistory','currentFence','currentResultRevision','leaseUntil','fence']);
+  const forbidden=new Set(['timeline','journal','events','checks','resultHistory','currentFence','currentResultRevision','leaseUntil','fence']);
   function inspect(value){if(Array.isArray(value))value.forEach(inspect);else if(value&&typeof value==='object')for(const [key,child]of Object.entries(value)){assert(!forbidden.has(key),key);inspect(child);}}inspect(report);
   assert.deepEqual(rows(c),before);
  }finally{c.close();}
@@ -41,7 +41,7 @@ test('export keeps explicit finish reasons and date precision without historical
 test('export for a new owner is read-only and has an explicit empty measurement',async()=>{
  const c=context();try{
   const before=rows(c),report=(await call(c,'/api/export',undefined,'new-owner')).value;
-  assert.equal(report.formatVersion,2);assert.deepEqual(report.plans,[]);assert.equal(report.summary.totalActiveMs,null);assert.equal(report.summary.planCount,0);assert.deepEqual(rows(c),before);
+  assert.equal(report.formatVersion,3);assert.deepEqual(report.plans,[]);assert.equal(report.summary.totalActiveMs,null);assert.equal(report.summary.planCount,0);assert.deepEqual(rows(c),before);
  }finally{c.close();}
 });
 
@@ -51,5 +51,22 @@ test('export reads collections in one snapshot before a concurrent pause finishe
   c.db.prepare=sql=>{const stmt=prepare(sql),bind=stmt.bind.bind(stmt);stmt.bind=(...args)=>{const bound=bind(...args);if(sql.includes("'documents' AS kind")&&!intercepted){const all=bound.all.bind(bound);bound.all=async()=>{intercepted=true;const snapshot=await all();c.advance(100);await ok(c,'PausePlan',{planId:PLAN},1);return snapshot;};}return bound;};return stmt;};
   const report=(await call(c,'/api/export')).value;assert(intercepted);assert.equal(report.plans[0].status,'RUNNING');assert.equal(report.plans[0].intervals[0].endMs,null);assert.equal(report.exportedAt,c.now());
   c.db.prepare=prepare;const current=(await call(c,'/api/export')).value;assert.equal(current.plans[0].status,'PAUSED');assert.equal(current.plans[0].intervals[0].endMs,c.now());
+ }finally{c.close();}
+});
+
+
+test('export v3 includes frozen interval, new samples and attempts for the owner',async()=>{
+ const c=context();try{
+  for(let i=0;i<2;i++){const p=await plannedAtlm(c,crypto.randomUUID());await completeAtlm(c,p,1000+i*100);c.advance(1);}
+  await mcp(c,'ContinueTraining');const target=await plannedAtlm(c,PLAN);
+  await ok(c,'StartPlan',{planId:PLAN},0);
+  const frozen=(await mcp(c,'GetSavedEstimate',{planId:PLAN})).value.result.structuredContent.serverEstimation;
+  assert.equal(frozen.status,'AVAILABLE');assert.equal(frozen.interval.status,'AVAILABLE');
+  const before=rows(c),report=(await call(c,'/api/export')).value;
+  assert.equal(report.formatVersion,3);assert.deepEqual(report.plans.find(p=>p.planId===PLAN).frozenForecast,frozen);
+  assert.equal(report.training.samples.length,2);assert.equal(report.training.attempts.length,1);
+  assert.equal(report.training.models[0].methodVersion,'agent-v4-probabilistic');
+  assert.equal(report.training.samples[0].features['workUnits.MODIFY'],1);assert.deepEqual(rows(c),before);
+  assert.deepEqual((await call(c,'/api/export',undefined,'another-owner')).value.training,{samples:[],models:[],attempts:[]});
  }finally{c.close();}
 });

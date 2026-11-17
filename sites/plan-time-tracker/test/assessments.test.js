@@ -88,7 +88,7 @@ test("unknowns, units, ranges, references and bounded JSON are validated without
       x => delete x.method.scale, x => x.unknowns = Array(21).fill("unknown"),
       x => x.sources = [{ planId: "bad" }], x => x.context = [], x => x.context.text = "a".repeat(4001),
       x => { let item = x.context; for (let i = 0; i < 15; i++) item = item.child = {}; },
-      x => { x.context = Object.fromEntries(Array.from({ length: 10 }, (_, i) => [i, "a".repeat(3000)])); },
+      x => { x.context = Object.fromEntries(Array.from({ length: 18 }, (_, i) => [i, "a".repeat(4000)])); },
       x => x.forecast = { ...x.forecast, status: "KNOWN", lowerMs: 5, upperMs: 4 },
       x => x.forecast = { ...x.forecast, status: "KNOWN", lowerMs: 0.5, upperMs: 1 },
     ];
