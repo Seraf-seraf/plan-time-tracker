@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { payloadHash, claimAtlmJob } from '../worker/index.js';
-import { context, migrations, ok, call, mcp, envelope, command, taskV4, atlmAssessment, PLAN, OWNER } from './fixtures/tracker-db.mjs';
+import { assessForStart, context, migrations, ok, call, mcp, envelope, command, taskV4, atlmAssessment, PLAN, OWNER } from './fixtures/tracker-db.mjs';
 
 const resetUrl = new URL('../drizzle/0026_atlm_v4_reset.sql', import.meta.url);
 const snapshot = (db, table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().map(row => ({ ...row }));
@@ -97,6 +97,7 @@ test('v4 reset removes old estimation data while retaining plans, time and recei
     assert.equal(estimate.source, 'HISTORY_RESET');
     assert.equal(estimate.serverEstimation, null);
     assert.equal(estimate.forecastAvailability.reason, 'HISTORY_RESET');
+    db.exec(readFileSync(new URL("../drizzle/0027_agent_task_v4_gate.sql",import.meta.url),"utf8"));
     const freshPlan = '55555555-5555-4555-8555-555555555555';
     await ok(c, 'CreatePlan', { planId: freshPlan, title: 'New plan', planText: '# New\n\n## Этап 1. Работа\nТекст',
       planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } });
@@ -126,9 +127,9 @@ test('v4 reset removes old estimation data while retaining plans, time and recei
     const noAssessment = '12121212-1212-4212-8212-121212121212';
     await ok(c, 'CreatePlan', { planId: noAssessment, title: 'No assessment', planText: '# New\n\n## Этап 1. Работа\nТекст',
       planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } });
-    await ok(c, 'StartPlan', { planId: noAssessment }, 0);
+    assert.equal((await command(c,'StartPlan',{planId:noAssessment},0)).value.error.code,'ASSESSMENT_REQUIRED');
     const noAssessmentForecast = (await mcp(c, 'GetSavedEstimate', { planId: noAssessment })).value.result.structuredContent;
-    assert.equal(noAssessmentForecast.serverEstimation.unavailableReason, 'MISSING_FEATURES');
+    assert.equal(noAssessmentForecast.serverEstimation.unavailableReason, 'ASSESSMENT_REQUIRED');
     assert.equal(noAssessmentForecast.isStale, false);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
   } finally { c.close(); }
@@ -172,6 +173,7 @@ test('old recovery cannot complete a new executor lease', async () => {
   try {
     await ok(c, 'CreatePlan', { planId: PLAN, title: 'Recovery', planText: '# Plan\n\n## Этап 1. Работа\nТекст',
       planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } });
+    await assessForStart(c);
     await ok(c, 'StartPlan', { planId: PLAN }, 0);
     const db = c.db.sqlite, jobKey = 'refresh:' + PLAN;
     const lease = await claimAtlmJob(c.db, OWNER, jobKey, c.now());

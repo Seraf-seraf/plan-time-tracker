@@ -1,16 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { context, call, command, ok, running, result, check, rows, migrations, migration, plannedAtlm, completeAtlm, PLAN, OWNER } from "./fixtures/tracker-db.mjs";
+import { assessForStart, context, call, command, ok, running, result, check, rows, migrations, migration, plannedAtlm, completeAtlm, PLAN, OWNER } from "./fixtures/tracker-db.mjs";
 import { readAtlmSampleSource, claimAtlmJob, persistAtlmSample } from "../worker/index.js";
 const OTHER = "22222222-2222-4222-8222-222222222222";
 const TABLES = ["plan_estimation_inputs", "estimation_samples", "estimation_models", "estimation_jobs", "estimation_owner_state"];
 
-test("fresh migration supports unassessed lifecycle, owner FK isolation and atomic D1 batch rollback", async () => {
+test("fresh migration supports assessed lifecycle, owner FK isolation and atomic D1 batch rollback", async () => {
   const c = context();
   try {
     await ok(c, "CreatePlan", { planId: PLAN, title: "Neutral lifecycle", planCreatedAt: { precision: "dateOnly", on: "2027-01-01", timeZone: "UTC" } });
+    await assessForStart(c);
     await ok(c, "StartPlan", { planId: PLAN }, 0); c.advance(10); await ok(c, "FinishPlan", { planId: PLAN }, 1);
-    assert.equal(c.db.sqlite.prepare("SELECT selection_status FROM plan_estimation_inputs").get().selection_status, "MISSING_FEATURES");
+    assert.equal(c.db.sqlite.prepare("SELECT selection_status FROM plan_estimation_inputs").get().selection_status, "CAPTURED");
     const before = rows(c);
     await assert.rejects(c.db.batch([
       c.db.prepare("INSERT INTO owners(owner_id,created_at) VALUES(?,?)").bind('transaction-will-rollback', c.now()),
