@@ -1,6 +1,6 @@
 // Browser QA against the actual Worker and isolated SQLite, with every request intercepted.
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { assessForStart, context, OWNER, ok } from "./fixtures/tracker-db.mjs";
@@ -10,15 +10,13 @@ const c = context(); c.advance(Date.now() - c.now());
 const artifacts = resolve(process.env.UI_ACCEPTANCE_ARTIFACT_DIR || "/tmp/tracker-source-ui");mkdirSync(artifacts, { recursive: true });
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE || "/usr/bin/chromium", headless: true, args: ["--no-sandbox"] });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
-const posts = [], requests = [], errors = [];let lostAck = true, externalRequests = 0, exportFails = false;
+const posts = [], requests = [], errors = [];let lostAck = true, externalRequests = 0;
 page.setDefaultTimeout(5000);page.on("pageerror", error => errors.push(error.message));
 await page.addInitScript(() => { window.confirm = () => true; });
 await page.route("**/*", async route => {
   const request = route.request(), url = new URL(request.url());
   if (url.origin !== "http://localhost") { externalRequests++;return route.abort(); }
   requests.push(url.pathname + url.search);
-  if (url.pathname === '/api/export' && exportFails === 'network') return route.abort('internetdisconnected');
-  if (url.pathname === '/api/export' && exportFails) return route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({error:{code:'INTERNAL_ERROR'}})});
   const body = request.postDataJSON();if (body) posts.push(body);
   const response = await c.worker.fetch(new Request(request.url(), { method: request.method(), headers: { "content-type": "application/json", "oai-authenticated-user-id": OWNER }, ...(request.postData() ? { body: request.postData() } : {}) }), { DB: c.db });
   if (body?.commandType === "UpdatePlanMetadata" && lostAck) { lostAck = false;return route.abort("failed"); }
@@ -77,15 +75,8 @@ try {
   await page.locator("#tz").selectOption("Asia/Omsk");
   await page.locator('#settings button').click();
   await page.waitForFunction(() => document.querySelector('#settings').getAttribute('aria-busy') !== 'true');
-  const downloadPromise = page.waitForEvent("download");
-  await page.locator('.settings-export').click();
-  const download = await downloadPromise;
-  assert.equal(download.suggestedFilename(), "plan-time-tracker-export.json");
-  const downloadedReport = JSON.parse(readFileSync(await download.path(), "utf8"));
-  assert.equal(downloadedReport.formatVersion, 3);
-  assert.equal(downloadedReport.timezone, "Asia/Omsk");
-  assert.equal(downloadedReport.summary.planCount, 0);
-  assert.deepEqual(downloadedReport.plans, []);
+  assert.equal(await page.locator('#view-settings a[href="/api/export"]').count(), 0);
+  assert.equal(await page.evaluate(async () => (await fetch("/api/export")).status), 404);
   assert.equal(await page.locator('#repoIds,#sync,#repos,#overviewRepo,#planRepo,#analyticsRepo').count(), 0);
   assert(!/GitHub|Репозитории|Коммиты/.test(await page.locator("body").innerText()));
   await ok(c, "CreatePlan", {title:"MCP source tracker fixture",description:"Synthetic description",planCreatedAt:{precision:"dateOnly",on:new Date(c.now()).toISOString().slice(0,10),timeZone:"UTC"}});
@@ -147,25 +138,6 @@ try {
   const intervals = c.db.sqlite.prepare("SELECT start_ms,end_ms FROM work_intervals ORDER BY start_ms").all();
   assert.equal(intervals.length, 2);assert.equal(intervals[0].end_ms - intervals[0].start_ms, 2000);assert.equal(intervals[1].end_ms, null);
   await page.locator('[data-view="settings"]').click();
-  exportFails = true;
-  await page.locator('.settings-export').click();
-  await page.getByRole('alert').filter({hasText:'Не удалось подготовить экспорт'}).waitFor();
-  assert.equal(await page.locator('.settings-export').textContent(), 'Повторить скачивание');
-  exportFails = 'network';
-  await page.locator('.settings-export').click();
-  await page.getByRole('alert').filter({hasText:'Проверьте подключение к сети и повторите попытку'}).waitFor();
-  exportFails = false;
-  const populatedDownloadPromise = page.waitForEvent('download');
-  await page.locator('.settings-export').click();
-  const populatedDownload = await populatedDownloadPromise;
-  const populatedReport = JSON.parse(readFileSync(await populatedDownload.path(), 'utf8'));
-  assert.equal(populatedDownload.suggestedFilename(), 'plan-time-tracker-export.json');
-  assert.equal(populatedReport.formatVersion, 3);
-  const exportedPlan = populatedReport.plans.find(item => item.planId === plan);
-  assert(exportedPlan, 'download includes the plan created through the UI');
-  assert.equal(exportedPlan.intervals.length, 2);
-  assert.equal(exportedPlan.intervals[0].endMs - exportedPlan.intervals[0].startMs, 2000);
-  assert.equal(await page.getByRole('alert').filter({hasText:'Не удалось подготовить экспорт'}).count(), 0);
   assert(!requests.some(url => /repositories|commit-conflicts|repositoryId/.test(url)));
   assert(!posts.some(body => /repositoryId|revisionSha|testedSha|commitPolicy|pushPolicy/.test(JSON.stringify(body))));
   assert.equal(externalRequests, 0);assert.deepEqual(errors, []);

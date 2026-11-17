@@ -27,8 +27,6 @@ test('recorded stage windows exclude plan pauses, preserve parallel time, repeat
     assert.deepEqual(rows(c), before, 'chart reads must not write');
     assert.deepEqual((await call(c, path(PLAN, { ...period, asOf: start + 1 }))).value.steps.map(s => s.activeMs), [1, null, null, null]);
     assert.deepEqual((await call(c, path(PLAN, { ...period, from: '2027-12-31' }))).value.steps.map(s => s.activeMs), [0, 0, 0, null]);
-    const exported = (await call(c, '/api/export')).value.plans[0];
-    assert.equal(exported.steps[0].intervals.length, 2);assert.equal(exported.steps[3].intervals.length, 0);
   } finally { c.close(); }
 });
 

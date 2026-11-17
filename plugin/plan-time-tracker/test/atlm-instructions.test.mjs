@@ -32,7 +32,7 @@ test('MCP discovery matches the instructions',async()=>{
  }finally{c.close();}
 });
 
-test('documented example is accepted, stored, frozen and exported',async()=>{
+test('documented example is accepted, stored and frozen',async()=>{
  const c=context();try{
   const match=features.match(/```json\s*([\s\S]*?)```/);assert(match);const agentTask=JSON.parse(match[1]);
   await ok(c,'CreatePlan',{planId:PLAN,title:'Документированный пример',planText:'# Example\n\n## Этап 1. Проверить\nГотово.',planCreatedAt:{precision:'dateOnly',on:'2026-11-11',timeZone:'UTC'}});
@@ -43,6 +43,5 @@ test('documented example is accepted, stored, frozen and exported',async()=>{
   await invoke(c,'SaveTaskAssessment',{schemaVersion:1,commandId:crypto.randomUUID(),expectedVersion:0,payload});
   const saved=await invoke(c,'GetTaskAssessment',{planId:PLAN,assessmentId});assert.deepEqual(saved.assessment.context.agentTask,agentTask);
   await ok(c,'StartPlan',{planId:PLAN},0);const frozen=await invoke(c,'GetSavedEstimate',{planId:PLAN});assert.equal(frozen.source,'FROZEN_INPUT');
-  const report=await call(c,'/api/export');assert.equal(report.value.formatVersion,3);assert.deepEqual(report.value.plans.find(p=>p.planId===PLAN).frozenForecast,frozen.serverEstimation);
  }finally{c.close();}
 });

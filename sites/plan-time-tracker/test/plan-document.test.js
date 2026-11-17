@@ -29,7 +29,7 @@ const create = (c) =>
   });
 const progress = async (c) =>
   (await call(c, "/api/tracker/plans/" + PLAN + "/execution")).value;
-test("full Markdown survives creation, reading and export; only executable headings become steps", async () => {
+test("full Markdown survives creation and reading; only executable headings become steps", async () => {
   const c = context();
   try {
     await create(c);
@@ -56,9 +56,6 @@ test("full Markdown survives creation, reading and export; only executable headi
       c.db.sqlite.prepare("SELECT COUNT(*) n FROM work_intervals").get().n,
       0,
     );
-    const report = (await call(c, "/api/export")).value;
-    assert.equal(report.plans[0].planText, planText);
-    assert.equal(report.plans[0].steps[0].content, s.steps[0].content);
   } finally {
     c.close();
   }
@@ -328,7 +325,7 @@ test("stable stage IDs and fenced examples retain their source and assessment me
   }
 });
 
-test("large plans with more than 100 stages survive HTTP and MCP creation, reading, replay and export", async () => {
+test("large plans with more than 100 stages survive HTTP and MCP creation, reading and replay", async () => {
   const text = "# Большой план\n" + "Подробности плана. ".repeat(9000) + "\n" + Array.from({length: 120}, (_, i) => `## Этап ${i + 1}. Проверка\nСодержимое ${i + 1}\n`).join("");
   assert(text.length > 60000);
   assert(Buffer.byteLength(text) > 128 * 1024);
@@ -348,9 +345,6 @@ test("large plans with more than 100 stages survive HTTP and MCP creation, readi
       assert.equal(steps.at(-1).title,"Этап 120. Проверка");
       const target = JSON.parse(c.db.sqlite.prepare("SELECT requirements_json FROM assessment_targets WHERE step_id=?").get(steps.at(-1).step_id).requirements_json);
       assert.deepEqual(target,{plan:{title:"Большой план",planText:text},step:{stepId:steps.at(-1).step_id,title:steps.at(-1).title,content:steps.at(-1).content}});
-      const report = (await call(c,"/api/export")).value;
-      assert.equal(report.plans[0].planText,text);
-      assert.equal(report.plans[0].steps.length,120);
       const receipt = c.db.sqlite.prepare("SELECT payload_json FROM command_receipts WHERE command_id=?").get(args.commandId).payload_json;
       assert(Buffer.byteLength(receipt) < 2 * 1024 * 1024,"receipt must not repeat the complete document for every stage");
       await ok(c,"UpdatePlanMetadata",{planId:PLAN,title:"Переименованный большой план"},0);

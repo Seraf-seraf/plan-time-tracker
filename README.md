@@ -18,7 +18,7 @@ ATLM `agent-v5-operations` выбирает точечный прогноз из
 - `sites/plan-time-tracker/drizzle/` — канонические миграции 0001–0027.
 - `plugin/plan-time-tracker/` — локальный пакет с инструкциями track-plan и assess-task.
 - [Контракт плана и статусов](docs/plan-documents.md).
-- [Оценки и требования](docs/assessments.md), [ATLM](docs/atlm.md), [экспорт v3](docs/json-report.md).
+- [Оценки и требования](docs/assessments.md), [ATLM](docs/atlm.md).
 
 ```sh
 cd sites/plan-time-tracker

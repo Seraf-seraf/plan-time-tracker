@@ -101,11 +101,10 @@ test("tracker releases only allowlisted matching final domain rejections after t
   assert(tracker.includes('error.code="COMMAND_OUTCOME_UNKNOWN"'));
 });
 
-test("export link has the requested label and UTC storage copy remains unchanged", async () => {
+test("settings show the storage timezone and omit the removed export", async () => {
   const { html } = await clientScripts();
-  assert(html.includes('<a class="settings-export" href="/api/export">Скачать JSON отчет</a>'));
+  assert(!html.includes('href="/api/export"'));
   assert(html.includes("Все отметки времени хранятся в UTC."));
-  assert(!html.includes("Скачать личный экспорт JSON"));
 });
 
 
