@@ -103,7 +103,7 @@ test('a concurrent pause cannot add time beyond the report snapshot or disagree 
       const statement = prepare(sql), bind = statement.bind.bind(statement);
       statement.bind = (...args) => {
         const bound = bind(...args);
-        if (!paused && sql === 'SELECT start_ms,end_ms FROM work_intervals WHERE owner_id=? AND plan_id=? ORDER BY start_ms') {
+        if (!paused && sql.startsWith('SELECT i.plan_id,i.start_ms,i.end_ms FROM work_intervals i')) {
           const all = bound.all.bind(bound);
           bound.all = async () => { paused = true;c.advance(10000);await ok(c, 'PausePlan', { planId: PLAN }, 1);return all(); };
         }
@@ -129,7 +129,7 @@ test('a completion after the report cutoff is not counted as a completed plan', 
       const statement = prepare(sql), bind = statement.bind.bind(statement);
       statement.bind = (...args) => {
         const bound = bind(...args);
-        if (!finished && sql === 'SELECT p.* FROM plans p WHERE p.owner_id=? AND p.deleted_at IS NULL ORDER BY p.registered_at DESC') {
+        if (!finished && sql.startsWith('SELECT p.plan_id,p.title,p.status,p.version,p.finished_at,p.first_started_at FROM plans p')) {
           const all = bound.all.bind(bound);
           bound.all = async () => { finished = true;c.advance(10000);await set(c, step, 'DONE', 2);await ok(c, 'FinishPlan', { planId: PLAN, allowIncomplete: true, reason: 'Concurrent cutoff fixture' }, 1);return all(); };
         }
@@ -142,5 +142,23 @@ test('a completion after the report cutoff is not counted as a completed plan', 
     assert.equal(report.value.completedPlans, 0);assert.equal(report.value.completedMeasuredN, 0);assert.equal(report.value.completedMedianActiveMs, null);
     assert.equal(report.value.totalActiveMs, 60000);
     assert.equal((await call(c, path(PLAN, { ...period, asOf }))).value.steps[0].activeMs, 60000);
+  } finally { c.close(); }
+});
+
+test('analytics uses UTC before the first command and splits intervals at skipped midnight', async () => {
+  const c = context();
+  try {
+    const fresh = await call(c, '/api/analytics?from=2024-09-08&to=2024-09-08');
+    assert.equal(fresh.status, 200);
+    assert.equal(fresh.value.period.timeZone, 'UTC');
+    for (const [day, zone, hours] of [
+      ['2024-09-08', 'America/Santiago', 23],
+      ['2024-10-27', 'Europe/Berlin', 25],
+      ['2011-12-30', 'Pacific/Apia', 0],
+    ]) {
+      const result = await call(c, '/api/analytics?' + new URLSearchParams({from:day,to:day,timeZone:zone}));
+      assert.equal(result.status, 200);
+      assert.equal(result.value.period.endMs - result.value.period.startMs, hours * 3600000);
+    }
   } finally { c.close(); }
 });

@@ -162,6 +162,7 @@ for (const [client, type, code] of [
   ["tracker", "RecordStepResult", "LEASE_EXPIRED"],
   ["tracker", "RecordCheck", "RESULT_REVISION_STALE"],
   ["tracker", "ClaimStepAttempt", "REWORK_REQUIRED"],
+  ["main", "StartPlan", "ASSESSMENT_INCOMPLETE"],
   ["main", "FinishPlan", "CHECKPOINTS_INCOMPLETE"],
   ["main", "DeletePlan", "PLAN_DELETED"],
   ["main", "RestorePlan", "PLAN_NOT_DELETED"],
@@ -183,7 +184,7 @@ for (const [client, type, code] of [
             posts.push(sent);
             if (posts.length === 1) {
               if (mode === "network-post") throw new TypeError("Synthetic lost response");
-              return new Response(JSON.stringify({ error: { code, message: "Synthetic refusal" } }), { status: mode === "http-500" ? 500 : mode === "wrong-status-422" ? 422 : 409 });
+              return new Response(JSON.stringify({ error: { code, message: "Synthetic refusal" } }), { status: mode === "http-500" ? 500 : mode === "wrong-status-422" ? (type === "StartPlan" ? 400 : 422) : (type === "StartPlan" ? 422 : 409) });
             }
             return new Response(JSON.stringify({ commandId: sent.commandId, outcome: "OK", applied: false, replayed: true, result: { accepted: true } }));
           }
