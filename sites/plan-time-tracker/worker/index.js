@@ -2568,7 +2568,7 @@ export async function executeCommand(db, identity, envelope, channel, nowMs) {
 const PLAN_STATUSES = ["PLANNED", "RUNNING", "PAUSED", "COMPLETED"];
 const MAX_PLAN_PAGE_SIZE = 100;
 const PLAN_LIST_ORDER = "isCompleted ASC, registeredAt DESC, planId DESC";
-const PLAN_COMPLETION_GROUP = "CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END";
+const PLAN_COMPLETION_GROUP = "CASE WHEN p.status='COMPLETED' THEN 1 ELSE 0 END";
 
 async function listPlans(db, ownerId, nowMs, filter = {}) {
   if (!filter || typeof filter !== "object" || Array.isArray(filter) || Object.keys(filter).some(key => !["statuses", "limit", "cursor", "deleted"].includes(key))) {
@@ -2581,7 +2581,7 @@ async function listPlans(db, ownerId, nowMs, filter = {}) {
   if (!Array.isArray(statuses) || statuses.length < 1 || statuses.length > PLAN_STATUSES.length || new Set(statuses).size !== statuses.length || statuses.some(status => !PLAN_STATUSES.includes(status))) {
     throw appError("VALIDATION_ERROR", "statuses должен содержать уникальные состояния планов.");
   }
-  const clauses = ["owner_id=?", filter.deleted === true ? "deleted_at IS NOT NULL" : "deleted_at IS NULL", "status IN (" + statuses.map(() => "?").join(",") + ")"];
+  const clauses = ["p.owner_id=?", filter.deleted === true ? "p.deleted_at IS NOT NULL" : "p.deleted_at IS NULL", "p.status IN (" + statuses.map(() => "?").join(",") + ")"];
   const values = [ownerId, ...statuses];
   if (filter.cursor !== undefined) {
     let cursor;
@@ -2591,41 +2591,49 @@ async function listPlans(db, ownerId, nowMs, filter = {}) {
       || !Number.isSafeInteger(cursor[1]) || cursor[1] < 0 || !UUID.test(cursor[2] || "")) {
       throw appError("VALIDATION_ERROR", "Некорректный cursor списка планов.");
     }
-    clauses.push("(" + PLAN_COMPLETION_GROUP + " > ? OR (" + PLAN_COMPLETION_GROUP + " = ? AND (registered_at < ? OR (registered_at = ? AND plan_id < ?))))");
+    clauses.push("(" + PLAN_COMPLETION_GROUP + " > ? OR (" + PLAN_COMPLETION_GROUP + " = ? AND (p.registered_at < ? OR (p.registered_at = ? AND p.plan_id < ?))))");
     values.push(cursor[0], cursor[0], cursor[1], cursor[1], cursor[2]);
   }
-  const rows = await dbAll(db, "SELECT * FROM plans WHERE " + clauses.join(" AND ") + " ORDER BY " + PLAN_COMPLETION_GROUP + " ASC, registered_at DESC, plan_id DESC LIMIT ?", ...values, limit + 1);
-  const page = rows.slice(0, limit), last = page.at(-1);
-  const ids = JSON.stringify(page.map(row => row.plan_id));
-  const [intervalRows, summaryRows] = page.length ? await Promise.all([
-    dbAll(db, `SELECT plan_id,interval_id,start_ms,end_ms,opened_by,closed_by FROM work_intervals
-      WHERE owner_id=? AND plan_id IN (SELECT value FROM json_each(?)) ORDER BY plan_id,start_ms`, ownerId, ids),
-    dbAll(db, `SELECT p.plan_id,
-      (SELECT COUNT(*) FROM tracker_incomplete_steps i WHERE i.owner_id=p.owner_id AND i.plan_id=p.plan_id) AS incompleteStepCount,
+  // One query keeps this page to one round trip when SQLite is remote.
+  const rows = await dbAll(db, `WITH plan_page AS (
+      SELECT p.* FROM plans p WHERE ${clauses.join(" AND ")}
+      ORDER BY ${PLAN_COMPLETION_GROUP} ASC,p.registered_at DESC,p.plan_id DESC LIMIT ?
+    ), interval_lists AS (
+      SELECT w.owner_id,w.plan_id,json_group_array(json_object(
+        'interval_id',w.interval_id,'start_ms',w.start_ms,'end_ms',w.end_ms,
+        'opened_by',w.opened_by,'closed_by',w.closed_by)) AS intervals_json
+      FROM work_intervals w JOIN plan_page p ON p.owner_id=w.owner_id AND p.plan_id=w.plan_id
+      GROUP BY w.owner_id,w.plan_id
+    )
+    SELECT p.*,
+      COALESCE(i.intervals_json,'[]') AS intervals_json,
+      (SELECT COUNT(*) FROM tracker_incomplete_steps x WHERE x.owner_id=p.owner_id AND x.plan_id=p.plan_id) AS incompleteStepCount,
       (SELECT COUNT(*) FROM plan_steps s WHERE s.owner_id=p.owner_id AND s.plan_id=p.plan_id) AS enabled,
-      t.requirements_json,a.assessment_json,a.requirements_digest
-      FROM plans p LEFT JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id
-        AND t.step_id IS NULL AND p.status='PLANNED' AND p.deleted_at IS NULL
-      LEFT JOIN assessment_revisions a ON a.sequence=(SELECT MAX(r.sequence) FROM assessment_revisions r
-        WHERE r.owner_id=t.owner_id AND r.plan_id=t.plan_id AND r.step_id IS NULL)
-      WHERE p.owner_id=? AND p.plan_id IN (SELECT value FROM json_each(?))`, ownerId, ids),
-  ]) : [[], []];
-  const intervals = intervalsByPlan(intervalRows);
-  const summaries = new Map(summaryRows.map(row => [row.plan_id, row]));
+      (SELECT t.requirements_json FROM assessment_targets t WHERE t.owner_id=p.owner_id AND t.plan_id=p.plan_id
+        AND t.step_id IS NULL AND p.status='PLANNED' AND p.deleted_at IS NULL LIMIT 1) AS requirements_json,
+      (SELECT a.assessment_json FROM assessment_revisions a WHERE a.sequence=(SELECT MAX(r.sequence)
+        FROM assessment_revisions r WHERE r.owner_id=p.owner_id AND r.plan_id=p.plan_id AND r.step_id IS NULL)
+        AND EXISTS(SELECT 1 FROM assessment_targets t WHERE t.owner_id=p.owner_id AND t.plan_id=p.plan_id
+          AND t.step_id IS NULL AND p.status='PLANNED' AND p.deleted_at IS NULL) LIMIT 1) AS assessment_json,
+      (SELECT a.requirements_digest FROM assessment_revisions a WHERE a.sequence=(SELECT MAX(r.sequence)
+        FROM assessment_revisions r WHERE r.owner_id=p.owner_id AND r.plan_id=p.plan_id AND r.step_id IS NULL)
+        AND EXISTS(SELECT 1 FROM assessment_targets t WHERE t.owner_id=p.owner_id AND t.plan_id=p.plan_id
+          AND t.step_id IS NULL AND p.status='PLANNED' AND p.deleted_at IS NULL) LIMIT 1) AS requirements_digest
+    FROM plan_page p LEFT JOIN interval_lists i ON i.owner_id=p.owner_id AND i.plan_id=p.plan_id
+    ORDER BY ${PLAN_COMPLETION_GROUP} ASC,p.registered_at DESC,p.plan_id DESC`, ...values, limit + 1);
+  const page = rows.slice(0, limit), last = page.at(-1);
   return {
-    plans: await Promise.all(page.map(row => planSummary(db, ownerId, row, nowMs, intervals.get(row.plan_id) ?? [], summaries.get(row.plan_id)))),
+    plans: await Promise.all(page.map(row => {
+      const intervals = parseColumn(row.intervals_json, []);
+      intervals.sort((a, b) => a.start_ms - b.start_ms);
+      const summary = { incompleteStepCount: row.incompleteStepCount, enabled: row.enabled,
+        requirements_json: row.requirements_json, assessment_json: row.assessment_json,
+        requirements_digest: row.requirements_digest };
+      return planSummary(db, ownerId, row, nowMs, intervals, summary);
+    })),
     nextCursor: rows.length > limit ? JSON.stringify([last.status === "COMPLETED" ? 1 : 0, last.registered_at, last.plan_id]) : null,
     serverNow: nowMs,
   };
-}
-
-function intervalsByPlan(rows) {
-  const grouped = new Map();
-  for (const { plan_id, ...interval } of rows) {
-    if (!grouped.has(plan_id)) grouped.set(plan_id, []);
-    grouped.get(plan_id).push(interval);
-  }
-  return grouped;
 }
 
 async function planSummary(db, ownerId, row, nowMs, intervalRows, summary) {
