@@ -1,28 +1,28 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { selectHybridHistory, selectHybridEngine, evaluateHybridAtlmChronologically,
-  fitHybridAtlm, predictHybridAtlm, fitAtlmRidge } from '../worker/index.js';
+  fitHybridAtlm, predictHybridAtlm, fitAtlmRidge, normalizeAgentTask } from '../worker/index.js';
 import { evaluate } from '../scripts/evaluate-atlm.mjs';
+import { taskV4 } from './fixtures/tracker-db.mjs';
 
-const reference = JSON.parse(readFileSync(new URL('./fixtures/atlm-reference.json', import.meta.url)));
-const rows = reference.cases[0].rows;
+const rows = Array.from({length:12},(_,i)=>({sampleId:String(i+1),planId:`p${i}`,capturedAt:i*10000,sourceAvailableAt:i*10000+1000,
+  features:normalizeAgentTask({...taskV4(),reuseLevel:i%4}).features,actualMs:60000+i*10000}));
 const journal = rows.map((r, i) => ({...r,sampleId:String(i+1),eligibility:'ELIGIBLE',observedAt:r.sourceAvailableAt}));
 const available = pointMs => ({status:'AVAILABLE',pointMs,reason:null});
 const candidates = {ols:{status:'AVAILABLE'},ridge:{status:'AVAILABLE'}};
 
 test('selection uses comparable historical errors, five OWN forecasts and deterministic ties', () => {
   // Controlled forecast responses use existing facts; this is a selector contract, not an accuracy experiment.
-  const cases = rows.slice(0,6).map(r => ({...r,ols:available(r.actualMs),ridge:available(r.actualMs+4),median:available(r.actualMs+10)}));
+  const cases = rows.slice(0,6).map(r => ({...r,ols:available(r.actualMs),ridge:available(r.actualMs+4),median:available(r.actualMs+10),bayesian:{status:'UNAVAILABLE',pointMs:null,reason:'INSUFFICIENT_DATA'}}));
   assert.equal(selectHybridEngine(candidates,cases.slice(0,4)).selectedEngine,'RIDGE');
   assert.equal(selectHybridEngine(candidates,cases).selectedEngine,'OLS');
   const ridgeWins=cases.map(c=>({...c,ols:available(c.actualMs+8)}));
   assert.equal(selectHybridEngine(candidates,ridgeWins).selectedEngine,'RIDGE');
   const tie=cases.map(c=>({...c,ridge:available(c.actualMs+1)}));
-  assert.equal(selectHybridEngine(candidates,tie).selectedEngine,'RIDGE');
+  assert.equal(selectHybridEngine(candidates,tie).selectedEngine,'OLS');
   const threeWayTie=cases.map(c=>({...c,ridge:available(c.actualMs+1),median:available(c.actualMs+2)}));
-  assert.equal(selectHybridEngine(candidates,threeWayTie).selectedEngine,'RIDGE','prefer within 1ms of the global minimum, not a registration-order chain');
-  assert.equal(selectHybridEngine(candidates,cases.map(c=>({...c,median:available(c.actualMs)}))).selectedEngine,'MEDIAN');
+  assert.equal(selectHybridEngine(candidates,threeWayTie).selectedEngine,'OLS','within the 1 ms tie, prefer smaller absolute bias');
+  assert.equal(selectHybridEngine(candidates,cases.map(c=>({...c,ols:available(c.actualMs+10),median:available(c.actualMs)}))).selectedEngine,'MEDIAN');
   const missingOwn=cases.map(c=>({...c,ols:{status:'UNAVAILABLE',pointMs:null,reason:'RANK_DEFICIENT'}}));
   assert.equal(selectHybridEngine(candidates,missingOwn).ownPredictionCounts.ols,0);
   assert.equal(selectHybridEngine(candidates,missingOwn).selectedEngine,'RIDGE');
@@ -42,7 +42,7 @@ test('as-of reads observe versions before filtering eligibility and exclude equa
 test('entire hybrid decisions and preprocessing cannot see target outcomes or future versions', async () => {
   const input=journal.slice(0,12);
   const first=await evaluateHybridAtlmChronologically(input);
-  assert.equal(first.status,'AVAILABLE');assert.equal(first.protocolVersion,2);
+  assert.equal(first.status,'AVAILABLE');assert.equal(first.protocolVersion,3);
   const target=first.cases.at(-1), changed=structuredClone(input);
   changed.at(-1).actualMs=input[0].actualMs;
   changed.push({...input[0],sampleId:'100',observedAt:input.at(-1).sourceAvailableAt+1,sourceAvailableAt:input.at(-1).sourceAvailableAt+1,eligibility:'EXCLUDED'});
@@ -70,14 +70,13 @@ test('hybrid artifact dispatch is immutable and rejects inconsistent nested mode
   assert.equal(JSON.stringify(input),before);
 });
 
-test('journal CLI keeps protocol1 and rejects partial, mixed and reordered protocol2 input', async () => {
-  const input={formatVersion:2,sourceAuthority:'OWNER_EXPORT',datasetRevision:1,asOf:journal.at(-1).observedAt,
+test('journal CLI rejects legacy, partial and reordered input', async () => {
+  const input={formatVersion:3,sourceAuthority:'OWNER_EXPORT',datasetRevision:1,asOf:journal.at(-1).observedAt,
     throughSequence:journal.length,nextCursor:null,rows:journal};
-  const report=await evaluate(input);assert.equal(report.protocolVersion,2);
+  const report=await evaluate(input);assert.equal(report.protocolVersion,3);
   assert.equal(report.sourceAuthority,'OWNER_EXPORT');
   for(const change of [{nextCursor:'more'},{rows:[...journal].reverse()},{asOf:0},{throughSequence:journal.length+1}]) {
     await assert.rejects(()=>evaluate({...input,...change}));
   }
-  const legacy=await evaluate({formatVersion:1,sourceAuthority:'SYNTHETIC',rows:rows.slice(0,3),nextCursor:null});
-  assert.equal(legacy.protocolVersion,1);
+  await assert.rejects(()=>evaluate({formatVersion:1,sourceAuthority:'SYNTHETIC',rows:rows.slice(0,3),nextCursor:null}));
 });

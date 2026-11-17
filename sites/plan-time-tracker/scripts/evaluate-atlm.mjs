@@ -3,33 +3,24 @@
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { evaluateAtlmChronologically, evaluateHybridAtlmChronologically } from "../worker/index.js";
+import { evaluateHybridAtlmChronologically } from "../worker/index.js";
 
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 
 export async function evaluate(input) {
-  if (input?.formatVersion === 2) {
-    if (input.sourceAuthority !== "OWNER_EXPORT" || !Array.isArray(input.rows) || input.nextCursor !== null
-      || !Number.isSafeInteger(input.datasetRevision) || input.datasetRevision < 0 || !Number.isSafeInteger(input.asOf) || input.asOf < 0
-      || !Number.isSafeInteger(input.throughSequence) || input.throughSequence < 0
-      || input.rows.some((row, i) => Number(row.sampleId) > input.throughSequence || row.observedAt > input.asOf
-        || (i > 0 && Number(row.sampleId) <= Number(input.rows[i - 1].sampleId)))
-      || Number(input.rows.at(-1)?.sampleId ?? 0) !== input.throughSequence) {
-      throw new Error("Нужен полный упорядоченный журнал OWNER_EXPORT одного datasetRevision/asOf с nextCursor=null и throughSequence.");
-    }
-    const report = await evaluateHybridAtlmChronologically(input.rows, { cutoff: input.asOf });
-    if (report.status !== "AVAILABLE") throw new Error(`Оценка недоступна: ${report.reason}`);
-    return { ...report, sourceAuthority: input.sourceAuthority, datasetRevision: input.datasetRevision, throughSequence: input.throughSequence };
+  if (!input || input.formatVersion !== 3 || !["SYNTHETIC", "OWNER_EXPORT"].includes(input.sourceAuthority)
+    || !Array.isArray(input.rows) || input.nextCursor !== null
+    || !Number.isSafeInteger(input.datasetRevision) || input.datasetRevision < 0
+    || !Number.isSafeInteger(input.asOf) || input.asOf < 0
+    || !Number.isSafeInteger(input.throughSequence) || input.throughSequence < 0
+    || input.rows.some((row, i) => Number(row.sampleId) > input.throughSequence || row.observedAt > input.asOf
+      || (i > 0 && Number(row.sampleId) <= Number(input.rows[i - 1].sampleId)))
+    || Number(input.rows.at(-1)?.sampleId ?? 0) !== input.throughSequence) {
+    throw new Error("Нужен полный упорядоченный журнал версии 3 с одним datasetRevision/asOf и nextCursor=null.");
   }
-  if (!input || input.formatVersion !== 1 || !["SYNTHETIC", "OWNER_EXPORT"].includes(input.sourceAuthority)
-    || !Array.isArray(input.rows)) throw new Error("Ожидается formatVersion=1, sourceAuthority=SYNTHETIC/OWNER_EXPORT и rows.");
-  if (input.nextCursor != null) throw new Error("Сначала соберите все страницы одного datasetRevision; неполный экспорт нельзя оценивать.");
-  if (input.excluded !== undefined && (!Array.isArray(input.excluded) || input.excluded.length > 5000)) throw new Error("Некорректные исключённые источники.");
-  const options = { protocolVersion: 1 };
-  if (input.asOf !== undefined) options.cutoff = input.asOf;
-  const result = await evaluateAtlmChronologically(input.rows, options);
-  if (result.status !== "AVAILABLE") throw new Error(`Оценка недоступна: ${result.reason}`);
-  return { ...result, sourceAuthority: input.sourceAuthority, sourceExcludedCount: input.excluded?.length || 0 };
+  const report = await evaluateHybridAtlmChronologically(input.rows, { cutoff: input.asOf });
+  if (report.status !== "AVAILABLE") throw new Error(`Оценка недоступна: ${report.reason}`);
+  return { ...report, sourceAuthority: input.sourceAuthority, datasetRevision: input.datasetRevision, throughSequence: input.throughSequence };
 }
 
 async function main(args) {

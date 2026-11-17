@@ -4,9 +4,9 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { processEstimationTraining, getEstimationModelStatus, predictWithActiveModel,
-  normalizeAgentTaskV1, claimAtlmJob, scheduleAtlmTraining, readAtlmSamples, evaluateHybridAtlmChronologically } from "../worker/index.js";
+  normalizeAgentTask, claimAtlmJob, scheduleAtlmTraining, readAtlmSamples, evaluateHybridAtlmChronologically } from "../worker/index.js";
 import { context, plannedAtlm, completeAtlm, atlmTask, atlmAssessment, command, ok, mcp, rows, OWNER } from "./fixtures/tracker-db.mjs";
-const features = normalizeAgentTaskV1(atlmTask()).features;
+const features = normalizeAgentTask(atlmTask()).features;
 const drain = c => processEstimationTraining(c.db, OWNER, c.now(), { clock: c.now });
 const status = c => getEstimationModelStatus(c.db, OWNER, c.now());
 const trainJob = c => c.db.sqlite.prepare("SELECT * FROM estimation_jobs WHERE owner_id=? AND job_key='train'").get(OWNER);
@@ -62,7 +62,7 @@ test("one to two eligible plans triggers once; receipt replay and excluded plans
   try {
     await experience(c, 1, { processEach: true });
     assert.equal((await status(c)).newPlansSinceTraining, 1); assert.equal(trainJob(c), undefined);
-    const incomplete = atlmTask(); incomplete.outcomes = null;
+    const incomplete = atlmTask(); incomplete.workUnits = null; incomplete.unknownReasons.workUnits = "Unknown";
     await completed(c, 1000, incomplete); await drain(c);
     assert.equal((await status(c)).excludedSampleCount, 1); assert.equal(trainJob(c), undefined);
     const second = await completed(c);
@@ -81,38 +81,27 @@ test("one to two eligible plans triggers once; receipt replay and excluded plans
   } finally { c.close(); }
 });
 
-test("accumulated candidates preserve immutable artifacts and a median tie retains the incumbent", async () => {
-  const c = context();
-  try {
-    await experience(c, 15); await drain(c);
-    const first = await status(c), artifact = models(c).at(-1);
-    assert.equal(first.activeModel.sampleCount, 15); assert.equal(first.activeModel.evaluation.caseCount, 0);
-    assert.equal((await predictWithActiveModel(c.db, OWNER, features, c.now())).pointMs, 1000);
-    assert.throws(() => c.db.sqlite.prepare("UPDATE estimation_models SET manifest_json='[]' WHERE owner_id=? AND model_id=?").run(OWNER, artifact.model_id), /ATLM_MODEL_IMMUTABLE/);
-    c.advance(1); await experience(c, 5); await drain(c);
-    const second = await status(c), history = models(c);
-    assert.equal(second.activeModel.modelId, first.activeModel.modelId); assert.equal(history.at(-1).sample_count, 20);
-    assert.equal(second.lastReason,"MEDIAN_BASELINE_NOT_WORSE");
-    assert.equal(history.find(m => m.model_id === artifact.model_id).status, "ACTIVE");
-    assert.equal(history.find(m => m.model_id === artifact.model_id).artifact_json, artifact.artifact_json);
-    assert.equal(history.filter(m => m.status === "ACTIVE").length, 1);
-    assert.equal(JSON.parse(history.at(-1).metrics_json).selection.selectedEngine, "MEDIAN");
-    assert.equal(c.db.sqlite.prepare("SELECT COUNT(*) AS n FROM estimation_samples").get().n, 20);
-  } finally { c.close(); }
+test("accumulated candidates preserve immutable artifacts and the incumbent engine on ties", async () => {
+  const c=context();try {
+    await experience(c,15);await drain(c);const first=await status(c),artifact=models(c).at(-1);
+    assert.equal(first.activeModel.sampleCount,15);assert.equal(first.activeModel.evaluation.pointCaseCount,0);
+    assert.throws(()=>c.db.sqlite.prepare("UPDATE estimation_models SET manifest_json='[]' WHERE owner_id=? AND model_id=?").run(OWNER,artifact.model_id),/ATLM_MODEL_IMMUTABLE/);
+    c.advance(1);await experience(c,5);await drain(c);
+    const second=await status(c),history=models(c);
+    assert.equal(second.activeModel.hybrid.selectedEngine,first.activeModel.hybrid.selectedEngine);
+    assert.equal(history.find(m=>m.model_id===artifact.model_id).artifact_json,artifact.artifact_json);
+    assert.equal(history.filter(m=>m.status==='ACTIVE').length,1);assert.equal(history.at(-1).sample_count,20);
+  }finally{c.close();}
 });
 
-test("a worse candidate is rejected without changing the active prediction or retrying its same five plans", async () => {
-  const c = context();
-  try {
-    await experience(c, 15); await drain(c);
-    const before = await predictWithActiveModel(c.db, OWNER, features, c.now());
-    c.advance(1); await completed(c, 100000); await experience(c, 4); await drain(c);
-    const s = await status(c);
-    assert.equal(s.training.status, "REJECTED"); assert.equal(s.lastReason, "MEDIAN_BASELINE_NOT_WORSE");
-    assert.equal(s.training.due, false); assert.equal(s.newPlansSinceTraining, 0); assert.equal(models(c).at(-1).status, "REJECTED");
-    assert.deepEqual(await predictWithActiveModel(c.db, OWNER, features, c.now()), before);
-    await drain(c); assert.equal(models(c).length, 2);
-  } finally { c.close(); }
+test("a failed candidate leaves the active prediction available",async()=>{
+ const c=context();try{
+  await experience(c,15);await drain(c);const before=await predictWithActiveModel(c.db,OWNER,features,c.now());
+  c.db.sqlite.exec("CREATE TRIGGER reject_new_model BEFORE INSERT ON estimation_models BEGIN SELECT RAISE(ABORT,'fixture fault'); END;");
+  await experience(c,2);await assert.rejects(()=>drain(c));
+  assert.equal((await status(c)).training.status,'RETRY_WAIT');assert.deepEqual(await predictWithActiveModel(c.db,OWNER,features,c.now()),before);
+  c.db.sqlite.exec('DROP TRIGGER reject_new_model');
+ }finally{c.close();}
 });
 
 test("a second runner cannot replace a leased snapshot; another five plans survive finalization", async () => {
@@ -127,7 +116,7 @@ test("a second runner cannot replace a leased snapshot; another five plans survi
     assert.equal(models(c).length, 0); paused.release(); await pending;
     const history = models(c);
     assert.deepEqual(history.map(m => m.sample_count), [15, 20]);
-    assert.equal(JSON.parse(history[0].manifest_json).length, 15); assert.equal(history[1].status, "ACTIVE");
+    assert.equal(JSON.parse(history[0].manifest_json).length, 15); assert.equal(history[1].status, "REJECTED"); assert.equal(history[0].status, "ACTIVE");
     assert.equal((await status(c)).newPlansSinceTraining, 0);
   } finally { paused?.release(); if (pending) await pending.catch(() => {}); c.close(); }
 });
@@ -158,7 +147,7 @@ test("checkpoint survives a database reopen and queued continuation does not con
     const initial = await paused.reached;
     c.advance(60001); paused.release(); await pending;
     const persisted = trainJob(c), resumeAt = c.now();
-    c.db.sqlite.prepare("UPDATE estimation_jobs SET status='QUEUED',lease_until=NULL WHERE owner_id=? AND job_key='train'").run(OWNER);
+    c.db.sqlite.prepare("UPDATE estimation_jobs SET status='QUEUED',lease_until=NULL,executor_epoch=executor_epoch+1 WHERE owner_id=? AND job_key='train'").run(OWNER);
     c.close(); c = context(0, { databasePath }); c.advance(resumeAt - c.now()); await drain(c);
     assert.equal(trainJob(c).attempts, persisted.attempts);
     assert.equal(models(c)[0].manifest_json, JSON.stringify(JSON.parse(initial.snapshot_json).manifest));
@@ -351,7 +340,7 @@ test("a ten second bounded pass checkpoints between cases and resumes without sp
     restore();
     assert.equal(first.training.status, "QUEUED"); assert.equal(first.training.due, true);
     assert.equal(first.training.progress.completedCases, 0); assert.equal(first.training.progress.totalCases, 15);
-    assert.equal(first.training.progress.phase,"BASE_CASE");
+    assert.equal(first.training.progress.phase,"EVALUATE");
     assert.equal(Object.keys(JSON.parse(trainJob(c).checkpoint_json).baseCases).length,1);
     const checkpoint = trainJob(c), snapshot = checkpoint.snapshot_json;
     assert.equal(checkpoint.attempts, 1); assert.equal(models(c).length, 0);
@@ -418,13 +407,14 @@ test("late-ingested batches persist early models without inventing historical ch
       await experience(c,n);
       const response=await mcp(c,"StartTraining");assert.equal(response.value.result.isError,undefined,JSON.stringify(response.value));
       const state=await status(c),model=models(c).at(-1);
+      if(n===1){assert.equal(state.activeModel,null);assert.equal(model.reason,'INSUFFICIENT_DATA');continue;}
       assert.equal(state.activeModel.sampleCount,n);
-      assert.equal(state.activeModel.evaluation.caseCount,0);
-      assert.equal(model.method_version,"agent-v3-hybrid");assert.equal(model.feature_version,"agent-task-v2");
+      assert.equal(state.activeModel.evaluation.pointCaseCount,0);
+      assert.equal(model.method_version,"agent-v4-probabilistic");assert.equal(model.feature_version,"agent-task-v3");
       const before=rows(c),prediction=await predictWithActiveModel(c.db,OWNER,features,c.now());
       assert.equal(prediction.pointMs,1000);
       assert.equal(prediction.accuracy,"EXPERIMENTAL");
-      assert.equal(prediction.evaluation.qualityConfirmed,false);
+      assert.equal(prediction.evaluation.validationStatus,"EXPERIMENTAL");
       if(n===1)assert.equal(prediction.evaluation.maeMs,null);
       assert.deepEqual(rows(c),before,"inference reuses immutable stored artifacts without training or writes");
     }finally{c.close();}
@@ -442,7 +432,7 @@ test("a checkpoint from another method restarts evaluation under the current lea
       .run(JSON.stringify(old),JSON.stringify({phase:'EVALUATE',cases:[{sampleId:'invalid-old-case'}],progressRevision:1}),OWNER);
     paused.release();await pending;c.advance(60001);await drain(c);c.advance(300000);await drain(c);
     assert.equal((await status(c)).activeModel.sampleCount,2);
-    const job=trainJob(c);assert.equal(JSON.parse(job.snapshot_json).methodVersion,'agent-v3-hybrid');
+    const job=trainJob(c);assert.equal(JSON.parse(job.snapshot_json).methodVersion,'agent-v4-probabilistic');
     assert.equal(JSON.parse(job.checkpoint_json).cases.length,2);
     assert.equal((await predictWithActiveModel(c.db,OWNER,features,c.now())).pointMs,1000);
   }finally{paused?.release();if(pending)await pending.catch(()=>{});c.close();}
@@ -451,15 +441,15 @@ test("a checkpoint from another method restarts evaluation under the current lea
 test("ridge unblocks failed OLS and attempt diagnostics stay independent of later counts",async()=>{
  const c=context();try{
   await completed(c);
-  const t=atlmTask();t.profile.workKind="CREATE_MECHANISM";t.profile.reuseState="ABSENT";
-  t.outcomes.push({id:"second",description:"Second independent result",evidence:"Synthetic requirement"});
+  const t=atlmTask();t.reuseLevel=0;
+  t.workUnits.push({id:"second",kind:"CREATE",description:"Second independent result",evidence:"Synthetic requirement"});
   await completed(c,2000,t);await drain(c);
   const first=await status(c);
   assert.equal(first.lastReason,null);
   assert.equal(first.lastAttempt.code,"AVAILABLE");
   assert.equal(first.lastAttempt.candidates.ols.reason,"INSUFFICIENT_DATA");
   assert.equal(first.lastAttempt.candidates.ols.sampleCount,2);
-  assert.equal(first.lastAttempt.candidates.ols.p,4);
+  assert.equal(first.lastAttempt.candidates.ols.p,3);
   assert.equal(first.lastAttempt.candidates.ridge.status,"AVAILABLE");
   assert.equal(first.lastAttempt.selection.selectedEngine,"RIDGE");
   const snapshot=JSON.stringify(first.lastAttempt);
@@ -473,45 +463,30 @@ test("ridge unblocks failed OLS and attempt diagnostics stay independent of late
  }finally{c.close();}
 });
 
-test("ingested reference history validates the whole policy and preserves a readable legacy OLS model",async()=>{
-  const c=context();try{
-    // Existing numerical reference facts, not invented durations or owner records.
-    const reference=JSON.parse(readFileSync(new URL('./fixtures/atlm-reference.json',import.meta.url)));
-    for(const row of reference.cases[0].rows.slice(0,12)){
-      const f=row.features,task=atlmTask();
-      task.profile=Object.fromEntries(['workKind','reuseState','doneBoundary'].map(k=>[k,f[k]]));
-      task.outcomes=Array.from({length:f.outcomeCount},(_,i)=>({id:'out-'+i,description:'Reference outcome',evidence:'Existing reference fixture'}));
-      task.changedContracts=Array.from({length:f.contractCount},(_,i)=>({kind:'OTHER',key:'contract-'+i,description:'Reference contract',evidence:'Existing reference fixture'}));
-      task.verificationKinds=['BUILD_STATIC','UNIT','INTEGRATION','UI_E2E','DEPLOY_SMOKE'].slice(0,f.verificationKindCount);
-      const p=await plannedAtlm(c,crypto.randomUUID(),task);await completeAtlm(c,p,row.actualMs);await drain(c);c.advance(1);
-    }
-    const current=await status(c);
-    assert.equal(current.activeModel.accuracy,'HISTORICALLY_EVALUATED');
-    assert.equal(current.activeModel.hybrid.selectedEngine,'OLS');
-    assert.equal(current.activeModel.evaluation.protocolVersion,2);
-    assert.equal(current.activeModel.evaluation.metricsScope,'FULL_POLICY');
-    assert(current.activeModel.evaluation.maeMs<current.activeModel.evaluation.medianBaselineMaeMs);
-    assert.equal(current.activeModel.evaluation.caseCount,11);
-    assert.equal(current.activeModel.evaluation.modelCaseCount,10);
-    const active=models(c).find(m=>m.status==='ACTIVE'),artifact=JSON.parse(active.artifact_json);
-    const journal=await readAtlmSamples(c.db,OWNER,{latestOnly:false});
-    const replay=await evaluateHybridAtlmChronologically(journal,{cutoff:active.train_cutoff});
-    assert.deepEqual(JSON.parse(active.metrics_json).cases,replay.cases,'SQL as-of reads equal the immutable journal replay');
-    assert.deepEqual(JSON.parse(active.metrics_json).metrics,replay.metrics);
-    const hybrid=await predictWithActiveModel(c.db,OWNER,features,c.now());
-    const old=artifact.candidates.ols.artifact;
-    c.db.sqlite.prepare("UPDATE estimation_models SET status='RETIRED' WHERE owner_id=? AND model_id=?").run(OWNER,active.model_id);
-    c.db.sqlite.prepare(`INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,
+test("new journal replay matches the persisted evaluation and retired models are unavailable",async()=>{
+ const c=context();try{
+  for(let i=0;i<8;i++){const task=atlmTask();task.reuseLevel=i%4;await completed(c,1000+i*300,task);await drain(c);}
+  const active=models(c).find(m=>m.status==='ACTIVE');assert.ok(active);
+  const journal=await readAtlmSamples(c.db,OWNER,{latestOnly:false});
+  const replay=await evaluateHybridAtlmChronologically(journal,{cutoff:active.train_cutoff});
+  assert.deepEqual(JSON.parse(active.metrics_json).cases,replay.cases);
+  assert.deepEqual(JSON.parse(active.metrics_json).metrics,replay.metrics);
+  const artifact=JSON.parse(active.artifact_json);
+  c.db.sqlite.prepare("UPDATE estimation_models SET status='RETIRED' WHERE owner_id=? AND model_id=?").run(OWNER,active.model_id);
+  c.db.sqlite.prepare(`INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,
       train_cutoff,metrics_json,sample_count,created_at,method_version,feature_version)
       VALUES(?,'legacy-v2',1000,'ACTIVE',?,?,?,?,?,?,?,'agent-v2','agent-task-v2')`)
-      .run(OWNER,JSON.stringify(old),active.manifest_json,old.datasetDigest,active.train_cutoff,active.metrics_json,old.n,c.now());
-    c.db.sqlite.prepare("UPDATE estimation_owner_state SET active_model_id='legacy-v2' WHERE owner_id=?").run(OWNER);
-    const legacy=await predictWithActiveModel(c.db,OWNER,features,c.now());
-    assert.equal(legacy.status,'AVAILABLE');assert.equal(legacy.pointMs,hybrid.pointMs);
-    assert.equal(legacy.method.version,'agent-v2');assert.equal(legacy.hybrid,undefined);
-    const next=await plannedAtlm(c,crypto.randomUUID());
-    await ok(c,'RecordAssessment',await atlmAssessment(c,next.planId,atlmTask(),{predictionRequest:{method:'ATLM',methodVersion:1}}),0);
-    const saved=(await mcp(c,'GetSavedEstimate',{planId:next.planId})).value.result.structuredContent;
-    assert.equal(saved.serverEstimation.method.version,'agent-v2','read and guarded forecast write support the same legacy model');
-  }finally{c.close();}
+      .run(OWNER,JSON.stringify(artifact.candidates.ridge.artifact),active.manifest_json,active.dataset_digest,active.train_cutoff,active.metrics_json,active.sample_count,c.now());
+  c.db.sqlite.prepare("UPDATE estimation_owner_state SET active_model_id='legacy-v2' WHERE owner_id=?").run(OWNER);
+  assert.equal((await predictWithActiveModel(c.db,OWNER,features,c.now())).unavailableReason,'MODEL_INVALIDATED');
+ }finally{c.close();}
+});
+
+test('two new observations cannot replace an experimental incumbent without five comparisons',async()=>{
+ const c=context();try{
+  await experience(c,2);await drain(c);const first=await status(c);assert.equal(first.activeModel.accuracy,'EXPERIMENTAL');
+  c.advance(1);await experience(c,2);await drain(c);const next=await status(c);
+  assert.equal(next.activeModel.modelId,first.activeModel.modelId);
+  assert.equal(next.lastReason,'INSUFFICIENT_INCUMBENT_CASES');assert.equal(models(c).at(-1).status,'REJECTED');
+ }finally{c.close();}
 });
