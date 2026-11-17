@@ -1,6 +1,6 @@
 import { UI_FONT_CSS } from "./fonts.js";
 
-const TRACKER_VERSION = "0.6.1";
+const TRACKER_VERSION = "0.7.0";
 const BODY_LIMIT = 128 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SNAPSHOT_DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -3099,7 +3099,7 @@ const UI_ATLM = String.raw`(()=>{
     const engine=model.hybrid?.usedEngine||model.hybrid?.selectedEngine;
     if(engine==="BAYESIAN")return "ATLM: Bayesian";
     if(engine==="RIDGE")return "ATLM — ridge";
-    if(engine==="OLS"||model.method?.version==="agent-v2")return "ATLM — обычная регрессия";
+    if(engine==="OLS")return "ATLM — обычная регрессия";
     return "ATLM";
   }
   function intervalText(interval){return interval?.status==="AVAILABLE" ? minutes(interval.lowerMs)+" – "+minutes(interval.upperMs) : "Нет диапазона";}

@@ -1,40 +1,17 @@
-# Названия инструментов MCP
+# Инструменты MCP
 
-Имена команд — короткие глаголы на английском, описания — на русском. Для совместимости старые имена переименованных инструментов ещё принимаются, но в списке показываются новые. Удалённые CalculateEstimate и BlockStep не работают.
+Актуальный список, схемы входов и ограничения возвращает GetTrackerInfo и `tools/list`. Чтение доступно только в области владельца. Изменяющие команды используют UUID commandId; версионируемые команды требуют expectedVersion. GetCommandResult позволяет проверить исход команды после потери ответа.
 
-## Прогноз и время
+| Инструмент | Назначение |
+| --- | --- |
+| CreatePlan, GetPlan, ListPlans, UpdatePlan | Сохранить исходный план, прочитать или изменить метаданные. |
+| StartPlan, PausePlan, ResumePlan, FinishPlan | Управлять временем конкретного плана. |
+| DeletePlan, RestorePlan | Удалить план или восстановить без запуска таймера. |
+| GetPlanProgress, SetStepStatus | Читать и изменять текущее состояние этапов. |
+| SaveTaskAssessment, GetTaskAssessment | Сохранить оценку или прочитать исходные требования и ревизии. |
+| EstimatePlanTime, GetSavedEstimate | Рассчитать текущий прогноз или прочитать текущий либо зафиксированный снимок. |
+| GetTrainingStatus, GetTrainingData, GetTrainingHistory | Прочитать состояние, примеры или попытки обучения. |
+| StartTraining, ContinueTraining | Запросить обучение или продолжить ограниченную обработку. |
+| GetTimeReport, GetTimeHistory | Прочитать измеренное время и оценки. |
 
-| Раньше | Теперь | Что делает |
-| --- | --- | --- |
-| CalculateAtlmEstimate | EstimatePlanTime | Вычисляет прогноз полного активного времени до первого запуска. |
-| GetPlanEstimate | GetSavedEstimate | Читает ранее сохранённый прогноз, не рассчитывает новый. |
-| CalculateEstimate | удалить | Старый отдельный расчёт медианы больше не нужен в основном сценарии. |
-| GetAnalytics | GetTimeReport | Показывает уже затраченное время за период. |
-| GetEstimationModelStatus | GetTrainingStatus | Показывает состояние обучения и количество пригодных примеров. |
-| StartEstimationTraining | StartTraining | По прямой просьбе пользователя запрашивает попытку обучения. |
-| ProcessEstimationTraining | ContinueTraining | Продолжает уже начатую подготовку данных и обучение. |
-| GetAtlmDataset | GetTrainingData | Показывает примеры обучения и причины исключения. |
-| RecordAssessment | SaveTaskAssessment | Сохраняет признаки задачи и запрашивает сохранение прогноза. |
-| GetAssessment | GetTaskAssessment | Читает сохранённую оценку или исходные требования. |
-| GetEstimationHistory | GetTimeHistory | Читает историю фактов времени и оценок. |
-
-## Планы, шаги и события
-
-Понятные названия CreatePlan, GetPlan, ListPlans, StartPlan, PausePlan, ResumePlan, FinishPlan, DeletePlan, RestorePlan, CreateStep, UpdateStep и StartStep оставить. Для остальных команд используются следующие названия:
-
-| Раньше | Теперь | Что делает |
-| --- | --- | --- |
-| UpdatePlanMetadata | UpdatePlan | Изменяет название, описание или критерии плана. |
-| GetTrackerCapabilities | GetTrackerInfo | Возвращает поддерживаемые возможности и ограничения. |
-| GetPlanExecutionSnapshot | GetPlanProgress | Показывает шаги, попытки и проверки плана. |
-| GetTimeline | GetPlanHistory | Показывает события плана по порядку. |
-| GetCommandReceipt | GetCommandResult | Проверяет результат ранее отправленной команды. |
-| ClaimStepAttempt | AssignStepAttempt | Закрепляет попытку шага за исполнителем. |
-| RenewStepLease | ExtendStepAssignment | Продлевает право исполнителя на попытку. |
-| CloseStepAttempt | CloseStepAttempt | Закрывает попытку без подмены результата шага. |
-| RecordStepResult | SaveStepResult | Записывает результат шага. |
-| RecordCheck | SaveCheckResult | Записывает результат проверки. |
-| AppendObservation | RecordActivityEvent | Записывает служебное событие агента для истории и диагностики. |
-| BlockStep | удалить | Новые блокировки не создаются; ранее сохранённая история остаётся. |
-
-После обновления открой новую сессию, чтобы клиент получил актуальный список инструментов.
+Признаки и интервалы описаны в [ATLM](atlm.md), учёт времени — в [контракте плана](plan-documents.md).

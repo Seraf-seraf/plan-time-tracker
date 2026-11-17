@@ -1,6 +1,6 @@
 # Исходные признаки ATLM
 
-Контракт подключён к приёму оценок и регрессорам; переход полного цикла обучения ещё не завершён.
+Признаки используются для прогнозирования и обучения ATLM.
 
 `context.agentTask` описывает задачу до первого запуска. Версия схемы — `agent-task-v3`. Все поля обязательны. Неизвестный список или число обозначается `null`, неизвестная категория — `UNKNOWN`. Пустой список и ноль означают проверенное отсутствие. Источники скалярных значений записываются в `evidence` по пути поля, причины неизвестных значений — в `unknownReasons`. Элементы списков содержат `evidence`; не передавайте секреты или исходный код.
 
@@ -29,3 +29,79 @@
 | `execution` | `{mode, modelId, reasoningEffort, environmentId, plannedParallelAgents, codebaseFamiliarity}`. mode — AI_AGENT, HUMAN, HYBRID или UNKNOWN; environmentId — local, cloud_workspace или null; число агентов положительно либо null; familiarity — NOT_READ, MAPPED, PRIOR_VERIFIED_WORK или UNKNOWN. |
 
 Точные дубли нормализуются; один ключ с разными значениями отклоняется. `dataVolumeBand=NONE` несовместим с непустой миграцией. DEPLOY_SMOKE выбирается только при требовании развёртывания. Для прогноза необходимы известные `workUnits` и `doneBoundary`; неизвестные дополнительные признаки остаются пропусками, а не нулями. Счётчики вычисляет сервер.
+
+
+Один результат считается один раз; этапы выполнения и повторные запуски теста не являются отдельными результатами. Один контракт учитывается один раз для всех потребителей. `execution.environmentId` принимает только `local`, `cloud_workspace` или `null`. При `null` для него, `modelId` или `reasoningEffort` укажите причину в `unknownReasons`. Для DEBUG недопустим `NOT_APPLICABLE`; без DEBUG он обязателен. Assessment вместе с серверным прогнозом ограничен 65 536 UTF-8 байтами и глубиной JSON 12.
+
+Пример исходных признаков:
+
+```json
+{
+  "schemaVersion": "agent-task-v3",
+  "workUnits": [
+    {
+      "id": "feature",
+      "kind": "MODIFY",
+      "description": "Update behavior",
+      "evidence": "Requirement"
+    }
+  ],
+  "doneBoundary": "LOCAL_VERIFIED",
+  "reuseLevel": 2,
+  "components": [],
+  "contracts": [],
+  "integrations": [],
+  "migrationEntities": [],
+  "dataVolumeBand": "NONE",
+  "requirementsUncertainty": 0,
+  "solutionUncertainty": 1,
+  "diagnosisState": "NOT_APPLICABLE",
+  "unfamiliarTechnologies": null,
+  "scopeChangeRisk": 0,
+  "verificationKinds": [
+    "UNIT"
+  ],
+  "verificationScenarios": [
+    {
+      "id": "check",
+      "description": "Check behavior",
+      "evidence": "Requirement"
+    }
+  ],
+  "verificationReadiness": "ADAPT",
+  "requiredReviewPasses": 0,
+  "environmentReadiness": "READY",
+  "accessReadiness": "AVAILABLE",
+  "deploymentTargets": [],
+  "execution": {
+    "mode": "AI_AGENT",
+    "modelId": null,
+    "reasoningEffort": null,
+    "environmentId": "cloud_workspace",
+    "plannedParallelAgents": 1,
+    "codebaseFamiliarity": "MAPPED"
+  },
+  "evidence": {
+    "doneBoundary": "Known from task",
+    "reuseLevel": "Known from task",
+    "dataVolumeBand": "Known from task",
+    "requirementsUncertainty": "Known from task",
+    "solutionUncertainty": "Known from task",
+    "diagnosisState": "Known from task",
+    "scopeChangeRisk": "Known from task",
+    "verificationReadiness": "Known from task",
+    "requiredReviewPasses": "Known from task",
+    "environmentReadiness": "Known from task",
+    "accessReadiness": "Known from task",
+    "execution.mode": "Known from task",
+    "execution.environmentId": "Known from task",
+    "execution.plannedParallelAgents": "Known from task",
+    "execution.codebaseFamiliarity": "Known from task"
+  },
+  "unknownReasons": {
+    "unfamiliarTechnologies": "Not yet established",
+    "execution.modelId": "Not disclosed",
+    "execution.reasoningEffort": "Not disclosed"
+  }
+}
+```

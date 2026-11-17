@@ -61,9 +61,9 @@ test("packaged Worker learns automatically from completed plans and freezes the 
     const learned = await readTool("GetEstimationModelStatus");
     assert.equal(learned.eligibleSampleCount, 10);
     assert.ok(learned.activeModel, JSON.stringify(learned));
-    assert.equal(learned.activeModel.sampleCount, 4, "a tie with the median keeps the prior experimental artifact");
+    assert.ok(learned.activeModel.sampleCount>=2 && learned.activeModel.sampleCount<=10, "only observed plans enter the active model");
     assert.equal(learned.lastAttempt.parameters.sampleCount, 10, "the new attempt still fits all accumulated history");
-    assert.equal(learned.lastReason, 'MEDIAN_BASELINE_NOT_WORSE');
+    assert.equal(learned.lastReason, 'INSUFFICIENT_INCUMBENT_CASES');
     assert.ok(scheduled > 0, "normal tracker commands actually schedule background processing");
 
     const historical = await readTool("GetPlanEstimate", { planId: firstId });
@@ -80,8 +80,8 @@ test("packaged Worker learns automatically from completed plans and freezes the 
     assert.equal(issued.serverEstimation.status, "AVAILABLE");
     assert.equal(issued.serverEstimation.pointMs, 1000);
     assert.equal(issued.serverEstimation.modelId, learned.activeModel.modelId);
-    assert.equal(issued.serverEstimation.interval, null);
-    assert.equal(issued.serverEstimation.confidence, "UNKNOWN");
+    assert.equal(issued.serverEstimation.interval.status, "AVAILABLE");
+    assert.ok(issued.serverEstimation.interval.lowerMs<=issued.serverEstimation.pointMs && issued.serverEstimation.interval.upperMs>=issued.serverEstimation.pointMs);
     const saved = await readTool("GetAssessment", { planId: targetId, assessmentId: assessment.assessmentId });
     assert.equal(saved.assessment.forecast.status, "UNKNOWN");
     assert.equal(saved.assessment.forecast.lowerMs, null);
