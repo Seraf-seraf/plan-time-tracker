@@ -3,14 +3,14 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { context, OWNER, PLAN, ok } from "./fixtures/tracker-db.mjs";
+import { assessForStart, context, OWNER, PLAN, ok } from "./fixtures/tracker-db.mjs";
 const modulePath = process.env.PLAYWRIGHT_MODULE || "playwright";
 const { chromium } = await import(modulePath.startsWith("/") ? pathToFileURL(modulePath).href : modulePath);
 const c = context(), minute = 60000, B = "22222222-2222-4222-8222-222222222222";
 c.advance(Date.parse("2026-10-15T10:00:00Z") - c.now());
 const create = (planId, title) => ok(c, "CreatePlan", { planId, title, planCreatedAt: { precision: "dateOnly", on: "2026-10-15", timeZone: "UTC" } });
-await create(PLAN, "План A");await ok(c, "StartPlan", { planId: PLAN }, 0);c.advance(30 * minute);
-await create(B, "План B");await ok(c, "StartPlan", { planId: B }, 0);c.advance(60 * minute);
+await create(PLAN, "План A");await assessForStart(c,PLAN);await ok(c, "StartPlan", { planId: PLAN }, 0);c.advance(30 * minute);
+await create(B, "План B");await assessForStart(c,B);await ok(c, "StartPlan", { planId: B }, 0);c.advance(60 * minute);
 // More than a full page must never hide either active plan, including equal registration times.
 for (let i = 0; i < 100; i++) await create(crypto.randomUUID(), "Синтетический план " + i);
 // Put B on the earlier page and A on the later page so timing differs between pages.

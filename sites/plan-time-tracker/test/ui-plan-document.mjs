@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { context, OWNER, ok, call, command } from "./fixtures/tracker-db.mjs";
+import { assessForStart, context, OWNER, ok, call, command } from "./fixtures/tracker-db.mjs";
 import { planText } from "./fixtures/plan-document.mjs";
 const modulePath = process.env.PLAYWRIGHT_MODULE || "playwright";
 const { chromium } = await import(
@@ -95,7 +95,9 @@ try {
     planText,
   );
   await page.getByText("Исходный текст", { exact: true }).click();
+  await assessForStart(c,planId);
   await page.locator("#backPlans").click();
+  await page.reload();await page.locator('[data-view="plans"]').click();
   await page
     .locator('#plans [data-plan-id="' + planId + '"] button')
     .filter({ hasText: "Запустить" })

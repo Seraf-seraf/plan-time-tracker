@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { context, OWNER, PLAN, ok, running } from "./fixtures/tracker-db.mjs";
+import { assessForStart, context, OWNER, PLAN, ok, running } from "./fixtures/tracker-db.mjs";
 const modulePath = process.env.PLAYWRIGHT_MODULE || "playwright";
 const { chromium } = await import(modulePath.startsWith("/") ? pathToFileURL(modulePath).href : modulePath);
 const c = context(), B = "22222222-2222-4222-8222-222222222222";
@@ -11,7 +11,7 @@ c.advance(Date.parse("2026-10-15T10:00:00Z") - c.now());
 const lease = await running(c);
 await ok(c, "UpdatePlanMetadata", { planId: PLAN, title: "План A" }, 1);
 await ok(c, "CreatePlan", { planId: B, title: "План B", planCreatedAt: { precision: "dateOnly", on: "2026-10-15", timeZone: "UTC" } });
-await ok(c, "StartPlan", { planId: B }, 0);
+await assessForStart(c,B);await ok(c, "StartPlan", { planId: B }, 0);
 for (let i = 0; i < 101; i++) {
   c.advance(1);const created = await ok(c, "CreatePlan", { title: "Удалённый пример " + i, planCreatedAt: { precision: "dateOnly", on: "2026-10-15", timeZone: "UTC" } });
   await ok(c, "DeletePlan", { planId: created.planId }, 0);
@@ -103,7 +103,7 @@ try {
     const created = await ok(c, "CreatePlan", { title: (status + " · Очень длинное название плана для проверки расположения кнопок · " + "ДлинноеСлово".repeat(12)).slice(0, 200), planCreatedAt: { precision: "dateOnly", on: "2026-10-15", timeZone: "UTC" } });
     let version = 0;
     if (["RUNNING", "PAUSED", "COMPLETED"].includes(status)) {
-      await ok(c, "StartPlan", { planId: created.planId }, version++);
+      await assessForStart(c,created.planId);await ok(c, "StartPlan", { planId: created.planId }, version++);
       c.advance(60000);
     }
     if (status === "PAUSED") await ok(c, "PausePlan", { planId: created.planId }, version++);

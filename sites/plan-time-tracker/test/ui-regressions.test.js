@@ -66,7 +66,8 @@ test("period filters keep their metrics and drive the single paginated plan list
 test("plan list actions use shared idempotent command state", async () => {
   const { scripts } = await clientScripts();
   const main = scripts[0];
-  assert(main.includes('if(p.status==="PLANNED")right.append(btn("Запустить",()=>command("StartPlan",p)'));
+  assert(main.includes('const start=btn("Запустить",()=>command("StartPlan",p)'));
+  assert(main.includes('start.disabled=p.assessmentReadiness?.status!=="READY"'));
   assert(main.includes('if(p.status==="PAUSED")right.append(btn("Продолжить",()=>command("ResumePlan",p)'));
   assert(main.includes('if(b.disabled)return;b.disabled=true'));
   assert(main.includes('window.addEventListener("plan-time-tracker:command"'));

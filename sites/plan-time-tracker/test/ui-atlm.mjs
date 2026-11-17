@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { context, OWNER, PLAN, running, call, ok } from './fixtures/tracker-db.mjs';
+import { assessForStart, context, OWNER, PLAN, running, call, ok } from './fixtures/tracker-db.mjs';
 
 const modulePath = process.env.PLAYWRIGHT_MODULE || 'playwright';
 const { chromium } = await import(modulePath.startsWith('/') ? pathToFileURL(modulePath).href : modulePath);
@@ -21,7 +21,7 @@ assert.equal(initial.status, 200);assert.equal(initial.value.eligibleSampleCount
 assert.equal(initial.value.activeModel, null);assert.equal(initial.value.training.due, true, 'first starts queue source refresh even without a usable ATLM input');
 const initialEstimate = await call(c, '/api/tracker/plans/' + PLAN + '/estimate');
 assert.equal(initialEstimate.status, 200);assert.equal(initialEstimate.value.planId, PLAN);
-assert.equal(initialEstimate.value.serverEstimation.unavailableReason, 'MISSING_FEATURES');
+assert.equal(initialEstimate.value.serverEstimation.unavailableReason, 'ASSESSMENT_REQUIRED');
 assert.equal(initialEstimate.value.source,'CURRENT_INPUT');
 
 const artifacts = resolve(process.env.UI_ACCEPTANCE_ARTIFACT_DIR || '/tmp/tracker-atlm-ui');
@@ -102,7 +102,7 @@ try {
   assert.equal(recovered.value.training.due, false);assert.equal(recovered.value.activeModel, null);
   assert(requests.some(item => item.path === '/api/tracker/estimation-model/process' && item.method === 'POST'), 'explicit continuation must recover pending source refresh');
   await settings().getByText('Почему планы не учитываются', { exact: true }).click();
-  assert.match(await settings().locator('.atlm-exclusions').innerText(), /До первого запуска не сохранены исходные признаки/);
+  assert.match(await settings().locator('.atlm-exclusions').innerText(), /План ещё не завершён/);
   await refreshStatus();assert.equal(await settings().locator('.atlm-exclusions').evaluate(node => node.open), true, 'status reads preserve the open explanation');
   const manual = () => settings().getByRole('button', { name: 'Начать обучение', exact: true });
   await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
@@ -289,7 +289,7 @@ try {
   // Completed plans retain the frozen forecast and show the measured result.
   controlled=false;
   const completedStep = c.db.sqlite.prepare('SELECT step_id FROM plan_steps WHERE plan_id=?').get(otherPlan).step_id;
-  await ok(c,'StartPlan',{planId:otherPlan},0);
+  await assessForStart(c,otherPlan);await ok(c,'StartPlan',{planId:otherPlan},0);
   await ok(c, 'SetStepStatus', { stepId: completedStep, status: 'DONE' }, 1);
   await ok(c, 'FinishPlan', { planId: otherPlan }, 1);
   await page.reload();await page.locator('#plans[data-loaded="true"]').waitFor({ state: 'attached' });

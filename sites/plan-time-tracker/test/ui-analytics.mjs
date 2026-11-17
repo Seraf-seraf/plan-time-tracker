@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { context, running, ok, OWNER } from './fixtures/tracker-db.mjs';
+import { assessForStart, context, running, ok, OWNER } from './fixtures/tracker-db.mjs';
 const modulePath = process.env.PLAYWRIGHT_MODULE || 'playwright';
 const { chromium } = await import(modulePath.startsWith('/') ? pathToFileURL(modulePath).href : modulePath);
 const c = context();c.advance(Date.now() - c.now() - 86400000 * 2);
@@ -10,7 +10,7 @@ if (process.env.SITE_WORKER_MODULE) c.worker = (await import(pathToFileURL(proce
 const mainId = crypto.randomUUID(), manyId = crypto.randomUUID();
 const titles = ['Изучить требования и выбрать решение', 'Реализовать изменение и проверить интеграцию', 'Проверить измеренный ноль', 'Этап без измерений'];
 await ok(c, 'CreatePlan', { planId: mainId, title: 'Обновление трекера (тестовые данные)', planText: '# Test\n\n' + titles.map((title, i) => '## Этап ' + (i + 1) + '. ' + title + '\nSynthetic fixture').join('\n\n'), planCreatedAt: { precision: 'dateOnly', on: new Date(c.now()).toISOString().slice(0, 10), timeZone: 'UTC' } });
-await ok(c, 'StartPlan', { planId: mainId }, 0);
+await assessForStart(c,mainId);await ok(c, 'StartPlan', { planId: mainId }, 0);
 const steps = c.db.sqlite.prepare('SELECT step_id FROM plan_steps WHERE plan_id=? ORDER BY ordinal').all(mainId);
 for (const [index, ms] of [60000, 120000, 0].entries()) {
   await ok(c, 'SetStepStatus', { stepId: steps[index].step_id, status: 'RUNNING' }, 1);c.advance(ms);
@@ -62,7 +62,7 @@ try {
   await card(mainId).locator('summary').click();await card(mainId).locator('.stage-row').first().waitFor();
 
   await ok(c, 'CreatePlan', { planId: manyId, title: 'Длинный план — тестовые данные', planText: '# Test\n\n' + Array.from({ length: 40 }, (_, i) => '## Этап ' + (i + 1) + '. ' + 'Полное длинное название этапа '.repeat(5) + '\nSynthetic fixture').join('\n\n'), planCreatedAt: { precision: 'dateOnly', on: new Date(c.now()).toISOString().slice(0, 10), timeZone: 'UTC' } });
-  await ok(c, 'StartPlan', { planId: manyId }, 0);c.advance(1000);await apply();
+  await assessForStart(c,manyId);await ok(c, 'StartPlan', { planId: manyId }, 0);c.advance(1000);await apply();
   await card(manyId).locator('summary').click();await card(manyId).locator('.stage-row').first().waitFor();assert.equal(await card(manyId).locator('.stage-row').count(), 40);
   await page.setViewportSize({ width: 320, height: 1000 });assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   assert((await card(manyId).locator('.stage-value').allTextContents()).every(value => value === 'Нет данных'));

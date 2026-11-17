@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { context, OWNER, ok } from "./fixtures/tracker-db.mjs";
+import { assessForStart, context, OWNER, ok } from "./fixtures/tracker-db.mjs";
 
 const modulePath = process.env.PLAYWRIGHT_MODULE || "playwright";
 const { chromium } = await import(modulePath.startsWith("/") ? pathToFileURL(modulePath).href : modulePath);
@@ -11,6 +11,7 @@ const c = context();
 c.advance(Date.parse("2026-10-14T17:50:00Z") - c.now());
 const create = async title => {
   const plan = await ok(c, "CreatePlan", { title, planCreatedAt: { precision: "dateOnly", on: "2026-10-14", timeZone: "UTC" } });
+  await assessForStart(c,plan.planId);
   return plan.planId;
 };
 const old = await create("Завершён после выбранного дня");
