@@ -28,6 +28,23 @@ try{
 
  for(const width of [320,390,768,1440]){await page.setViewportSize({width,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.screenshot({path:resolve(dir,'forecast-'+width+'.png'),fullPage:true});}
  await page.locator('[data-view="settings"]').click();await page.getByText('Попытки обучения',{exact:true}).waitFor();await page.locator('.atlm-attempts table').waitFor();assert.match(await page.locator('.atlm-attempts').innerText(),/Точка/);
+ for(const width of [320,390,768,1440]){
+  await page.setViewportSize({width,height:1000});
+  const layout=await page.locator('#atlm-model-status').evaluate(panel=>{
+   const grid=panel.parentElement.getBoundingClientRect(),box=panel.getBoundingClientRect(),table=panel.querySelector('.atlm-attempts table');
+   return {width:box.width,gridWidth:grid.width,pageOverflow:document.documentElement.scrollWidth>innerWidth,
+    headLines:[...table.querySelectorAll('th')].map(th=>{const range=document.createRange();range.selectNodeContents(th);return [...range.getClientRects()].filter(r=>r.width&&r.height).length;}),
+    mobileLabels:[...table.querySelectorAll('.atlm-cell-label')].filter(label=>getComputedStyle(label).display!=='none').length};
+  });
+  assert.equal(layout.pageOverflow,false,`history overflows page at ${width}`);
+  assert.ok(layout.width>=layout.gridWidth-2,`history should use available settings width at ${width}`);
+  if(width<=600)assert.ok(layout.mobileLabels>=6,`each mobile cell needs a visible label at ${width}`);
+  else assert.ok(layout.headLines.every(lines=>lines<=1),`table headings must remain on one line at ${width}`);
+  await page.screenshot({path:resolve(dir,'attempts-'+width+'.png'),fullPage:true});
+ }
+ await page.locator('.atlm-attempts summary').first().focus();await page.keyboard.press('Enter');
+ assert.equal(await page.locator('.atlm-attempts details').first().evaluate(node=>node.open),true);
+
  historyFailure=true;await page.locator('[data-view="settings"]').click();await page.getByRole('button',{name:'Повторить загрузку истории'}).waitFor();historyFailure=false;await page.getByRole('button',{name:'Повторить загрузку истории'}).click();await page.locator('.atlm-attempts table').waitFor();
  await page.locator('[data-view="analytics"]').click();await page.locator('.atlm-analytics table').waitFor();const analytics=await page.locator('.atlm-analytics').innerText();assert.match(analytics,/Попадания в диапазон/);assert.match(analytics,/Прогноз/);assert.match(analytics,/Факт/);
  datasetFailure=true;await page.locator('[data-view="analytics"]').click();await page.getByRole('button',{name:'Повторить загрузку качества'}).waitFor();datasetFailure=false;await page.getByRole('button',{name:'Повторить загрузку качества'}).click();await page.locator('.atlm-analytics table').waitFor();
