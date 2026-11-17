@@ -20,9 +20,9 @@ description: Сохранить исходный план и текущие ст
 
 ## Оценить задачу до первого запуска плана
 
-Применяйте соседний assess-task. Через GetTrackerInfo найдите `assessments.atlm`, прочитайте GetTaskAssessment без assessmentId и сохраните currentRequirementsDigest до анализа. SaveTaskAssessment передаёт признаки `agent-task-v3` и `predictionRequest:{method:"ATLM",methodVersion:1}`. Сервер возвращает serverEstimation с точкой и отдельным интервалом. Текущий прогноз PLANNED читается через GetSavedEstimate; первый StartPlan фиксирует снимок. Инструкции по признакам и интерпретации находятся в assess-task.
+Применяйте соседний assess-task. Через GetTrackerInfo найдите `assessments.atlm`, прочитайте GetTaskAssessment без assessmentId и сохраните currentRequirementsDigest до анализа. SaveTaskAssessment передаёт признаки `agent-task-v4` и `predictionRequest:{method:"ATLM",methodVersion:1}`. Сервер возвращает serverEstimation с точкой и отдельным интервалом. Текущий прогноз PLANNED читается через GetSavedEstimate; перед первым StartPlan проверьте assessmentReadiness в GetSavedEstimate. Только READY разрешает запуск и фиксацию снимка. Инструкции по признакам и интерпретации находятся в assess-task.
 
-Прогноз показывает полное активное время плана PLAN_ACTIVE от первого StartPlan. UNKNOWN/null и отсутствие модели не мешают выполнять разрешённую работу. Для чтения используйте GetSavedEstimate; GetTrainingStatus показывает состояние данных и модели. ContinueTraining продолжает ограниченную серверную обработку, StartTraining вызывается только по просьбе пользователя запустить обучение. Исходный снимок после первого запуска не заменяется поздними оценками.
+Прогноз показывает полное активное время плана PLAN_ACTIVE от первого StartPlan. При READY и отсутствии модели StartPlan фиксирует UNAVAILABLE. Допустимые неизвестные значения требуют проверенного основания. Для чтения используйте GetSavedEstimate; GetTrainingStatus показывает состояние данных и модели. ContinueTraining продолжает ограниченную серверную обработку, StartTraining вызывается только по просьбе пользователя запустить обучение. Исходный снимок после первого запуска не заменяется поздними оценками.
 
 ## Выполнить работу и обновить статус этапа
 

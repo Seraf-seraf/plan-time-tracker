@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync,readdirSync} from 'node:fs';
 import {resolve} from 'node:path';
-import {context,ok,call,command,mcp,running,rows,PLAN,OWNER,migrations,atlmTask,plannedAtlm} from './fixtures/tracker-db.mjs';
+import { assessForStart, context,ok,call,command,mcp,running,rows,PLAN,OWNER,migrations,atlmTask,plannedAtlm} from './fixtures/tracker-db.mjs';
 import {getEstimationModelStatus,predictWithActiveModel,normalizeAgentTask,readAtlmSampleSource} from '../worker/index.js';
 
 const retiredTables=['step_attempts','tracker_sessions','tracker_journal','tracker_owner_state','tracker_plan_config','step_results','step_checks','step_acceptances','step_source_snapshots','step_source_checks','step_result_snapshots','step_snapshot_checks','plan_events','plan_document_sections','repositories','commits'];
@@ -12,7 +12,7 @@ const create=(c,id=PLAN)=>ok(c,'CreatePlan',{planId:id,title:'Plan',planText:doc
 
 test('steps have only current state; status changes create no event or attempt storage',async()=>{
  const c=context();try{
-  await create(c);await ok(c,'StartPlan',{planId:PLAN},0);
+  await create(c);await assessForStart(c,PLAN);await ok(c,'StartPlan',{planId:PLAN},0);
   const progress=(await call(c,`/api/tracker/plans/${PLAN}/execution`)).value,step=progress.steps[0];
   let version=step.version;
   for(const status of ['RUNNING','BLOCKED','FAILED','PENDING','DONE']){c.advance(1);await ok(c,'SetStepStatus',{stepId:step.step_id,status},version++);}
@@ -42,7 +42,7 @@ test('all old mutation commands and MCP aliases are absent and cannot replay an 
 
 test('concurrent status writers use CAS and exact replay; another plan and owner remain isolated',async()=>{
  const c=context();try{
-  await create(c);const other=crypto.randomUUID();await create(c,other);await ok(c,'StartPlan',{planId:PLAN},0);await ok(c,'StartPlan',{planId:other},0);
+  await create(c);const other=crypto.randomUUID();await create(c,other);await assessForStart(c,PLAN);await ok(c,'StartPlan',{planId:PLAN},0);await assessForStart(c,other);await ok(c,'StartPlan',{planId:other},0);
   const step=c.db.sqlite.prepare('SELECT step_id FROM plan_steps WHERE plan_id=? ORDER BY ordinal').get(PLAN).step_id;
   const id=crypto.randomUUID(),payload={stepId:step,status:'DONE'};
   const responses=await Promise.all([command(c,'SetStepStatus',payload,1,id),command(c,'SetStepStatus',payload,1,id)]);
@@ -56,7 +56,7 @@ test('concurrent status writers use CAS and exact replay; another plan and owner
 
 test('status changes and timer commands remain atomic when a receipt or interval write fails',async()=>{
  const c=context();try{
-  await create(c);await ok(c,'StartPlan',{planId:PLAN},0);const step=c.db.sqlite.prepare('SELECT step_id FROM plan_steps WHERE plan_id=?').get(PLAN).step_id;
+  await create(c);await assessForStart(c,PLAN);await ok(c,'StartPlan',{planId:PLAN},0);const step=c.db.sqlite.prepare('SELECT step_id FROM plan_steps WHERE plan_id=?').get(PLAN).step_id;
   const before=rows(c);c.db.sqlite.exec("CREATE TRIGGER fail_receipt BEFORE UPDATE OF outcome_code ON command_receipts WHEN NEW.command_type='SetStepStatus' BEGIN SELECT RAISE(ABORT,'injected'); END;");
   assert.equal((await command(c,'SetStepStatus',{stepId:step,status:'DONE'},1)).status,500);assert.deepEqual(rows(c),before);
   c.db.sqlite.exec('DROP TRIGGER fail_receipt;');
@@ -72,9 +72,9 @@ test('completion requires current DONE states; explicit exception, deletion and 
   await ok(c,'SetStepStatus',{...binding,status:'DONE'},2);
   await ok(c,'PausePlan',{planId:PLAN},1);c.advance(50);await ok(c,'FinishPlan',{planId:PLAN},2);
   assert.equal((await call(c,`/api/plans/${PLAN}`)).value.plan.activeMs,100);
-  const second=crypto.randomUUID();await create(c,second);await ok(c,'StartPlan',{planId:second},0);await ok(c,'FinishPlan',{planId:second,allowIncomplete:true,reason:'Explicit stop'},1);
+  const second=crypto.randomUUID();await create(c,second);await assessForStart(c,second);await ok(c,'StartPlan',{planId:second},0);await ok(c,'FinishPlan',{planId:second,allowIncomplete:true,reason:'Explicit stop'},1);
   assert.equal(c.db.sqlite.prepare('SELECT COUNT(*) n FROM tracker_finish_exceptions').get().n,1);
-  const third=crypto.randomUUID();await create(c,third);await ok(c,'StartPlan',{planId:third},0);await ok(c,'DeletePlan',{planId:third},1);await ok(c,'RestorePlan',{planId:third},2);
+  const third=crypto.randomUUID();await create(c,third);await assessForStart(c,third);await ok(c,'StartPlan',{planId:third},0);await ok(c,'DeletePlan',{planId:third},1);await ok(c,'RestorePlan',{planId:third},2);
   assert.equal((await call(c,`/api/plans/${third}`)).value.plan.status,'PAUSED');
   assert.equal(c.db.sqlite.prepare('SELECT COUNT(*) n FROM work_intervals WHERE end_ms IS NULL').get().n,0);
  }finally{c.close();}

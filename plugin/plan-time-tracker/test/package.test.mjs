@@ -25,7 +25,7 @@ test("portable package has one manifest with the marketplace identity without de
   assert.equal(existsSync(join(pluginRoot, ".app.json")), false);
   assert.ok(existsSync(join(pluginRoot, "skills/track-plan/SKILL.md")));
   assert.ok(existsSync(join(pluginRoot, "skills/assess-task/SKILL.md")));
-  assert.equal(manifest.version, "0.7.0");
+  assert.equal(manifest.version, "0.8.0");
   assert.equal(readJson(join(repositoryRoot, "sites/plan-time-tracker/package.json")).version, manifest.version);
 });
 

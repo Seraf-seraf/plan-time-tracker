@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { context, ok, call, command, migrations, migration, rows, OWNER, PLAN } from './fixtures/tracker-db.mjs';
+import { assessForStart, context, ok, call, command, migrations, migration, rows, OWNER, PLAN } from './fixtures/tracker-db.mjs';
 
 const period = { from: '2027-01-01', to: '2027-12-31', timeZone: 'UTC' };
 const path = (planId = PLAN, filter = period) => '/api/analytics/plans/' + planId + '/steps?' + new URLSearchParams(filter);
@@ -14,7 +14,7 @@ test('recorded stage windows exclude plan pauses, preserve parallel time, repeat
   const c = context();
   try {
     const [one, two, zero] = await create(c);
-    await ok(c, 'StartPlan', { planId: PLAN }, 0);const start = c.now();
+    await assessForStart(c,PLAN);await ok(c, 'StartPlan', { planId: PLAN }, 0);const start = c.now();
     await set(c, one, 'RUNNING', 1);c.advance(60000);
     await set(c, two, 'RUNNING', 1);c.advance(30000);
     await ok(c, 'PausePlan', { planId: PLAN }, 1);c.advance(100000);
@@ -35,7 +35,7 @@ test('recorded stage windows exclude plan pauses, preserve parallel time, repeat
 test('step timing follows successful status writes atomically; pause, delete, restore and finish exceptions remain independent', async () => {
   const c = context();
   try {
-    const [step] = await create(c);await ok(c, 'StartPlan', { planId: PLAN }, 0);
+    const [step] = await create(c);await assessForStart(c,PLAN);await ok(c, 'StartPlan', { planId: PLAN }, 0);
     const id = crypto.randomUUID(), payload = { stepId: step, status: 'RUNNING' };
     await command(c, 'SetStepStatus', payload, 1, id);c.advance(10);
     assert.equal((await command(c, 'SetStepStatus', payload, 1, id)).value.replayed, true);
@@ -63,7 +63,7 @@ test('analytics clips local date boundaries and validates owner, plan and snapsh
   const c = context();
   try {
     c.advance(Date.parse('2027-02-02T17:59:30Z') - c.now());
-    const [step] = await create(c);await ok(c, 'StartPlan', { planId: PLAN }, 0);await set(c, step, 'RUNNING', 1);c.advance(90000);
+    const [step] = await create(c);await assessForStart(c,PLAN);await ok(c, 'StartPlan', { planId: PLAN }, 0);await set(c, step, 'RUNNING', 1);c.advance(90000);
     const local = { from: '2027-02-02', to: '2027-02-02', timeZone: 'Asia/Omsk' };
     assert.equal((await call(c, path(PLAN, local))).value.steps[0].activeMs, 30000);
     assert.equal((await call(c, path(PLAN, { ...local, from: '2027-02-03', to: '2027-02-03' }))).value.steps[0].activeMs, 60000);
@@ -97,7 +97,7 @@ test('upgrading a populated current-state database preserves data without invent
 test('a concurrent pause cannot add time beyond the report snapshot or disagree with stage charts', async () => {
   const c = context();
   try {
-    const [step] = await create(c);await ok(c, 'StartPlan', { planId: PLAN }, 0);await set(c, step, 'RUNNING', 1);c.advance(60000);
+    const [step] = await create(c);await assessForStart(c,PLAN);await ok(c, 'StartPlan', { planId: PLAN }, 0);await set(c, step, 'RUNNING', 1);c.advance(60000);
     const asOf = c.now(), prepare = c.db.prepare.bind(c.db);let paused = false;
     c.db.prepare = sql => {
       const statement = prepare(sql), bind = statement.bind.bind(statement);
@@ -123,7 +123,7 @@ test('a concurrent pause cannot add time beyond the report snapshot or disagree 
 test('a completion after the report cutoff is not counted as a completed plan', async () => {
   const c = context();
   try {
-    const [step] = await create(c);await ok(c, 'StartPlan', { planId: PLAN }, 0);await set(c, step, 'RUNNING', 1);c.advance(60000);
+    const [step] = await create(c);await assessForStart(c,PLAN);await ok(c, 'StartPlan', { planId: PLAN }, 0);await set(c, step, 'RUNNING', 1);c.advance(60000);
     const asOf = c.now(), prepare = c.db.prepare.bind(c.db);let finished = false;
     c.db.prepare = sql => {
       const statement = prepare(sql), bind = statement.bind.bind(statement);

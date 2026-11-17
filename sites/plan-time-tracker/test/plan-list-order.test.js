@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { context, call, mcp, ok, PLAN } from "./fixtures/tracker-db.mjs";
+import { assessForStart, context, call, mcp, ok, PLAN } from "./fixtures/tracker-db.mjs";
 
 const B = "22222222-2222-4222-8222-222222222222";
 const C = "33333333-3333-4333-8333-333333333333";
@@ -39,10 +39,10 @@ test("ListPlans places completed plans last across stable API pagination", async
     for (const planId of [PLAN, B, C, D]) {
       await ok(c, "CreatePlan", { planId, title: planId, planCreatedAt: createdAt });
     }
-    await ok(c, "StartPlan", { planId: PLAN }, 0);
-    await ok(c, "StartPlan", { planId: C }, 0);
+    await assessForStart(c,PLAN);await ok(c, "StartPlan", { planId: PLAN }, 0);
+    await assessForStart(c,C);await ok(c, "StartPlan", { planId: C }, 0);
     await ok(c, "PausePlan", { planId: C }, 1);
-    await ok(c, "StartPlan", { planId: B }, 0);
+    await assessForStart(c,B);await ok(c, "StartPlan", { planId: B }, 0);
     await ok(c, "FinishPlan", { planId: B }, 1);
 
     const expected = [D, C, PLAN, B];

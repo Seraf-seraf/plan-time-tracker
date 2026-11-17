@@ -7,9 +7,9 @@ const assess=read('../skills/assess-task/SKILL.md'),features=read('../skills/ass
 const track=read('../skills/track-plan/SKILL.md'),embedded=read('../../../sites/plan-time-tracker/skill/plan-time-tracker/SKILL.md');
 const invoke=async(c,name,args={})=>{const r=await mcp(c,name,args);assert.equal(r.status,200);assert.notEqual(r.value.result?.isError,true,JSON.stringify(r.value));return r.value.result.structuredContent;};
 
-test('instructions describe the delivered v3 input and server forecast',()=>{
- for(const text of [assess,track,embedded]){assert.match(text,/assessments\.atlm/);assert.match(text,/StartPlan/);assert.match(text,/serverEstimation/);assert.match(text,/agent-task-v3/);}
- for(const field of ['workUnits','doneBoundary','reuseLevel','components','contracts','integrations','migrationEntities','dataVolumeBand','requirementsUncertainty','solutionUncertainty','diagnosisState','unfamiliarTechnologies','scopeChangeRisk','verificationKinds','verificationScenarios','verificationReadiness','requiredReviewPasses','environmentReadiness','accessReadiness','deploymentTargets','execution','evidence','unknownReasons'])assert(features.includes('`'+field+'`'),field);
+test('instructions describe the delivered v4 input and server forecast',()=>{
+ for(const text of [assess,track,embedded]){assert.match(text,/assessments\.atlm/);assert.match(text,/StartPlan/);assert.match(text,/serverEstimation/);assert.match(text,/agent-task-v4/);}
+ for(const field of ['workUnits','doneBoundary','reuseLevel','components','contracts','systemBoundaries','migrationEntities','dataVolumeBand','requirementsUncertainty','solutionUncertainty','diagnosisState','learningTargets','scopeChangeRisk','verificationKinds','verificationScenarios','verificationReadiness','requiredReviewPasses','environmentReadiness','accessReadiness','deploymentTargets','execution','evidence','unknownReasons'])assert(features.includes('`'+field+'`'),field);
  assert.match(assess,/GetTrainingHistory/);assert.match(assess,/intervalCoverage/);assert.match(assess,/historical-median/);assert.match(assess,/не является календарным сроком/);
  assert.doesNotMatch(assess+features+track+embedded,/agent-task-v1|agent-v3-hybrid|qualityConfirmed|24000/);
 });
@@ -17,19 +17,18 @@ test('instructions describe the delivered v3 input and server forecast',()=>{
 test('MCP discovery matches the instructions',async()=>{
  const c=context();try{
   const capability=(await invoke(c,'GetTrackerInfo')).assessments.atlm;
-  assert.equal(capability.retrainEveryNewPlans,2);assert.equal(capability.featureSchemaVersion,'agent-task-v3');assert.equal(capability.inputSchemaVersion,'agent-task-v3');
-  assert.equal(capability.method.version,'agent-v4-probabilistic');assert.equal(capability.policyVersion,2);assert.deepEqual(capability.engines,['OLS','RIDGE','BAYESIAN']);
+  assert.equal(capability.retrainEveryNewPlans,2);assert.equal(capability.featureSchemaVersion,'agent-task-v4');assert.equal(capability.inputSchemaVersion,'agent-task-v4');
+  assert.equal(capability.method.version,'agent-v5-operations');assert.equal(capability.policyVersion,2);assert.deepEqual(capability.engines,['OLS','RIDGE','BAYESIAN']);
   const listing=(await call(c,'/mcp',{jsonrpc:'2.0',id:1,method:'tools/list'})).value.result.tools;
   for(const name of ['EstimatePlanTime','GetSavedEstimate','GetTrainingStatus','GetTrainingData','GetTrainingHistory','ContinueTraining']){
    assert(JSON.stringify(capability).includes(name));const tool=listing.find(t=>t.name===name);assert(tool,name);assert.equal(tool.inputSchema.additionalProperties,false);assert.equal(tool.annotations.readOnlyHint,name!=='ContinueTraining');
   }
   const schema=listing.find(t=>t.name==='EstimatePlanTime').inputSchema;assert.deepEqual([...schema.required].sort(),['agentTask','expectedRequirementsDigest','planId']);
   const props=schema.properties.agentTask.properties;
-  assert.match(props.environmentReadiness.description,/Не тип среды/);
-  assert.match(props.deploymentTargets.description,/развернуть результат/);
-  assert.match(props.unfamiliarTechnologies.description,/null — неизвестно/);
-  assert.match(props.scopeChangeRisk.description,/1 — локальные уточнения/);
-  assert.match(props.execution.properties.environmentId.description,/Место работы исполнителя/);
+  assert.deepEqual(props.execution.properties.environmentId.enum,['local','cloud_workspace']);
+  assert.deepEqual(props.systemBoundaries.items.properties.operations.items.properties.action.enum,['READ','WRITE']);
+  assert.deepEqual(props.learningTargets.items.properties.kind.enum,['TOOLING','RUNTIME','DATA_MODEL','OTHER']);
+  assert.equal(capability.firstStartRequires,'READY');
  }finally{c.close();}
 });
 

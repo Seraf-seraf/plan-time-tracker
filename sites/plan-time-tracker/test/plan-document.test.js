@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  assessForStart,
   context,
   ok,
   call,
@@ -67,7 +68,7 @@ test("agent sets statuses without technical evidence; completion and exact repla
   try {
     await create(c);
     const steps = (await progress(c)).steps;
-    await ok(c, "StartPlan", { planId: PLAN }, 0);
+    await assessForStart(c,PLAN);await ok(c, "StartPlan", { planId: PLAN }, 0);
     const id = crypto.randomUUID();
     const first = await command(
       c,
@@ -155,7 +156,7 @@ test("status writes enforce owner, current version, active plan and deletion for
       ).value.error.code,
       "INVALID_TRANSITION",
     );
-    await ok(c, "StartPlan", { planId: PLAN }, 0);
+    await assessForStart(c,PLAN);await ok(c, "StartPlan", { planId: PLAN }, 0);
     assert.equal(
       (
         await command(
@@ -367,7 +368,7 @@ test("document migration preserves existing source, statuses, requirements and r
   const c = context(migrations.indexOf("0025_unlimited_plan_documents.sql"));
   try {
     await create(c);
-    await ok(c,"StartPlan",{planId:PLAN},0);
+    await assessForStart(c,PLAN);await ok(c,"StartPlan",{planId:PLAN},0);
     const step = (await progress(c)).steps[0];
     await ok(c,"SetStepStatus",{stepId:step.step_id,status:"DONE"},1);
     const tables = ["plan_documents","plan_steps","assessment_targets","command_receipts"];
