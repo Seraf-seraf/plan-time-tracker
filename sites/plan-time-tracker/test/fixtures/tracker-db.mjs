@@ -73,6 +73,23 @@ export function rows(c) {
 }
 export const internalCommand = (c, type, payload, version, id) => executeCommand(c.db, { ownerId: OWNER }, envelope(type, payload, version, id), "ui", c.now());
 
+export function taskV4() {
+  return {
+    schemaVersion: "agent-task-v3",
+    workUnits: [{ id: "feature", kind: "MODIFY", description: "Update behavior", evidence: "Requirement" }],
+    doneBoundary: "LOCAL_VERIFIED", reuseLevel: 2,
+    components: [], contracts: [], integrations: [], migrationEntities: [], dataVolumeBand: "NONE",
+    requirementsUncertainty: 0, solutionUncertainty: 1, diagnosisState: "NOT_APPLICABLE",
+    unfamiliarTechnologies: null, scopeChangeRisk: 0, verificationKinds: ["UNIT"],
+    verificationScenarios: [{ id: "check", description: "Check behavior", evidence: "Requirement" }],
+    verificationReadiness: "ADAPT", requiredReviewPasses: 0, environmentReadiness: "READY",
+    accessReadiness: "AVAILABLE", deploymentTargets: [],
+    execution: { mode: "AI_AGENT", modelId: null, reasoningEffort: null, environmentId: "cloud_workspace", plannedParallelAgents: 1, codebaseFamiliarity: "MAPPED" },
+    evidence: Object.fromEntries(["doneBoundary", "reuseLevel", "dataVolumeBand", "requirementsUncertainty", "solutionUncertainty", "diagnosisState", "scopeChangeRisk", "verificationReadiness", "requiredReviewPasses", "environmentReadiness", "accessReadiness", "execution.mode", "execution.environmentId", "execution.plannedParallelAgents", "execution.codebaseFamiliarity"].map(key => [key, "Known from task"])),
+    unknownReasons: { unfamiliarTechnologies: "Not yet established", "execution.modelId": "Not disclosed", "execution.reasoningEffort": "Not disclosed" },
+  };
+}
+
 export function atlmTask() {
   return { schemaVersion: "agent-task-v1", profile: { workKind: "MODIFY_MECHANISM", reuseState: "PARTIAL", doneBoundary: "LOCAL_VERIFIED" },
     outcomes: [{ id: "feature", description: "Change existing behavior", evidence: "Synthetic requirement" }], changedContracts: [], verificationKinds: ["UNIT"],

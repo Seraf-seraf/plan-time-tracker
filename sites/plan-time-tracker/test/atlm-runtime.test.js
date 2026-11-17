@@ -1,92 +1,53 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fitAtlmOls as fitAtlm, predictAtlmOls as predictAtlm, evaluateAtlmCase } from '../worker/index.js';
+import { fitAtlmRidge, predictAtlmRidge, fitAtlmV4Preprocessor, encodeAtlmV4Features, normalizeAgentTask } from '../worker/index.js';
+import { taskV4 } from './fixtures/tracker-db.mjs';
 
-const base = { workKind:'MODIFY_MECHANISM', reuseState:'PARTIAL', doneBoundary:'LOCAL_VERIFIED', outcomeCount:1, contractCount:0, verificationKindCount:1 };
-const f = (modelId=null, reasoningEffort=null, plannedParallelAgents=null) => ({...base,modelId,reasoningEffort,plannedParallelAgents});
-function grid(missing=true) {
-  const rows=[];
-  for(const model of missing?['a','b','c',null]:['a','b','c'])
-    for(const effort of missing?['low','high',null]:['low','high'])
-      for(const count of missing?[1,2,3,null]:[1,2,3]) {
-        const i=rows.length;
-        rows.push({sampleId:'s'+i,planId:'p'+i,capturedAt:i*10,sourceAvailableAt:i*10+1,features:f(model,effort,count),
-          actualMs:60000*(10+({a:0,b:10,c:20}[model]??30)+({low:0,high:6}[effort]??12)+(count===null?8:count*2))});
-      }
-  return rows;
-}
-function minutes(artifact,features) {
-  const p=predictAtlm(artifact,features);assert.equal(p.status,'AVAILABLE',JSON.stringify(p));return p.pointMs/60000;
-}
-function near(actual,expected) { assert(Math.abs(actual-expected)<0.0001,actual+' != '+expected); }
+const base = normalizeAgentTask(taskV4()).features;
+const make = (i, changes = {}) => ({ sampleId: `s${i}`, planId: `p${i}`, capturedAt: i * 10, sourceAvailableAt: i * 10 + 1,
+  features: { ...base, ...changes }, actualMs: (i + 1) * 60000 });
 
-test('model, effort, parallel count and learned unknown each affect the same task',async()=>{
-  const result=await fitAtlm(grid());assert.equal(result.status,'AVAILABLE',JSON.stringify(result));
-  const a=result.artifact;
-  near(minutes(a,f('a','low',1)),12);
-  near(minutes(a,f('b','low',1)),22);
-  near(minutes(a,f('a','high',1)),18);
-  near(minutes(a,f('a','low',3)),16);
-  near(minutes(a,f()),60);
-  near(minutes(a,f('new-model','low',1)),42); // use the learned unknown model level
-  near(minutes(a,f('a','new-effort',1)),24);
-  assert.deepEqual(predictAtlm(JSON.parse(JSON.stringify(a)),f()),predictAtlm(a,f()));
+test('model and effort categories use only values occurring at least three times', () => {
+  const rows = ['known','known','known','rare',null].map((modelId, i) => make(i, { modelId }).features);
+  const fit = fitAtlmV4Preprocessor(rows);
+  assert.equal(fit.status, 'AVAILABLE'); assert.deepEqual(fit.manifest.openCategories.modelId, ['known']);
+  assert.deepEqual(encodeAtlmV4Features({ ...base, modelId:'rare' }, fit.manifest).row,
+    encodeAtlmV4Features({ ...base, modelId:'unseen' }, fit.manifest).row);
+  assert.notDeepEqual(encodeAtlmV4Features({ ...base, modelId:null }, fit.manifest).row,
+    encodeAtlmV4Features({ ...base, modelId:'unseen' }, fit.manifest).row);
 });
 
-test('unseen and missing runtime use train-weighted effects when no unknown was observed',async()=>{
-  const {artifact}=await fitAtlm(grid(false));
-  near(minutes(artifact,f()),27); // model mean 10, effort mean 3, parallel mean effect 4
-  near(minutes(artifact,f('never-seen','low',1)),22);
-  near(minutes(artifact,{...base}),27);
+test('all missing runtime values add no active columns and unseen values are accepted', async () => {
+  const row = make(0, { modelId:null, reasoningEffort:null, plannedParallelAgents:null });
+  const fit = await fitAtlmRidge([row]); assert.equal(fit.status, 'AVAILABLE'); assert.equal(fit.artifact.p, 1);
+  assert.equal(predictAtlmRidge(fit.artifact, { ...row.features, modelId:'unseen', reasoningEffort:'max', plannedParallelAgents:3 }).status, 'AVAILABLE');
 });
 
-test('unknown fallback is invariant to the categorical reference label',async()=>{
-  const input=grid(false), renamed=input.map(r=>({...r,features:{...r.features,modelId:{a:'z',b:'y',c:'x'}[r.features.modelId]}}));
-  const a=(await fitAtlm(input)).artifact,b=(await fitAtlm(renamed)).artifact;
-  near(minutes(a,f()),minutes(b,f()));
+test('a missing numeric value has a distinct indicator and prefix-only median', () => {
+  const features = [2, null, 2, null].map((plannedParallelAgents, i) => make(i, { plannedParallelAgents }).features);
+  const fit = fitAtlmV4Preprocessor(features);
+  assert.equal(fit.status, 'AVAILABLE');
+  assert.ok(fit.manifest.columns.some(c => c.kind === 'missing' && c.field === 'plannedParallelAgents'));
+  assert.ok(fit.manifest.droppedColumns.some(c => c.kind === 'count' && c.field === 'plannedParallelAgents'));
+  const snapshot = structuredClone(fit.manifest);
+  fitAtlmV4Preprocessor([...features, make(5, { plannedParallelAgents: 100 }).features]);
+  assert.deepEqual(fit.manifest, snapshot);
 });
 
-test('all-null runtime adds no parameters and a one-plan point forecast has DOF zero',async()=>{
-  const row=grid()[0];row.features=f();row.actualMs=600000;
-  const result=await fitAtlm([row]);assert.equal(result.status,'AVAILABLE',JSON.stringify(result));
-  assert.equal(result.artifact.p,1);assert.equal(result.artifact.residualDegreesOfFreedom,0);
-  near(minutes(result.artifact,f()),10);
-  near(minutes(result.artifact,f('unseen','max',20)),10);
+test('unbounded learned categories fail with an explicit resource limit', () => {
+  const features = Array.from({ length: 1800 }, (_, i) => make(i, { modelId:`model-${Math.floor(i / 3)}` }).features);
+  const fit = fitAtlmV4Preprocessor(features);
+  assert.equal(fit.reason, 'MODEL_CAPACITY_LIMIT'); assert.equal(fit.limit, 512);
 });
 
-test('full rank n=p is permitted; underdetermined and singular designs are not',async()=>{
-  const rows=grid().slice(0,3).map((r,i)=>({...r,features:{...f(),outcomeCount:i},actualMs:60000*(10+i)}));
-  const result=await fitAtlm(rows.slice(0,2));assert.equal(result.status,'AVAILABLE',JSON.stringify(result));
-  assert.equal(result.artifact.residualDegreesOfFreedom,0);
-  const singular=rows.map((r,i)=>({...r,features:{...r.features,contractCount:i}}));
-  assert.equal((await fitAtlm(singular.slice(0,2))).reason,'INSUFFICIENT_DATA');
-  assert.equal((await fitAtlm(singular)).reason,'RANK_DEFICIENT');
-});
-
-test('held-out outcomes cannot change runtime preprocessing or historical prediction',async()=>{
-  const rows=grid(false), target={...rows.at(-1),sampleId:'held',planId:'held',capturedAt:10000,sourceAvailableAt:10001};
-  const a=await evaluateAtlmCase([...rows,target],'held');
-  const b=await evaluateAtlmCase([...rows,{...target,actualMs:99999999}],'held');
-  assert.deepEqual(a.atlm,b.atlm);assert.equal(a.trainDatasetDigest,b.trainDatasetDigest);
-});
-
-test('constant known parallel count with missing values learns only the missing indicator',async()=>{
-  const rows=Array.from({length:12},(_,i)=>({...grid()[0],sampleId:'c'+i,planId:'c'+i,
-    features:f(null,null,i%2?2:null),actualMs:60000*(i%2?4:9)}));
-  const {artifact}=await fitAtlm(rows);
-  assert.equal(artifact.p,2);
-  assert.equal(artifact.runtime.parallel.varying,false);
-  near(minutes(artifact,f(null,null,2)),4);near(minutes(artifact,f()),9);
-});
-
-test('unbounded model identifiers cannot allocate an unbounded design matrix',async()=>{
-  const rows=Array.from({length:66},(_,i)=>({...grid()[0],sampleId:'l'+i,planId:'l'+i,features:f('model-'+i),actualMs:60000}));
-  const result=await fitAtlm(rows);assert.equal(result.reason,'MODEL_CAPACITY_LIMIT');assert.equal(result.limit,64);
-});
-
-test('runtime artifact metadata is validated before inference',async()=>{
-  const {artifact}=await fitAtlm(grid());
-  for(const change of [a=>a.runtime.categories.modelId.weights[0]=-1,a=>a.runtime.parallel.mean=Infinity,a=>delete a.runtime,a=>a.runtime.categories.reasoningEffort.levels.push('extra')]) {
-    const bad=JSON.parse(JSON.stringify(artifact));change(bad);assert.equal(predictAtlm(bad,f()).reason,'INVALID_ARTIFACT');
+test('runtime manifest rejects reordered columns and invalid category metadata', async () => {
+  const input = Array.from({length: 8}, (_, i) => make(i, {modelId: i < 4 ? 'a' : 'b', plannedParallelAgents: i % 2 ? 1 : null}));
+  const fit = await fitAtlmRidge(input); assert.equal(fit.status, 'AVAILABLE');
+  for (const change of [a => a.preprocessor.openCategories.modelId.push('x'.repeat(129)),
+    a => a.preprocessor.imputations.plannedParallelAgents = -1,
+    a => a.preprocessor.columns[0].center = -100,
+    a => { [a.preprocessor.columns[0], a.preprocessor.columns[1]] = [a.preprocessor.columns[1], a.preprocessor.columns[0]]; }]) {
+    const bad = structuredClone(fit.artifact); change(bad);
+    assert.equal(predictAtlmRidge(bad, input[0].features).reason, 'INVALID_ARTIFACT');
   }
 });

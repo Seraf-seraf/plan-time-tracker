@@ -429,18 +429,9 @@ const ATLM_HYBRID_METHOD = ATLM_METHOD;
 const ATLM_POLICY_VERSION = 1;
 const ATLM_MIN_COMPARISONS = 5;
 const ATLM_MAE_TIE_MS = 1;
-const ATLM_FEATURE_VERSION = "agent-task-v2";
-const ATLM_MAX_COLUMNS = 64;
-const ATLM_RUNTIME_CATEGORIES = Object.freeze(["modelId", "reasoningEffort"]);
-const ATLM_NUMERIC_FIELDS = Object.freeze(["outcomeCount", "contractCount", "verificationKindCount"]);
-const ATLM_CATEGORY_LEVELS = Object.freeze({
-  workKind: Object.freeze([...ESTIMATE_WORK_KINDS].filter(value => value !== "UNKNOWN")),
-  reuseState: Object.freeze([...ESTIMATE_REUSE_STATES].filter(value => value !== "UNKNOWN")),
-  doneBoundary: Object.freeze([...ESTIMATE_DONE_BOUNDARIES].filter(value => value !== "UNKNOWN")),
-});
+const ATLM_FEATURE_VERSION = "agent-task-v3";
 const ATLM_MAX_ROWS = 5000;
 const ATLM_MAX_EVALUATION_CASES = 20;
-const ATLM_TRANSFORMS = Object.freeze(["identity", "log", "sqrt"]);
 
 function atlmUnavailable(reason, details = {}) { return { status: "UNAVAILABLE", pointMs: null, reason, ...details }; }
 function atlmCompareId(a, b) { return a < b ? -1 : a > b ? 1 : 0; }
@@ -449,21 +440,8 @@ function atlmExactKeys(value, keys) {
   return isPlainRecord(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 }
 function atlmFeatureProblem(features) {
-  const fields = [...ESTIMATE_PROFILE_FIELDS, ...ATLM_NUMERIC_FIELDS];
-  const optional = ["modelId", "reasoningEffort", "plannedParallelAgents"];
-  if (!isPlainRecord(features) || fields.some(field => !Object.hasOwn(features, field)) || Object.keys(features).some(field => !fields.includes(field) && !optional.includes(field))) return atlmUnavailable("INVALID_FEATURES");
-  for (const field of ["modelId", "reasoningEffort"]) if (features[field] != null && (typeof features[field] !== "string" || !features[field].trim() || features[field].length > 128)) return atlmUnavailable("INVALID_FEATURES");
-  if (features.plannedParallelAgents != null && (!Number.isSafeInteger(features.plannedParallelAgents) || features.plannedParallelAgents < 1)) return atlmUnavailable("INVALID_FEATURES");
-  const missingFields = [];
-  for (const field of ESTIMATE_PROFILE_FIELDS) {
-    if (features[field] === "UNKNOWN" || features[field] === null) missingFields.push(field);
-    else if (!ATLM_CATEGORY_LEVELS[field].includes(features[field])) return atlmUnavailable("INVALID_FEATURES");
-  }
-  for (const field of ATLM_NUMERIC_FIELDS) {
-    if (features[field] === null) missingFields.push(field);
-    else if (!isNonnegativeSafeInteger(features[field]) || features[field] > (field === "verificationKindCount" ? 5 : 20)) return atlmUnavailable("INVALID_FEATURES");
-  }
-  return missingFields.length ? atlmUnavailable("INCOMPLETE_FEATURES", { missingFields }) : null;
+  const problem = v4FeatureProblem(features);
+  return problem ? atlmUnavailable(problem) : null;
 }
 function atlmDatasetProblem(rows) {
   if (!Array.isArray(rows)) return atlmUnavailable("INVALID_DATASET");
@@ -485,90 +463,6 @@ function atlmSum(values) {
   for (const value of values) { const adjusted = value - correction, next = sum + adjusted; correction = (next - sum) - adjusted; sum = next; }
   return sum;
 }
-function atlmTransform(name, value) {
-  if (name === "identity") return value;
-  if (name === "log") return value > 0 ? Math.log(value) : NaN;
-  if (name === "sqrt") return value >= 0 ? Math.sqrt(value) : NaN;
-  return NaN;
-}
-function atlmChooseTransform(values) {
-  if (values.every(value => value === values[0])) return "identity";
-  let best = "identity", bestScore = Infinity;
-  for (const name of ATLM_TRANSFORMS) {
-    const transformed = values.map(value => atlmTransform(name, value));
-    if (!transformed.every(Number.isFinite)) continue;
-    const mean = atlmSum(transformed) / transformed.length;
-    const deviations = transformed.map(value => value - mean);
-    const scale = Math.max(...deviations.map(Math.abs));
-    if (!(scale > 0)) continue;
-    // Scaling cancels from b1 and prevents overflow in the second/third moments.
-    const scaled = deviations.map(value => value / scale);
-    const m3 = atlmSum(scaled.map(value => value ** 3)) / values.length;
-    const variance = atlmSum(scaled.map(value => value ** 2)) / (values.length - 1);
-    const score = Math.abs(m3 / variance ** 1.5);
-    if (Number.isFinite(score) && score < bestScore - 1e-12) { best = name; bestScore = score; }
-  }
-  return best;
-}
-function atlmRuntimeLevels(values) {
-  return [...new Set(values)].sort((a,b)=>a===b?0:a===null?-1:b===null?1:atlmCompareId(a,b));
-}
-function atlmFitRuntime(rows) {
-  const categories = {};
-  for (const field of ATLM_RUNTIME_CATEGORIES) {
-    const counts = new Map();
-    for (const row of rows) { const value=row.features[field]??null;counts.set(value,(counts.get(value)||0)+1); }
-    const levels=atlmRuntimeLevels([...counts.keys()]);
-    categories[field]={levels,weights:levels.map(level=>counts.get(level)/rows.length)};
-  }
-  const known=rows.map(row=>row.features.plannedParallelAgents).filter(value=>value!=null);
-  const transform=known.length?atlmChooseTransform(known):"identity";
-  const mean=known.length?atlmSum(known.map(value=>atlmTransform(transform,value)))/known.length:0;
-  return {categories,parallel:{transform,mean,knownCount:known.length,
-    varying:known.some(value=>value!==known[0]),missingVarying:known.length>0&&known.length<rows.length}};
-}
-function atlmRuntimeColumns(runtime) {
-  const columns=[];
-  for(const field of ATLM_RUNTIME_CATEGORIES)for(const level of runtime.categories[field].levels.slice(1))columns.push({kind:"runtimeCategory",field,level});
-  if(runtime.parallel.varying)columns.push({kind:"runtimeNumeric",field:"plannedParallelAgents"});
-  if(runtime.parallel.missingVarying)columns.push({kind:"runtimeMissing",field:"plannedParallelAgents"});
-  return columns;
-}
-function atlmRuntimeValid(runtime,n) {
-  if(!atlmExactKeys(runtime,["categories","parallel"])||!atlmExactKeys(runtime.categories,ATLM_RUNTIME_CATEGORIES))return false;
-  for(const field of ATLM_RUNTIME_CATEGORIES){
-    const entry=runtime.categories[field];
-    if(!atlmExactKeys(entry,["levels","weights"])||!Array.isArray(entry.levels)||!entry.levels.length||entry.levels.length>Math.min(n,ATLM_MAX_COLUMNS)
-      ||entry.levels.some(value=>value!==null&&(typeof value!=="string"||!value.trim()||value.length>128))
-      ||canonical(entry.levels)!==canonical(atlmRuntimeLevels(entry.levels))||!Array.isArray(entry.weights)||entry.weights.length!==entry.levels.length
-      ||entry.weights.some(value=>!Number.isFinite(value)||value<=0||value>1||Math.abs(value*n-Math.round(value*n))>1e-8)
-      ||Math.abs(atlmSum(entry.weights)-1)>1e-9)return false;
-  }
-  const r=runtime.parallel;
-  return atlmExactKeys(r,["transform","mean","knownCount","varying","missingVarying"])&&ATLM_TRANSFORMS.includes(r.transform)
-    &&Number.isFinite(r.mean)&&r.mean>=0&&Number.isSafeInteger(r.knownCount)&&r.knownCount>=0&&r.knownCount<=n
-    &&typeof r.varying==="boolean"&&typeof r.missingVarying==="boolean"&&r.missingVarying===(r.knownCount>0&&r.knownCount<n)
-    &&(!r.varying||r.knownCount>=2)&&(r.varying||r.transform==="identity")&&(r.knownCount>0||r.mean===0)
-    &&(!r.knownCount||r.transform==="log"||r.mean>=1);
-}
-function atlmDesignRow(features, columns, transforms, runtime) {
-  return columns.map(column => {
-    if(column.kind==="intercept")return 1;
-    if(column.kind==="category")return Number(features[column.field]===column.level);
-    if(column.kind==="numeric")return atlmTransform(transforms[column.field],features[column.field]);
-    if(column.kind==="runtimeCategory"){
-      const entry=runtime.categories[column.field];let value=features[column.field]??null;
-      if(!entry.levels.includes(value)){
-        if(entry.levels.includes(null))value=null;
-        else return entry.weights[entry.levels.indexOf(column.level)];
-      }
-      return Number(value===column.level);
-    }
-    if(column.kind==="runtimeMissing")return Number(features.plannedParallelAgents==null);
-    return features.plannedParallelAgents==null?0:atlmTransform(runtime.parallel.transform,features.plannedParallelAgents)-runtime.parallel.mean;
-  });
-}
-
 // Column-equilibrated Householder QR with deterministic column pivoting. Rank
 // uses eps * max(n,p) * max(abs(diag(R))) on the equilibrated matrix. Column
 // scaling changes only numerical conditioning, not the OLS objective.
@@ -629,105 +523,10 @@ function atlmFreeze(value) {
   return value;
 }
 
-export async function fitAtlmOls(rows) {
-  const problem = atlmDatasetProblem(rows);
-  if (problem) return problem;
-  const sorted = atlmSortedRows(rows), n = sorted.length;
-  if (!n) return atlmUnavailable("INSUFFICIENT_DATA", { sampleCount: 0 });
-  for (const row of sorted) { const missing = atlmFeatureProblem(row.features); if (missing) return missing; }
-  const levels = {}, transforms = {}, columns = [{ kind: "intercept" }], constantPredictors = [];
-  for (const field of ESTIMATE_PROFILE_FIELDS) {
-    const observed = new Set(sorted.map(row => row.features[field]));
-    levels[field] = ATLM_CATEGORY_LEVELS[field].filter(value => observed.has(value));
-    for (const level of levels[field].slice(1)) columns.push({ kind: "category", field, level });
-  }
-  for (const field of ATLM_NUMERIC_FIELDS) {
-    const values = sorted.map(row => row.features[field]);
-    transforms[field] = atlmChooseTransform(values);
-    if (values.every(value => value === values[0])) constantPredictors.push(field);
-    else columns.push({ kind: "numeric", field });
-  }
-  const runtime=atlmFitRuntime(sorted);columns.push(...atlmRuntimeColumns(runtime));
-  const p = columns.length, residualDegreesOfFreedom = n - p;
-  if(p>ATLM_MAX_COLUMNS)return atlmUnavailable("MODEL_CAPACITY_LIMIT",{sampleCount:n,p,limit:ATLM_MAX_COLUMNS});
-  if (residualDegreesOfFreedom < 0) return atlmUnavailable("INSUFFICIENT_DATA", { sampleCount: n, p, residualDegreesOfFreedom });
-  const target = sorted.map(row => row.actualMs / 60000);
-  transforms.target = atlmChooseTransform(target);
-  const matrix = sorted.map(row => atlmDesignRow(row.features, columns, transforms, runtime));
-  const solved = atlmQr(matrix, target.map(value => atlmTransform(transforms.target, value)));
-  if (solved.rank !== p) return atlmUnavailable("RANK_DEFICIENT", { sampleCount: n, p, rank: solved.rank });
-  if (!solved.coefficients.every(Number.isFinite)) return atlmUnavailable("NUMERICAL_FAILURE", { sampleCount: n });
-  const artifact = atlmFreeze({
-    formatVersion: 1, method: { ...ATLM_OLS_METHOD }, featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
-    n, p, rank: solved.rank, residualDegreesOfFreedom, levels, transforms, runtime, columns, coefficients: solved.coefficients,
-    constantPredictors, manifest: sorted.map(({ sampleId, planId }) => ({ sampleId, planId })),
-    datasetDigest: "sha256:" + await hashCommandInput(sorted),
-    engine: { id: "ECMAScript-binary64", version: "householder-qr-pivot-v1", rankTolerance: solved.rankTolerance },
-  });
-  return { status: "AVAILABLE", artifact };
-}
-
-function atlmOlsArtifactValid(artifact) {
-  if (!isPlainRecord(artifact) || artifact.formatVersion !== 1 || artifact.method?.id !== ATLM_OLS_METHOD.id
-    || artifact.method?.version !== ATLM_OLS_METHOD.version || artifact.featureSchemaVersion !== ATLM_FEATURE_VERSION
-    || artifact.metric !== "PLAN_ACTIVE" || !isNonnegativeSafeInteger(artifact.n) || artifact.n > ATLM_MAX_ROWS
-    || !Number.isInteger(artifact.p) || artifact.p < 1 || artifact.p > ATLM_MAX_COLUMNS || artifact.n - artifact.p < 0 || artifact.rank !== artifact.p
-    || artifact.residualDegreesOfFreedom !== artifact.n - artifact.p || !isSnapshotDigest(artifact.datasetDigest)
-    || !atlmRuntimeValid(artifact.runtime,artifact.n)
-    || !atlmExactKeys(artifact.levels, ESTIMATE_PROFILE_FIELDS)
-    || !atlmExactKeys(artifact.transforms, [...ATLM_NUMERIC_FIELDS, "target"])
-    || !Object.values(artifact.transforms).every(value => ATLM_TRANSFORMS.includes(value))
-    || !Array.isArray(artifact.constantPredictors) || !artifact.constantPredictors.every(field => ATLM_NUMERIC_FIELDS.includes(field))
-    || new Set(artifact.constantPredictors).size !== artifact.constantPredictors.length) return false;
-  const columns = [{ kind: "intercept" }];
-  for (const field of ESTIMATE_PROFILE_FIELDS) {
-    const levels = artifact.levels[field];
-    if (!Array.isArray(levels) || !levels.length || new Set(levels).size !== levels.length
-      || levels.some(level => !ATLM_CATEGORY_LEVELS[field].includes(level))
-      || canonical(levels) !== canonical(ATLM_CATEGORY_LEVELS[field].filter(level => levels.includes(level)))) return false;
-    for (const level of levels.slice(1)) columns.push({ kind: "category", field, level });
-  }
-  for (const field of ATLM_NUMERIC_FIELDS) {
-    if (artifact.constantPredictors.includes(field)) { if (artifact.transforms[field] !== "identity") return false; }
-    else columns.push({ kind: "numeric", field });
-  }
-  columns.push(...atlmRuntimeColumns(artifact.runtime));
-  if (!Array.isArray(artifact.columns) || canonical(columns) !== canonical(artifact.columns)
-    || artifact.p !== columns.length || !Array.isArray(artifact.coefficients) || artifact.coefficients.length !== columns.length
-    || !artifact.coefficients.every(Number.isFinite) || !Array.isArray(artifact.manifest) || artifact.manifest.length !== artifact.n) return false;
-  const samples = new Set(), plans = new Set();
-  for (const item of artifact.manifest) {
-    if (!atlmExactKeys(item, ["sampleId", "planId"]) || !atlmValidId(item.sampleId) || !atlmValidId(item.planId)
-      || samples.has(item.sampleId) || plans.has(item.planId)) return false;
-    samples.add(item.sampleId); plans.add(item.planId);
-  }
-  return true;
-}
-
-export function predictAtlmOls(artifact, features) {
-  if (!atlmOlsArtifactValid(artifact)) return atlmUnavailable("INVALID_ARTIFACT");
-  const problem = atlmFeatureProblem(features);
-  if (problem) return problem;
-  const unsupportedFields=ESTIMATE_PROFILE_FIELDS.filter(field => !artifact.levels[field].includes(features[field]));
-  if (unsupportedFields.length) return atlmUnavailable("UNSUPPORTED_CATEGORY",{unsupportedFields});
-  const design = atlmDesignRow(features, artifact.columns, artifact.transforms, artifact.runtime);
-  if (!design.every(Number.isFinite)) return atlmUnavailable("INVALID_PREDICTION");
-  const transformed = atlmSum(design.map((value, i) => value * artifact.coefficients[i]));
-  const minutes = artifact.transforms.target === "identity" ? transformed
-    : artifact.transforms.target === "log" ? Math.exp(transformed) : transformed < 0 ? NaN : transformed ** 2;
-  if (!Number.isFinite(minutes) || minutes < 0) return atlmUnavailable("INVALID_PREDICTION");
-  const pointMs = Math.round(minutes * 60000);
-  return isNonnegativeSafeInteger(pointMs) ? { status: "AVAILABLE", pointMs, reason: null } : atlmUnavailable("INVALID_PREDICTION");
-}
-
-function atlmRidgeColumns(levels, runtime) {
-  const columns = [{ kind: "intercept" }];
-  for (const field of ESTIMATE_PROFILE_FIELDS) for (const level of levels[field]) columns.push({ kind: "category", field, level });
-  for (const field of ATLM_NUMERIC_FIELDS) columns.push({ kind: "numeric", field });
-  for (const field of ATLM_RUNTIME_CATEGORIES) for (const level of runtime.categories[field].levels) columns.push({ kind: "runtimeCategory", field, level });
-  columns.push({ kind: "runtimeNumeric", field: "plannedParallelAgents" }, { kind: "runtimeMissing", field: "plannedParallelAgents" });
-  return columns;
-}
+export async function fitAtlmOls(rows) { return fitAtlmV4Regression(rows, "OLS"); }
+export function predictAtlmOls(artifact, features) { return artifact?.kind === "OLS" ? predictAtlmV4Regression(artifact, features) : atlmUnavailable("INVALID_ARTIFACT"); }
+export async function fitAtlmRidge(rows) { return fitAtlmV4Regression(rows, "RIDGE"); }
+export function predictAtlmRidge(artifact, features) { return artifact?.kind === "RIDGE" ? predictAtlmV4Regression(artifact, features) : atlmUnavailable("INVALID_ARTIFACT"); }
 
 function atlmManifestValid(manifest, n) {
   if (!Array.isArray(manifest) || manifest.length !== n) return false;
@@ -740,86 +539,9 @@ function atlmManifestValid(manifest, n) {
   return true;
 }
 
-function atlmRidgeArtifactValid(a) {
-  if (!isPlainRecord(a) || a.formatVersion !== 1 || a.kind !== "RIDGE" || a.method?.id !== ATLM_RIDGE_METHOD.id
-    || a.method.version !== ATLM_RIDGE_METHOD.version || a.featureSchemaVersion !== ATLM_FEATURE_VERSION || a.metric !== "PLAN_ACTIVE"
-    || !Number.isSafeInteger(a.n) || a.n < 1 || a.n > ATLM_MAX_ROWS || !Number.isInteger(a.p) || a.p < 1 || a.p > ATLM_MAX_COLUMNS
-    || !Number.isInteger(a.rank) || a.rank < 1 || a.rank > Math.min(a.n, a.p)
-    || a.lambda !== ATLM_RIDGE_LAMBDA || a.objective !== "mean-square-plus-l2" || !isSnapshotDigest(a.datasetDigest)
-    || !atlmRuntimeValid(a.runtime, a.n) || !atlmExactKeys(a.levels, ESTIMATE_PROFILE_FIELDS)
-    || !atlmExactKeys(a.transforms, [...ATLM_NUMERIC_FIELDS, "target"]) || !Object.values(a.transforms).every(t => ATLM_TRANSFORMS.includes(t))
-    || !atlmManifestValid(a.manifest, a.n) || a.engine?.version !== "householder-qr-ridge-v1") return false;
-  for (const field of ESTIMATE_PROFILE_FIELDS) {
-    const levels = a.levels[field];
-    if (!Array.isArray(levels) || !levels.length || canonical(levels) !== canonical(ATLM_CATEGORY_LEVELS[field].filter(v => levels.includes(v)))) return false;
-  }
-  const columns = atlmRidgeColumns(a.levels, a.runtime);
-  if (canonical(a.columns) !== canonical(columns) || a.p !== columns.length) return false;
-  for (const field of ["centers", "scales", "coefficients"]) {
-    if (!Array.isArray(a[field]) || a[field].length !== a.p || !a[field].every(Number.isFinite)) return false;
-  }
-  return a.centers[0] === 0 && a.scales[0] === 1 && a.scales.every((value, i) => value > 0
-    && (["numeric", "runtimeNumeric"].includes(columns[i].kind) || value === 1));
-}
-
-export async function fitAtlmRidge(rows) {
-  const problem = atlmDatasetProblem(rows);
-  if (problem) return problem;
-  const sorted = atlmSortedRows(rows), n = sorted.length;
-  if (!n) return atlmUnavailable("INSUFFICIENT_DATA", { sampleCount: 0 });
-  for (const row of sorted) { const missing = atlmFeatureProblem(row.features); if (missing) return missing; }
-  const levels = {}, transforms = {};
-  for (const field of ESTIMATE_PROFILE_FIELDS) levels[field] = ATLM_CATEGORY_LEVELS[field].filter(value => sorted.some(row => row.features[field] === value));
-  for (const field of ATLM_NUMERIC_FIELDS) transforms[field] = atlmChooseTransform(sorted.map(row => row.features[field]));
-  const target = sorted.map(row => row.actualMs / ATLM_MS_PER_MINUTE);
-  transforms.target = atlmChooseTransform(target);
-  const runtime = atlmFitRuntime(sorted), columns = atlmRidgeColumns(levels, runtime), p = columns.length;
-  if (p > ATLM_MAX_COLUMNS) return atlmUnavailable("MODEL_CAPACITY_LIMIT", { sampleCount: n, p, limit: ATLM_MAX_COLUMNS });
-  const matrix = sorted.map(row => atlmDesignRow(row.features, columns, transforms, runtime));
-  const centers = [], scales = [];
-  for (let j = 0; j < p; j++) {
-    const values = matrix.map(row => row[j]), constant = values.every(v => v === values[0]);
-    const center = j === 0 ? 0 : constant ? values[0] : atlmSum(values) / n;
-    const numeric = ["numeric", "runtimeNumeric"].includes(columns[j].kind);
-    const scale = j === 0 || !numeric || constant ? 1 : Math.sqrt(atlmSum(values.map(v => (v - center) ** 2)) / n);
-    centers.push(center); scales.push(scale > 0 ? scale : 1);
-  }
-  const standardized = matrix.map(row => row.map((value, j) => (value - centers[j]) / scales[j]));
-  const augmented = standardized.slice(), response = target.map(value => atlmTransform(transforms.target, value));
-  for (let j = 1; j < p; j++) {
-    const penalty = Array(p).fill(0); penalty[j] = Math.sqrt(n * ATLM_RIDGE_LAMBDA);
-    augmented.push(penalty); response.push(0);
-  }
-  const solved = atlmQr(augmented, response), raw = atlmQr(matrix, Array(n).fill(0));
-  if (!solved.coefficients?.every(Number.isFinite)) return atlmUnavailable("NUMERICAL_FAILURE", { sampleCount: n, p, rank: raw.rank });
-  const artifact = atlmFreeze({
-    formatVersion: 1, kind: "RIDGE", method: { ...ATLM_RIDGE_METHOD }, featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
-    n, p, rank: raw.rank, lambda: ATLM_RIDGE_LAMBDA, objective: "mean-square-plus-l2",
-    levels, transforms, runtime, columns, centers, scales, coefficients: solved.coefficients,
-    manifest: sorted.map(({ sampleId, planId }) => ({ sampleId, planId })), datasetDigest: "sha256:" + await hashCommandInput(sorted),
-    engine: { id: "ECMAScript-binary64", version: "householder-qr-ridge-v1", rankTolerance: raw.rankTolerance },
-  });
-  return { status: "AVAILABLE", artifact };
-}
-
-export function predictAtlmRidge(artifact, features) {
-  if (!atlmRidgeArtifactValid(artifact)) return atlmUnavailable("INVALID_ARTIFACT");
-  const problem = atlmFeatureProblem(features);
-  if (problem) return problem;
-  const unsupportedFields = ESTIMATE_PROFILE_FIELDS.filter(field => !artifact.levels[field].includes(features[field]));
-  if (unsupportedFields.length) return atlmUnavailable("UNSUPPORTED_CATEGORY", { unsupportedFields });
-  const design = atlmDesignRow(features, artifact.columns, artifact.transforms, artifact.runtime)
-    .map((value, i) => (value - artifact.centers[i]) / artifact.scales[i]);
-  const value = atlmSum(design.map((x, i) => x * artifact.coefficients[i]));
-  const minutes = artifact.transforms.target === "identity" ? value : artifact.transforms.target === "log" ? Math.exp(value) : value < 0 ? NaN : value ** 2;
-  const pointMs = Math.round(minutes * ATLM_MS_PER_MINUTE);
-  return design.every(Number.isFinite) && minutes >= 0 && isNonnegativeSafeInteger(pointMs)
-    ? { status: "AVAILABLE", pointMs, reason: null } : atlmUnavailable("INVALID_PREDICTION");
-}
-
 export async function fitAtlm(rows, options) { return fitHybridAtlm(rows, options); }
-export function predictAtlm(artifact, features) { return artifact?.kind === "HYBRID" ? predictHybridAtlm(artifact, features) : predictAtlmOls(artifact, features); }
-function atlmArtifactValid(artifact) { return artifact?.kind === "HYBRID" ? atlmHybridArtifactValid(artifact) : atlmOlsArtifactValid(artifact); }
+export function predictAtlm(artifact, features) { return artifact?.kind === "HYBRID" ? predictHybridAtlm(artifact, features) : predictAtlmV4Regression(artifact, features); }
+function atlmArtifactValid(artifact) { return artifact?.kind === "HYBRID" ? atlmHybridArtifactValid(artifact) : atlmV4RegressionArtifactValid(artifact); }
 
 function atlmEvaluationOptions(options) {
   if (!isPlainRecord(options) || Object.keys(options).some(key => !["protocolVersion", "cutoff"].includes(key))
@@ -940,7 +662,7 @@ export function selectHybridEvaluationCases(journal, options = {}) {
 }
 
 async function atlmFitCandidates(rows) {
-  return { ols: await fitAtlmOls(rows), ridge: await fitAtlmRidge(rows) };
+  return { ols: await fitAtlmV4Regression(rows, "OLS"), ridge: await fitAtlmV4Regression(rows, "RIDGE") };
 }
 
 function atlmFitDiagnostic(fit) {
@@ -994,7 +716,7 @@ export async function evaluateHybridBaseCase(train, target) {
   return { ...atlmTrainingRow(target), trainSampleCount: train.length,
     trainDatasetDigest: "sha256:" + await hashCommandInput(atlmSortedRows(train)),
     fits: { ols: atlmFitDiagnostic(candidates.ols), ridge: atlmFitDiagnostic(candidates.ridge) },
-    ols: prediction("ols", predictAtlmOls), ridge: prediction("ridge", predictAtlmRidge),
+    ols: prediction("ols", predictAtlmV4Regression), ridge: prediction("ridge", predictAtlmV4Regression),
     median: pointMs === null ? atlmUnavailable(train.length > ATLM_MAX_ROWS ? "DATASET_LIMIT_REACHED" : "INSUFFICIENT_DATA")
       : { status: "AVAILABLE", pointMs, reason: null } };
 }
@@ -1019,8 +741,7 @@ export function summarizeHybridAtlmEvaluation(cases, selection) {
     operational: atlmScore(comparable, "prediction"), ols: atlmScore(ordered, "ols"), ridge: atlmScore(ordered, "ridge") };
   const paired = { caseCount: pairedCases.length, caseSampleIds: pairedCases.map(c => c.sampleId),
     atlm: atlmScore(pairedCases, "atlm"), median: atlmScore(pairedCases, "median") };
-  const profileGroupCount = new Set(comparable.map(c => canonical(Object.fromEntries(
-    [...ESTIMATE_PROFILE_FIELDS, ...ATLM_NUMERIC_FIELDS].map(field => [field, c.features[field]]))))).size;
+  const profileGroupCount = new Set(comparable.map(c => canonical(c.features))).size;
   return { status: "AVAILABLE", formatVersion: 1, protocolVersion: 2, policyVersion: ATLM_POLICY_VERSION,
     method: { ...ATLM_HYBRID_METHOD }, metric: "PLAN_ACTIVE", metricsScope: "FULL_POLICY",
     cutoff: selection.cutoff, inputCount: selection.inputCount, eligibleCount: selection.eligibleCount,
@@ -1066,11 +787,11 @@ function atlmHybridArtifactValid(a) {
     || !isSnapshotDigest(a.datasetDigest) || !isNonnegativeSafeInteger(a.trainCutoff)
     || !atlmExactKeys(a.candidates, ["ols", "ridge"]) || !atlmSelectionValid(a.selection)
     || a.selection.policyVersion !== ATLM_POLICY_VERSION || a.selection.selectedEngine !== a.selectedEngine) return false;
-  for (const [name, validate] of [["ols", atlmOlsArtifactValid], ["ridge", atlmRidgeArtifactValid]]) {
+  for (const [name, validate] of [["ols", atlmV4RegressionArtifactValid], ["ridge", atlmV4RegressionArtifactValid]]) {
     const fit = a.candidates[name];
     if (!isPlainRecord(fit) || !["AVAILABLE", "UNAVAILABLE"].includes(fit.status)) return false;
     if (fit.status === "UNAVAILABLE" && (typeof fit.reason !== "string" || !fit.reason || fit.reason.length > 128)) return false;
-    if (fit.status === "AVAILABLE" && (!validate(fit.artifact) || fit.artifact.n !== a.n
+    if (fit.status === "AVAILABLE" && (fit.artifact?.kind !== name.toUpperCase() || !validate(fit.artifact) || fit.artifact.n !== a.n
       || fit.artifact.datasetDigest !== a.datasetDigest || canonical(fit.artifact.manifest) !== canonical(a.manifest))) return false;
   }
   const selected = a.candidates[a.selectedEngine.toLowerCase()];
@@ -1106,7 +827,7 @@ export function predictHybridAtlm(artifact, features) {
   const problem = atlmFeatureProblem(features);
   if (problem) return problem;
   const base = {};
-  for (const [name, predict] of [["ols", predictAtlmOls], ["ridge", predictAtlmRidge]]) {
+  for (const [name, predict] of [["ols", predictAtlmV4Regression], ["ridge", predictAtlmV4Regression]]) {
     const fit = artifact.candidates[name];
     base[name] = fit.status === "AVAILABLE" ? predict(fit.artifact, features) : atlmUnavailable(fit.reason);
   }
@@ -1238,63 +959,330 @@ function assertSafeMetadataText(value, label) {
 
 
 
-export const AGENT_TASK_SCHEMA = {
+const V4_TASK_TEXT = { type: "string", minLength: 1, maxLength: 400 };
+const V4_TASK_KEY = { type: "string", minLength: 1, maxLength: 128 };
+const V4_TASK_ITEM = (properties) => ({ type: "object", additionalProperties: false,
+  required: Object.keys(properties), properties });
+const V4_TASK_MAX_BYTES = 64 * 1024;
+const V4_TASK_LIST = (items) => ({ type: ["array", "null"], maxItems: V4_TASK_MAX_BYTES, items });
+const V4_WORK_KINDS = ["CREATE", "MODIFY", "DEBUG", "REFACTOR", "MIGRATE", "VERIFY", "ANALYZE", "OPERATE"];
+const V4_VERIFICATION_KINDS = ["BUILD_STATIC", "UNIT", "INTEGRATION", "UI_E2E", "DEPLOY_SMOKE"];
+const V4_TASK_SCHEMA = {
   type: "object", additionalProperties: false,
-  required: ["schemaVersion", "profile", "outcomes", "changedContracts", "verificationKinds", "profileEvidence"],
+  required: ["schemaVersion", "workUnits", "doneBoundary", "reuseLevel", "components", "contracts", "integrations", "migrationEntities", "dataVolumeBand", "requirementsUncertainty", "solutionUncertainty", "diagnosisState", "unfamiliarTechnologies", "scopeChangeRisk", "verificationKinds", "verificationScenarios", "verificationReadiness", "requiredReviewPasses", "environmentReadiness", "accessReadiness", "deploymentTargets", "execution", "evidence", "unknownReasons"],
   properties: {
-    schemaVersion: { enum: ["agent-task-v1"] },
-    profile: { type: "object", additionalProperties: false, required: [...ESTIMATE_PROFILE_FIELDS], properties: {
-      workKind: { enum: [...ESTIMATE_WORK_KINDS] }, reuseState: { enum: [...ESTIMATE_REUSE_STATES] }, doneBoundary: { enum: [...ESTIMATE_DONE_BOUNDARIES] },
-    } },
-    outcomes: { type: ["array", "null"], maxItems: 20, items: { type: "object", additionalProperties: false,
-      required: ["id", "description", "evidence"], properties: {
-        id: { type: "string", minLength: 1, maxLength: 128 }, description: { type: "string", minLength: 1, maxLength: 400 }, evidence: { type: "string", minLength: 1, maxLength: 400 },
-      } } },
-    changedContracts: { type: ["array", "null"], maxItems: 20, items: { type: "object", additionalProperties: false,
-      required: ["kind", "key", "description", "evidence"], properties: {
-        kind: { enum: ["API", "MCP", "EVENT", "STORAGE", "OTHER"] }, key: { type: "string", minLength: 1, maxLength: 128 },
-        description: { type: "string", minLength: 1, maxLength: 400 }, evidence: { type: "string", minLength: 1, maxLength: 400 },
-      } } },
-    verificationKinds: { type: ["array", "null"], maxItems: 20, items: { enum: ["BUILD_STATIC", "UNIT", "INTEGRATION", "UI_E2E", "DEPLOY_SMOKE"] } },
-    profileEvidence: { type: "object", additionalProperties: false, required: [...ESTIMATE_PROFILE_FIELDS], properties: Object.fromEntries(ESTIMATE_PROFILE_FIELDS.map(key => [key, { type: "string", minLength: 1, maxLength: 400 }])) },
-    runtimeContext: { type: ["object", "null"], additionalProperties: false, properties: {
-      ...Object.fromEntries(["modelId", "reasoningEffort"].map(key => [key, { type: ["string", "null"], minLength: 0, maxLength: 128 }])),
-      environmentId: { type: ["string", "null"], enum: [...ENVIRONMENT_IDS, null],
-        description: "Допустимые значения: local, cloud_workspace или null, если среда неизвестна." },
-      plannedParallelAgents: { type: ["integer", "null"], minimum: 1, maximum: Number.MAX_SAFE_INTEGER }, provenance: { enum: ["CLIENT_REPORTED", "UNKNOWN"] },
-    } },
+    schemaVersion: { enum: ["agent-task-v3"] },
+    workUnits: V4_TASK_LIST(V4_TASK_ITEM({ id: V4_TASK_KEY, kind: { enum: V4_WORK_KINDS }, description: V4_TASK_TEXT, evidence: V4_TASK_TEXT })),
+    doneBoundary: { enum: [...ESTIMATE_DONE_BOUNDARIES] },
+    reuseLevel: { type: ["integer", "null"], minimum: 0, maximum: 3 },
+    components: V4_TASK_LIST(V4_TASK_ITEM({ key: V4_TASK_KEY, change: { enum: ["CREATE", "MODIFY", "REMOVE"] }, evidence: V4_TASK_TEXT })),
+    contracts: V4_TASK_LIST(V4_TASK_ITEM({ kind: { enum: ["API", "MCP", "EVENT", "STORAGE", "UI", "CONFIG"] }, key: V4_TASK_KEY, change: { enum: ["ADD", "COMPATIBLE", "BREAKING", "REMOVE"] }, evidence: V4_TASK_TEXT })),
+    integrations: V4_TASK_LIST(V4_TASK_ITEM({ key: V4_TASK_KEY, change: { enum: ["USE", "CHANGE", "ADD"] }, evidence: V4_TASK_TEXT })),
+    migrationEntities: V4_TASK_LIST(V4_TASK_ITEM({ key: V4_TASK_KEY, evidence: V4_TASK_TEXT })),
+    dataVolumeBand: { enum: ["NONE", "LE_1K", "LE_100K", "LE_10M", "GT_10M", "UNKNOWN"] },
+    requirementsUncertainty: { type: ["integer", "null"], minimum: 0, maximum: 3 },
+    solutionUncertainty: { type: ["integer", "null"], minimum: 0, maximum: 3 },
+    diagnosisState: { enum: ["NOT_APPLICABLE", "PROVEN", "HYPOTHESIS", "UNKNOWN"] },
+    unfamiliarTechnologies: V4_TASK_LIST(V4_TASK_ITEM({ key: V4_TASK_KEY, evidence: V4_TASK_TEXT })),
+    scopeChangeRisk: { type: ["integer", "null"], minimum: 0, maximum: 3 },
+    verificationKinds: V4_TASK_LIST({ enum: V4_VERIFICATION_KINDS }),
+    verificationScenarios: V4_TASK_LIST(V4_TASK_ITEM({ id: V4_TASK_KEY, description: V4_TASK_TEXT, evidence: V4_TASK_TEXT })),
+    verificationReadiness: { enum: ["READY", "ADAPT", "CREATE", "NONE_REQUIRED", "UNKNOWN"] },
+    requiredReviewPasses: { type: ["integer", "null"], minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+    environmentReadiness: { enum: ["READY", "SETUP_KNOWN", "BLOCKED", "UNKNOWN"] },
+    accessReadiness: { enum: ["AVAILABLE", "MISSING", "UNKNOWN"] },
+    deploymentTargets: V4_TASK_LIST(V4_TASK_ITEM({ key: V4_TASK_KEY, evidence: V4_TASK_TEXT })),
+    execution: V4_TASK_ITEM({ mode: { enum: ["AI_AGENT", "HUMAN", "HYBRID", "UNKNOWN"] },
+      modelId: { type: ["string", "null"], minLength: 1, maxLength: 128 }, reasoningEffort: { type: ["string", "null"], minLength: 1, maxLength: 128 },
+      environmentId: { enum: ["local", "cloud_workspace", null] }, plannedParallelAgents: { type: ["integer", "null"], minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
+      codebaseFamiliarity: { enum: ["NOT_READ", "MAPPED", "PRIOR_VERIFIED_WORK", "UNKNOWN"] } }),
+    evidence: { type: "object" }, unknownReasons: { type: "object" },
   },
 };
-export function normalizeAgentTaskV1(input) {
-  validateAssessmentValue(input, AGENT_TASK_SCHEMA, "agentTask");
-  const agentTask = JSON.parse(JSON.stringify(input));
-  const runtime = { modelId: null, reasoningEffort: null, environmentId: null, plannedParallelAgents: null, provenance: "UNKNOWN", ...agentTask.runtimeContext };
-  for (const field of ["modelId", "reasoningEffort", "environmentId"]) if (typeof runtime[field] === "string") runtime[field] = runtime[field].trim() || null;
-  if (runtime.reasoningEffort !== null) runtime.reasoningEffort = runtime.reasoningEffort.toLowerCase();
-  agentTask.runtimeContext = runtime;
-  const dedupe = (items, key) => {
-    if (items === null) return null;
-    const seen = new Map();
-    for (const item of items) {
-      const id = key(item), previous = seen.get(id);
-      if (previous && canonical(previous) !== canonical(item)) throw appError("VALIDATION_ERROR", "Conflicting duplicate agentTask key: " + id);
-      seen.set(id, item);
-    }
-    return [...seen.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([, item]) => item);
-  };
-  agentTask.outcomes = dedupe(agentTask.outcomes, item => item.id);
-  agentTask.changedContracts = dedupe(agentTask.changedContracts, item => item.kind + ":" + item.key);
-  if (agentTask.verificationKinds !== null) {
-    const order = AGENT_TASK_SCHEMA.properties.verificationKinds.items.enum;
-    agentTask.verificationKinds = [...new Set(agentTask.verificationKinds)].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+
+export function normalizeAgentTask(input) {
+  if (new TextEncoder().encode(JSON.stringify(input)).length > V4_TASK_MAX_BYTES) throw appError("VALIDATION_ERROR", "agentTask exceeds 64 KiB UTF-8.");
+  validateAssessmentValue(input, V4_TASK_SCHEMA, "agentTask");
+  const task = JSON.parse(JSON.stringify(input));
+  const scalarPaths = ["doneBoundary", "reuseLevel", "dataVolumeBand", "requirementsUncertainty", "solutionUncertainty", "diagnosisState", "scopeChangeRisk", "verificationReadiness", "requiredReviewPasses", "environmentReadiness", "accessReadiness", ...Object.keys(task.execution).map(key => "execution." + key)];
+  const listPaths = ["workUnits", "components", "contracts", "integrations", "migrationEntities", "unfamiliarTechnologies", "verificationKinds", "verificationScenarios", "deploymentTargets"];
+  const read = path => path.split(".").reduce((value, key) => value[key], task);
+  for (const path of [...scalarPaths, ...listPaths]) {
+    const value = read(path), openString = ["execution.modelId", "execution.reasoningEffort"].includes(path);
+    const unknown = value === null || (!openString && value === "UNKNOWN");
+    const text = unknown ? task.unknownReasons[path] : scalarPaths.includes(path) ? task.evidence[path] : null;
+    if ((unknown || scalarPaths.includes(path)) && (typeof text !== "string" || !text.trim() || Array.from(text).length > 400)) throw appError("VALIDATION_ERROR", "Missing evidence or unknown reason: " + path);
   }
-  const missingFields = ESTIMATE_PROFILE_FIELDS.filter(key => agentTask.profile[key] === "UNKNOWN").map(key => "profile." + key);
-  for (const key of ["outcomes", "changedContracts", "verificationKinds"]) if (agentTask[key] === null) missingFields.push(key);
-  const features = { ...agentTask.profile, outcomeCount: agentTask.outcomes?.length ?? null,
-    contractCount: agentTask.changedContracts?.length ?? null, verificationKindCount: agentTask.verificationKinds?.length ?? null,
-    modelId: runtime.modelId, reasoningEffort: runtime.reasoningEffort, plannedParallelAgents: runtime.plannedParallelAgents };
-  return { agentTask, features, missingFields };
+  for (const field of listPaths.filter(key => key !== "verificationKinds")) {
+    if (task[field] === null) continue;
+    const unique = new Map();
+    for (const item of task[field]) {
+      const key = item.id ?? (item.kind ? item.kind + ":" + item.key : item.key), previous = unique.get(key);
+      if (previous && canonical(previous) !== canonical(item)) throw appError("VALIDATION_ERROR", "Conflicting duplicate agentTask key: " + key);
+      unique.set(key, item);
+    }
+    task[field] = [...unique.entries()].sort(([a], [b]) => atlmCompareId(a, b)).map(([, item]) => item);
+  }
+  if (task.verificationKinds !== null) task.verificationKinds = V4_VERIFICATION_KINDS.filter(kind => task.verificationKinds.includes(kind));
+  if (task.workUnits !== null && !task.workUnits.length) throw appError("VALIDATION_ERROR", "workUnits must be nonempty or unknown.");
+  if (task.workUnits !== null && (task.workUnits.some(unit => unit.kind === "DEBUG") === (task.diagnosisState === "NOT_APPLICABLE"))) throw appError("VALIDATION_ERROR", "diagnosisState does not match workUnits.");
+  if (task.dataVolumeBand === "NONE" && task.migrationEntities?.length) throw appError("VALIDATION_ERROR", "Migration cannot have zero affected data.");
+  if (task.verificationKinds?.includes("DEPLOY_SMOKE") && !task.deploymentTargets?.length) throw appError("VALIDATION_ERROR", "DEPLOY_SMOKE requires a deployment target.");
+  const missingFields = [];
+  if (task.workUnits === null) missingFields.push("workUnits");
+  if (task.doneBoundary === "UNKNOWN") missingFields.push("doneBoundary");
+  const count = (items, predicate = () => true) => items === null ? null : items.filter(predicate).length;
+  const features = {
+    ...Object.fromEntries(V4_WORK_KINDS.map(kind => ["workUnits." + kind, count(task.workUnits, item => item.kind === kind)])),
+    doneBoundary: task.doneBoundary, reuseLevel: task.reuseLevel,
+    ...Object.fromEntries(["CREATE", "MODIFY", "REMOVE"].map(change => ["components." + change, count(task.components, item => item.change === change)])),
+    ...Object.fromEntries(["API", "MCP", "EVENT", "STORAGE", "UI", "CONFIG"].map(kind => ["contracts." + kind, count(task.contracts, item => item.kind === kind)])),
+    ...Object.fromEntries(["BREAKING", "REMOVE"].map(change => ["contracts." + change, count(task.contracts, item => item.change === change)])),
+    ...Object.fromEntries(["USE", "CHANGE", "ADD"].map(change => ["integrations." + change, count(task.integrations, item => item.change === change)])),
+    migrationEntities: count(task.migrationEntities), dataVolumeBand: task.dataVolumeBand,
+    requirementsUncertainty: task.requirementsUncertainty, solutionUncertainty: task.solutionUncertainty,
+    diagnosisState: task.diagnosisState, unfamiliarTechnologies: count(task.unfamiliarTechnologies), scopeChangeRisk: task.scopeChangeRisk,
+    ...Object.fromEntries(V4_VERIFICATION_KINDS.map(kind => ["verificationKinds." + kind, task.verificationKinds === null ? null : Number(task.verificationKinds.includes(kind))])),
+    verificationScenarios: count(task.verificationScenarios), verificationReadiness: task.verificationReadiness,
+    requiredReviewPasses: task.requiredReviewPasses, environmentReadiness: task.environmentReadiness,
+    accessReadiness: task.accessReadiness, deploymentTargets: count(task.deploymentTargets), ...task.execution,
+  };
+  return { agentTask: task, features, missingFields };
 }
+
+// The preprocessing manifest belongs to a training prefix, never to the full
+// history. Keep all candidate columns in the manifest, including constants.
+const V4_ORDINAL_FIELDS = ["reuseLevel", "requirementsUncertainty", "solutionUncertainty", "scopeChangeRisk"];
+const V4_CATEGORY_FIELDS = {
+  doneBoundary: [...ESTIMATE_DONE_BOUNDARIES],
+  dataVolumeBand: ["NONE", "LE_1K", "LE_100K", "LE_10M", "GT_10M", "UNKNOWN"],
+  diagnosisState: ["NOT_APPLICABLE", "PROVEN", "HYPOTHESIS", "UNKNOWN"],
+  verificationReadiness: ["READY", "ADAPT", "CREATE", "NONE_REQUIRED", "UNKNOWN"],
+  environmentReadiness: ["READY", "SETUP_KNOWN", "BLOCKED", "UNKNOWN"],
+  accessReadiness: ["AVAILABLE", "MISSING", "UNKNOWN"],
+  mode: ["AI_AGENT", "HUMAN", "HYBRID", "UNKNOWN"],
+  environmentId: ["local", "cloud_workspace", "UNKNOWN"],
+  codebaseFamiliarity: ["NOT_READ", "MAPPED", "PRIOR_VERIFIED_WORK", "UNKNOWN"],
+};
+const V4_OPEN_CATEGORY_FIELDS = ["modelId", "reasoningEffort"];
+const V4_COUNT_FIELDS = [
+  ...V4_WORK_KINDS.map(kind => "workUnits." + kind),
+  ...["CREATE", "MODIFY", "REMOVE"].map(change => "components." + change),
+  ...["API", "MCP", "EVENT", "STORAGE", "UI", "CONFIG", "BREAKING", "REMOVE"].map(kind => "contracts." + kind),
+  ...["USE", "CHANGE", "ADD"].map(change => "integrations." + change),
+  "migrationEntities", "unfamiliarTechnologies", "verificationScenarios", "requiredReviewPasses", "deploymentTargets", "plannedParallelAgents",
+];
+const V4_FLAG_FIELDS = V4_VERIFICATION_KINDS.map(kind => "verificationKinds." + kind);
+const V4_FEATURE_FIELDS = [...V4_ORDINAL_FIELDS, ...Object.keys(V4_CATEGORY_FIELDS), ...V4_OPEN_CATEGORY_FIELDS, ...V4_COUNT_FIELDS, ...V4_FLAG_FIELDS].sort(atlmCompareId);
+const V4_MIN_CATEGORY_SAMPLES = 3;
+const V4_MODEL_COLUMN_LIMIT = 512;
+
+function v4FeatureProblem(features) {
+  if (!isPlainRecord(features) || canonical(Object.keys(features).sort(atlmCompareId)) !== canonical(V4_FEATURE_FIELDS)) return "INVALID_FEATURES";
+  for (const field of V4_COUNT_FIELDS) if (features[field] !== null && !isNonnegativeSafeInteger(features[field])) return "INVALID_FEATURES";
+  if (features.plannedParallelAgents === 0) return "INVALID_FEATURES";
+  for (const field of V4_ORDINAL_FIELDS) if (features[field] !== null && (!isNonnegativeSafeInteger(features[field]) || features[field] > 3)) return "INVALID_FEATURES";
+  for (const field of V4_FLAG_FIELDS) if (![null, 0, 1].includes(features[field])) return "INVALID_FEATURES";
+  for (const field of Object.keys(V4_CATEGORY_FIELDS)) {
+    if (field === "environmentId") {
+      if (![null, "local", "cloud_workspace"].includes(features[field])) return "INVALID_FEATURES";
+      continue;
+    }
+    if (!V4_CATEGORY_FIELDS[field].includes(features[field])) return "INVALID_FEATURES";
+  }
+  for (const field of V4_OPEN_CATEGORY_FIELDS) if (features[field] !== null
+    && (typeof features[field] !== "string" || !features[field].trim() || Array.from(features[field]).length > 128)) return "INVALID_FEATURES";
+  const workCounts = V4_WORK_KINDS.map(kind => features["workUnits." + kind]);
+  if (features.doneBoundary === "UNKNOWN" || workCounts.every(value => value === null)) return "MISSING_REQUIRED_FEATURES";
+  if (workCounts.some(value => value === null) || workCounts.every(value => value === 0)) return "INVALID_FEATURES";
+  return null;
+}
+
+function v4Median(values) {
+  if (!values.length) return 0;
+  const ordered = values.slice().sort((a, b) => a - b), middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2 ? ordered[middle] : (ordered[middle - 1] + ordered[middle]) / 2;
+}
+
+function v4Category(value, field, manifest) {
+  if (V4_OPEN_CATEGORY_FIELDS.includes(field)) {
+    if (value === null || value === undefined) return "UNKNOWN";
+    return manifest.openCategories[field].includes(value) ? "VALUE:" + value : "OTHER";
+  }
+  return value === null || value === undefined ? "UNKNOWN" : value;
+}
+
+function v4RawColumn(features, column, manifest) {
+  const value = features[column.field];
+  if (column.kind === "category") return Number(v4Category(value, column.field, manifest) === column.level);
+  if (column.kind === "missing") return Number(value === null || value === undefined);
+  if (value === null || value === undefined) return manifest.imputations[column.field];
+  return column.kind === "count" ? Math.log1p(value) : value;
+}
+
+export function fitAtlmV4Preprocessor(featureRows) {
+  if (!Array.isArray(featureRows) || !featureRows.length) return atlmUnavailable("INSUFFICIENT_DATA");
+  if (featureRows.length > ATLM_MAX_ROWS || featureRows.some(row => !isPlainRecord(row))) return atlmUnavailable("INVALID_DATASET");
+  for (const features of featureRows) { const problem = v4FeatureProblem(features); if (problem) return atlmUnavailable(problem); }
+  const fields = Object.keys(featureRows[0]).sort(atlmCompareId);
+  if (featureRows.some(row => canonical(Object.keys(row).sort(atlmCompareId)) !== canonical(fields))) return atlmUnavailable("INVALID_FEATURES");
+  const manifest = { formatVersion: 1, fields, openCategories: {}, imputations: {}, columns: [], droppedColumns: [] };
+  const candidates = [];
+  for (const field of fields) {
+    if (Object.hasOwn(V4_CATEGORY_FIELDS, field) || V4_OPEN_CATEGORY_FIELDS.includes(field)) {
+      let levels = V4_CATEGORY_FIELDS[field];
+      if (!levels) {
+        const counts = new Map();
+        for (const row of featureRows) if (row[field] !== null && row[field] !== undefined) counts.set(row[field], (counts.get(row[field]) || 0) + 1);
+        manifest.openCategories[field] = [...counts.entries()].filter(([, n]) => n >= V4_MIN_CATEGORY_SAMPLES).map(([value]) => value).sort(atlmCompareId);
+        levels = ["OTHER", "UNKNOWN", ...manifest.openCategories[field].map(value => "VALUE:" + value)];
+      }
+      for (const level of levels.slice(1)) candidates.push({ kind: "category", field, level });
+      continue;
+    }
+    const isFlag = field.startsWith("verificationKinds."), isOrdinal = V4_ORDINAL_FIELDS.includes(field);
+    const kind = isFlag || isOrdinal ? "ordinal" : "count";
+    const known = featureRows.map(row => row[field]).filter(value => value !== null && value !== undefined);
+    if (known.some(value => !Number.isFinite(value) || value < 0)) return atlmUnavailable("INVALID_FEATURES");
+    manifest.imputations[field] = v4Median(known.map(value => kind === "count" ? Math.log1p(value) : value));
+    candidates.push({ kind, field }, { kind: "missing", field });
+  }
+  if (candidates.length > V4_MODEL_COLUMN_LIMIT) return atlmUnavailable("MODEL_CAPACITY_LIMIT", { p: candidates.length, limit: V4_MODEL_COLUMN_LIMIT });
+  for (const candidate of candidates) {
+    const values = featureRows.map(row => v4RawColumn(row, candidate, manifest));
+    if (values.some(value => !Number.isFinite(value))) return atlmUnavailable("INVALID_FEATURES");
+    if (values.every(value => value === values[0])) { manifest.droppedColumns.push(candidate); continue; }
+    const center = atlmSum(values) / values.length;
+    const scale = Math.sqrt(atlmSum(values.map(value => (value - center) ** 2)) / values.length);
+    manifest.columns.push({ ...candidate, center, scale });
+  }
+  return { status: "AVAILABLE", manifest };
+}
+
+export function encodeAtlmV4Features(features, manifest) {
+  if (!isPlainRecord(manifest) || manifest.formatVersion !== 1 || !Array.isArray(manifest.fields)
+    || !manifest.fields.every(field => typeof field === "string") || !isPlainRecord(manifest.openCategories)
+    || !isPlainRecord(manifest.imputations) || !Array.isArray(manifest.columns) || !Array.isArray(manifest.droppedColumns)
+    || manifest.columns.length + manifest.droppedColumns.length > V4_MODEL_COLUMN_LIMIT) return atlmUnavailable("INVALID_ARTIFACT");
+  if (canonical(manifest.fields) !== canonical(V4_FEATURE_FIELDS)) return atlmUnavailable("INVALID_ARTIFACT");
+  if (!atlmExactKeys(manifest.openCategories, V4_OPEN_CATEGORY_FIELDS)
+    || !atlmExactKeys(manifest.imputations, [...V4_COUNT_FIELDS, ...V4_ORDINAL_FIELDS, ...V4_FLAG_FIELDS])) return atlmUnavailable("INVALID_ARTIFACT");
+  for (const field of V4_OPEN_CATEGORY_FIELDS.filter(field => manifest.fields.includes(field))) {
+    const levels = manifest.openCategories[field];
+    if (!Array.isArray(levels) || levels.some(value => typeof value !== "string" || !value.trim() || Array.from(value).length > 128)
+      || new Set(levels).size !== levels.length || canonical(levels) !== canonical(levels.slice().sort(atlmCompareId))) return atlmUnavailable("INVALID_ARTIFACT");
+  }
+  const expectedColumns = [];
+  for (const field of V4_FEATURE_FIELDS) {
+    if (Object.hasOwn(V4_CATEGORY_FIELDS, field) || V4_OPEN_CATEGORY_FIELDS.includes(field)) {
+      const levels = V4_CATEGORY_FIELDS[field] || ["OTHER", "UNKNOWN", ...manifest.openCategories[field].map(value => "VALUE:" + value)];
+      for (const level of levels.slice(1)) expectedColumns.push(canonical({ kind: "category", field, level }));
+    } else {
+      const kind = V4_FLAG_FIELDS.includes(field) || V4_ORDINAL_FIELDS.includes(field) ? "ordinal" : "count";
+      const imputed = manifest.imputations[field];
+      const upper = V4_FLAG_FIELDS.includes(field) ? 1 : V4_ORDINAL_FIELDS.includes(field) ? 3 : Math.log1p(Number.MAX_SAFE_INTEGER);
+      if (!Number.isFinite(imputed) || imputed < 0 || imputed > upper) return atlmUnavailable("INVALID_ARTIFACT");
+      expectedColumns.push(canonical({ kind, field }), canonical({ kind: "missing", field }));
+    }
+  }
+  const actualColumns = [...manifest.columns, ...manifest.droppedColumns].map(column => {
+    if (!isPlainRecord(column)) return "invalid";
+    return canonical(column.kind === "category" ? { kind: column.kind, field: column.field, level: column.level } : { kind: column.kind, field: column.field });
+  });
+  const canonicalIndex = new Map(expectedColumns.map((column, index) => [column, index]));
+  const inOrder = columns => columns.every((column, index) => index === 0 || canonicalIndex.get(columns[index - 1]) < canonicalIndex.get(column));
+  if (canonical(actualColumns.slice().sort()) !== canonical(expectedColumns.slice().sort())
+    || !inOrder(actualColumns.slice(0, manifest.columns.length)) || !inOrder(actualColumns.slice(manifest.columns.length))) return atlmUnavailable("INVALID_ARTIFACT");
+  for (const column of manifest.columns) {
+    if (!isPlainRecord(column) || !manifest.fields.includes(column.field)
+      || !["category", "missing", "ordinal", "count"].includes(column.kind)
+      || !Number.isFinite(column.center) || !Number.isFinite(column.scale) || column.scale <= 0
+      || (column.kind === "category" && (typeof column.level !== "string"
+        || (!Object.hasOwn(V4_CATEGORY_FIELDS, column.field) && !V4_OPEN_CATEGORY_FIELDS.includes(column.field))))
+      || (["count", "ordinal"].includes(column.kind) && !Number.isFinite(manifest.imputations[column.field]))) return atlmUnavailable("INVALID_ARTIFACT");
+    const binary = ["category", "missing"].includes(column.kind) || V4_FLAG_FIELDS.includes(column.field);
+    if (binary && (!(column.center > 0 && column.center < 1)
+      || Math.abs(column.scale - Math.sqrt(column.center * (1 - column.center))) > 1e-10)) return atlmUnavailable("INVALID_ARTIFACT");
+    if (!binary && (column.center < 0 || (column.kind === "ordinal" && column.center > 3)
+      || (column.kind === "count" && column.center > Math.log1p(Number.MAX_SAFE_INTEGER)))) return atlmUnavailable("INVALID_ARTIFACT");
+  }
+  const problem = v4FeatureProblem(features);
+  if (problem) return atlmUnavailable(problem);
+  const row = [1, ...manifest.columns.map(column => (v4RawColumn(features, column, manifest) - column.center) / column.scale)];
+  return row.every(Number.isFinite) ? { status: "AVAILABLE", row } : atlmUnavailable("INVALID_FEATURES");
+}
+
+export async function fitAtlmV4Regression(rows, engine) {
+  if (!Array.isArray(rows) || !["OLS", "RIDGE"].includes(engine)) return atlmUnavailable("INVALID_DATASET");
+  if (rows.length > ATLM_MAX_ROWS) return atlmUnavailable("DATASET_LIMIT_REACHED", { sampleCount: rows.length, limit: ATLM_MAX_ROWS });
+  if (!rows.length) return atlmUnavailable("INSUFFICIENT_DATA");
+  const ids = new Set(), plans = new Set();
+  for (const row of rows) {
+    if (!isPlainRecord(row) || !atlmValidId(row.sampleId) || !atlmValidId(row.planId) || ids.has(row.sampleId) || plans.has(row.planId)
+      || ![row.capturedAt, row.sourceAvailableAt, row.actualMs].every(isNonnegativeSafeInteger)
+      || row.sourceAvailableAt < row.capturedAt || !isPlainRecord(row.features)) return atlmUnavailable("INVALID_DATASET");
+    ids.add(row.sampleId); plans.add(row.planId);
+  }
+  const sorted = atlmSortedRows(rows), n = sorted.length;
+  const preprocessor = fitAtlmV4Preprocessor(sorted.map(row => row.features));
+  if (preprocessor.status !== "AVAILABLE") return preprocessor;
+  const encoded = sorted.map(row => encodeAtlmV4Features(row.features, preprocessor.manifest));
+  if (encoded.some(row => row.status !== "AVAILABLE")) return atlmUnavailable("INVALID_FEATURES");
+  const matrix = encoded.map(row => row.row), p = matrix[0].length;
+  const target = sorted.map(row => Math.log1p(row.actualMs / ATLM_MS_PER_MINUTE));
+  if (engine === "OLS" && p > n) return atlmUnavailable("INSUFFICIENT_DATA", { sampleCount: n, p });
+  const raw = atlmQr(matrix, target);
+  if (engine === "OLS" && raw.rank !== p) return atlmUnavailable("RANK_DEFICIENT", { sampleCount: n, p, rank: raw.rank });
+  let solved = raw;
+  if (engine === "RIDGE") {
+    const augmented = matrix.slice(), response = target.slice();
+    for (let j = 1; j < p; j++) {
+      const penalty = Array(p).fill(0); penalty[j] = Math.sqrt(n * ATLM_RIDGE_LAMBDA);
+      augmented.push(penalty); response.push(0);
+    }
+    solved = atlmQr(augmented, response);
+  }
+  if (!solved.coefficients?.every(Number.isFinite)) return atlmUnavailable("NUMERICAL_FAILURE", { sampleCount: n, p });
+  const artifact = atlmFreeze({ formatVersion: 3, kind: engine, featureSchemaVersion: "agent-task-v3", metric: "PLAN_ACTIVE",
+    n, p, rank: raw.rank, preprocessor: preprocessor.manifest, coefficients: solved.coefficients,
+    targetTransform: "log1p-minutes-v1", lambda: engine === "RIDGE" ? ATLM_RIDGE_LAMBDA : null,
+    manifest: sorted.map(({ sampleId, planId }) => ({ sampleId, planId })), datasetDigest: "sha256:" + await hashCommandInput(sorted) });
+  return { status: "AVAILABLE", artifact };
+}
+
+function atlmV4RegressionArtifactValid(artifact) {
+  if (!isPlainRecord(artifact) || artifact.formatVersion !== 3 || !["OLS", "RIDGE"].includes(artifact.kind)
+    || artifact.featureSchemaVersion !== "agent-task-v3" || artifact.metric !== "PLAN_ACTIVE" || artifact.targetTransform !== "log1p-minutes-v1"
+    || !Number.isSafeInteger(artifact.n) || artifact.n < 1 || artifact.n > ATLM_MAX_ROWS
+    || !Number.isSafeInteger(artifact.p) || artifact.p < 1 || artifact.p > V4_MODEL_COLUMN_LIMIT + 1
+    || !Number.isSafeInteger(artifact.rank) || artifact.rank < 1 || artifact.rank > Math.min(artifact.n, artifact.p)
+    || (artifact.kind === "OLS" && (artifact.rank !== artifact.p || artifact.lambda !== null))
+    || (artifact.kind === "RIDGE" && artifact.lambda !== ATLM_RIDGE_LAMBDA)
+    || !atlmManifestValid(artifact.manifest, artifact.n) || !isSnapshotDigest(artifact.datasetDigest)
+    || !Array.isArray(artifact.coefficients) || artifact.coefficients.length !== artifact.p
+    || !artifact.coefficients.every(Number.isFinite)) return false;
+  const defaults = Object.fromEntries(V4_FEATURE_FIELDS.map(field => {
+    if (field === "doneBoundary") return [field, "ANALYSIS"];
+    if (field === "environmentId" || V4_OPEN_CATEGORY_FIELDS.includes(field) || field === "plannedParallelAgents") return [field, null];
+    if (Object.hasOwn(V4_CATEGORY_FIELDS, field)) return [field, V4_CATEGORY_FIELDS[field][0]];
+    return [field, field === "workUnits.CREATE" ? 1 : 0];
+  }));
+  const encoded = encodeAtlmV4Features(defaults, artifact.preprocessor);
+  return encoded.status === "AVAILABLE" && encoded.row.length === artifact.p;
+}
+
+export function predictAtlmV4Regression(artifact, features) {
+  if (!atlmV4RegressionArtifactValid(artifact)) return atlmUnavailable("INVALID_ARTIFACT");
+  const encoded = encodeAtlmV4Features(features, artifact.preprocessor);
+  if (encoded.status !== "AVAILABLE") return encoded;
+  if (encoded.row.length !== artifact.p) return atlmUnavailable("INVALID_ARTIFACT");
+  const z = atlmSum(encoded.row.map((value, i) => value * artifact.coefficients[i]));
+  const ms = Math.max(0, ATLM_MS_PER_MINUTE * Math.expm1(z));
+  return Number.isFinite(ms) && ms <= Number.MAX_SAFE_INTEGER
+    ? { status: "AVAILABLE", pointMs: Math.round(ms), reason: null } : atlmUnavailable("INVALID_PREDICTION");
+}
+
+export const AGENT_TASK_SCHEMA = V4_TASK_SCHEMA;
 
 // Observe the current source in one SQLite read snapshot, not several independently timed reads.
 export async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
@@ -1326,8 +1314,8 @@ export async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
   if (row.selection_status !== "CAPTURED") reasons.push("MISSING_FEATURES");
   else {
     try {
-      const normalized = normalizeAgentTaskV1(JSON.parse(row.assessment_json).context.agentTask);
-      if (normalized.missingFields.length) reasons.push("INCOMPLETE_FEATURES"); else features = normalized.features;
+      const normalized = normalizeAgentTask(JSON.parse(row.assessment_json).context.agentTask);
+      if (normalized.missingFields.length) reasons.push("MISSING_REQUIRED_FEATURES"); else features = normalized.features;
     } catch (error) {
       if (!(error instanceof AppError) || error.code !== "VALIDATION_ERROR") throw error;
       reasons.push("INVALID_FEATURES");
@@ -1501,10 +1489,10 @@ async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
   if (!isSnapshotDigest(args.expectedRequirementsDigest)) throw appError("VALIDATION_ERROR", "Invalid requirements digest.");
   const target = await atlmPlanContext(db, ownerId, args.planId);
   if (target.requirementsDigest !== args.expectedRequirementsDigest) throw appError("ASSESSMENT_CONTEXT_CHANGED", messageFor("ASSESSMENT_CONTEXT_CHANGED"), 409);
-  const normalized = normalizeAgentTaskV1(args.agentTask);
+  const normalized = normalizeAgentTask(args.agentTask);
   let prediction;
   if (target.status !== "PLANNED" || target.first_started_at !== null) prediction = { status: "UNAVAILABLE", unavailableReason: "UNSUPPORTED_FORECAST_SCOPE", diagnostics:atlmDiagnostics("UNSUPPORTED_FORECAST_SCOPE",{status:target.status,firstStartedAt:target.first_started_at}) };
-  else if (normalized.missingFields.length) prediction = { status: "UNAVAILABLE", unavailableReason: "INCOMPLETE_FEATURES", missingFields: normalized.missingFields, diagnostics:atlmDiagnostics("INCOMPLETE_FEATURES",{missingFields:normalized.missingFields}) };
+  else if (normalized.missingFields.length) prediction = { status: "UNAVAILABLE", unavailableReason: "MISSING_REQUIRED_FEATURES", missingFields: normalized.missingFields, diagnostics:atlmDiagnostics("MISSING_REQUIRED_FEATURES",{missingFields:normalized.missingFields}) };
   else prediction = await earlyForecast(db,ownerId,args.planId,await predictWithActiveModel(db, ownerId, normalized.features, nowMs),nowMs);
   return { formatVersion: 1, metric: "PLAN_ACTIVE", forecastScope: "FULL_FROM_FIRST_START", method: prediction.method ?? { ...ATLM_METHOD },
     status: prediction.status, pointMs: prediction.pointMs ?? null, modelId: prediction.modelId ?? null, modelVersion: prediction.modelVersion ?? null,
@@ -1617,16 +1605,15 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
   else {
     const assessment = JSON.parse(row.assessment_json);
     if(assessment.context?.agentTask){
-      const normalized = normalizeAgentTaskV1(assessment.context.agentTask);
-      if(normalized.missingFields.length) diagnostics = atlmDiagnostics("INCOMPLETE_FEATURES",{missingFields:normalized.missingFields});
+      const normalized = normalizeAgentTask(assessment.context.agentTask);
+      if(normalized.missingFields.length) diagnostics = atlmDiagnostics("MISSING_REQUIRED_FEATURES",{missingFields:normalized.missingFields});
       else {
         const model=await atlmReadActiveModel(db,ownerId);
         if(model){
           const artifact=atlmTrainingJson(model.artifact_json);
           if(!atlmArtifactValid(artifact))throw appError("SOURCE_UNAVAILABLE","Сохранённая модель ATLM повреждена.",503,{reason:"INVALID_ARTIFACT"});
-          const activeLevels=artifact.kind==="HYBRID"?artifact.candidates[artifact.selectedEngine.toLowerCase()].artifact.levels:artifact.levels;
-          const unsupportedFields=ESTIMATE_PROFILE_FIELDS.filter(field=>!activeLevels[field].includes(normalized.features[field]));
-          if(unsupportedFields.length)diagnostics=atlmDiagnostics("UNSUPPORTED_CATEGORY",{unsupportedFields});
+          const preview = predictAtlm(artifact, normalized.features);
+          if (preview.status !== "AVAILABLE") diagnostics = atlmDiagnostics(preview.reason, preview);
         }
       }
     }else diagnostics=atlmDiagnostics("MISSING_FEATURES");
@@ -1722,7 +1709,7 @@ const assessmentPayloadSchema = {
 };
 // Used by these new tools at runtime as well as discovery; free JSON remains neutral.
 function validateAssessmentValue(value, schema, path = "input", depth = 0) {
-  if (depth > 10) throw appError("VALIDATION_ERROR", "JSON depth exceeds 10.");
+  if (depth > 12) throw appError("VALIDATION_ERROR", "JSON depth exceeds 12.");
   if (schema.enum && !schema.enum.includes(value)) throw appError("VALIDATION_ERROR", path + ": invalid enum.");
   const type = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
   const types = schema.type ? [].concat(schema.type) : null;
@@ -1751,10 +1738,10 @@ function validateAssessmentCommand(envelope) {
   if (envelope.schemaVersion !== 1 || !UUID.test(envelope.commandId || "") || !Number.isSafeInteger(envelope.expectedVersion) || envelope.expectedVersion < 0) throw appError("VALIDATION_ERROR", "Invalid assessment envelope.");
   if (envelope.payloadHash !== undefined && !/^[a-f0-9]{64}$/i.test(envelope.payloadHash)) throw appError("VALIDATION_ERROR", "Invalid payloadHash.");
   validateAssessmentValue(envelope.payload, assessmentPayloadSchema);
-  if (new TextEncoder().encode(JSON.stringify(envelope.payload)).length > 24000) throw appError("VALIDATION_ERROR", "Assessment exceeds 24000 UTF-8 bytes.");
+  if (new TextEncoder().encode(JSON.stringify(envelope.payload)).length > V4_TASK_MAX_BYTES) throw appError("VALIDATION_ERROR", "Assessment exceeds 64 KiB UTF-8.");
   const p = envelope.payload, f = p.forecast, c = p.complexity;
-  if (Object.hasOwn(p.context, "agentTask")) normalizeAgentTaskV1(p.context.agentTask);
-  if (p.predictionRequest && (p.stepId !== undefined || !Object.hasOwn(p.context, "agentTask"))) throw appError("VALIDATION_ERROR", "predictionRequest requires plan-level agentTask v1.");
+  if (Object.hasOwn(p.context, "agentTask")) normalizeAgentTask(p.context.agentTask);
+  if (p.predictionRequest && (p.stepId !== undefined || !Object.hasOwn(p.context, "agentTask"))) throw appError("VALIDATION_ERROR", "predictionRequest requires plan-level agentTask v3.");
   if (!isSnapshotDigest(p.expectedRequirementsDigest)) throw appError("VALIDATION_ERROR", "expectedRequirementsDigest must identify the requirements assessed by the agent.");
   if (p.method.scale === null || p.method.scale === "") throw appError("VALIDATION_ERROR", "Declare the assessment scale.");
   if ((c.status === "UNKNOWN") !== (c.value === null)) throw appError("VALIDATION_ERROR", "Unknown complexity requires null; known complexity requires a value.");
@@ -2098,7 +2085,7 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
   if (envelope.commandType === "RecordAssessment") {
     const target = await assessmentTarget(db, identity.ownerId, input.planId, input.stepId);
     const requirementsJson = target?.requirements_json || "{}";
-    let storedInput = Object.hasOwn(input.context, "agentTask") ? { ...input, context: { ...input.context, agentTask: normalizeAgentTaskV1(input.context.agentTask).agentTask } } : input;
+    let storedInput = Object.hasOwn(input.context, "agentTask") ? { ...input, context: { ...input.context, agentTask: normalizeAgentTask(input.context.agentTask).agentTask } } : input;
     if (input.predictionRequest) {
       try {
         const serverEstimation = await calculateAtlmEstimate(db, identity.ownerId, { planId: input.planId,
@@ -2113,7 +2100,7 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
       }
     }
     const assessmentJson = JSON.stringify(storedInput);
-    if (new TextEncoder().encode(assessmentJson).length > 24000) throw appError("VALIDATION_ERROR", "Assessment with server estimation exceeds 24000 UTF-8 bytes.");
+    if (new TextEncoder().encode(assessmentJson).length > V4_TASK_MAX_BYTES) throw appError("VALIDATION_ERROR", "Assessment with server estimation exceeds 64 KiB UTF-8.");
     Object.assign(payload, { assessmentJson, requirementsJson,
       requirementsDigest: "sha256:" + await hashCommandInput(JSON.parse(requirementsJson)),
     });
@@ -2409,11 +2396,11 @@ async function buildExportReport(db,ownerId,clock){
 async function readTrackerCapabilities(db,ownerId){return {
  available:true,schemaVersion:2,version:TRACKER_VERSION,
     assessments: { formatVersion: 1, recordTool: "RecordAssessment", getTool: "GetAssessment", historyTool: "GetEstimationHistory",
-      immutableRevisions: true, agentDefinedMethods: true, maxPayloadBytes: 24000, maxJsonDepth: 10,
+      immutableRevisions: true, agentDefinedMethods: true, maxPayloadBytes: V4_TASK_MAX_BYTES, maxJsonDepth: 12,
       forecastUnits: "ms", forecastMetrics: FORECAST_METRICS, initialExpectedVersion: 0, requirementsDigest: true,
       contextRead: { tool: "GetAssessment", omitAssessmentId: true }, expectedRequirementsDigestRequired: true,
       historyMaxTargets: 20, historyMaxLimit: 100, methodologyControlsExecution: false,
-      atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v1", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
+      atlm: { formatVersion: 1, method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v3", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
         policyVersion: ATLM_POLICY_VERSION, engines: ["OLS", "RIDGE"],
         runtimeContext: { environmentId: { optional: true, type: ["string", "null"], closedSet: true,
           values: [...ENVIRONMENT_IDS], unknownValue: null,
@@ -3233,6 +3220,7 @@ function atlmDiagnostics(code, facts = {}) {
   const messages = {
     AVAILABLE:"Модель успешно обучена.",
     MISSING_FEATURES:"До первого запуска не сохранены исходные признаки задачи.",
+    MISSING_REQUIRED_FEATURES:"Не заполнены обязательные параметры: " + (parameters.missingFields?.join(", ") || "workUnits, doneBoundary") + ".",
     SCOPE_CHANGED:"Требования плана изменились. Сохраните актуальную оценку исходных признаков: expectedRequirementsDigest не совпадает.",
     INCOMPLETE_FEATURES:"Не заполнены обязательные параметры: " + (parameters.missingFields?.join(", ") || "missingFields не сохранён") + ".",
     TRAINING_NOT_STARTED:"Обучение модели ещё не выполнялось. Активной модели нет.",
@@ -3378,7 +3366,7 @@ export async function getEstimationModelStatus(db, ownerId, nowMs) {
   else if (pending.length || triggerDue) status = "QUEUED";
   const nextAttemptAt = Math.min(...[...(trainPending && train?.next_attempt_at > nowMs ? [train.next_attempt_at] : []),
     ...pending.filter(job => job.status === "RETRY_WAIT" && job.next_attempt_at > nowMs).map(job => job.next_attempt_at)]);
-  return { method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v1", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
+  return { method: { ...ATLM_METHOD }, inputSchemaVersion: "agent-task-v3", featureSchemaVersion: ATLM_FEATURE_VERSION, metric: "PLAN_ACTIVE",
     forecastScope: "FULL_FROM_FIRST_START", retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
     datasetRevision: state?.dataset_revision ?? 0, eligibleSampleCount: counts?.eligible ?? 0,
     excludedSampleCount: (counts?.total ?? 0) - (counts?.eligible ?? 0), newPlansSinceTraining: newPlans,
