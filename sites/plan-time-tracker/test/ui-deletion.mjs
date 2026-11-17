@@ -20,6 +20,7 @@ c.advance(60000);
 const artifacts = resolve(process.env.UI_ACCEPTANCE_ARTIFACT_DIR || "/tmp/tracker-source-ui");mkdirSync(artifacts, { recursive: true });
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE || "/usr/bin/chromium", headless: true, args: ["--no-sandbox"] });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+await page.clock.install({time:c.now()});
 page.setDefaultTimeout(10000);
 const posts = [], errors = [], paths = [];
 let loseDelete = true, loseRestore = true, holdDelete = false, releaseDelete, failDeleted = true;

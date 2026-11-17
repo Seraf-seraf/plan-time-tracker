@@ -167,7 +167,7 @@ test("a trained forecast stays frozen, yields prospective error, and becomes sta
     const source = await readAtlmSampleSource(c.db, OWNER, PLAN, c.now());
     assert.deepEqual(source.issuedPrediction, { method: before.serverEstimation.method, modelId: before.serverEstimation.modelId,
       modelVersion: before.serverEstimation.modelVersion, calculatedAt: before.serverEstimation.calculatedAt,
-      pointMs: 1000, actualMs: 1200, errorMs: -200, hybrid: before.serverEstimation.hybrid });
+      pointMs: 1000, pointEngine:before.serverEstimation.pointEngine, interval:before.serverEstimation.interval, actualMs: 1200, errorMs: -200, hybrid: before.serverEstimation.hybrid });
     await ok(c, "UpdatePlanMetadata", { planId: PLAN, title: "Temporary scope change" }, 2);
     await ok(c, "UpdatePlanMetadata", { planId: PLAN, title: "ATLM synthetic feature" }, 3);
     assert.ok(value(await mcp(c, "GetSavedEstimate", { planId: PLAN })).staleReasons.includes("SCOPE_CHANGED"));
@@ -690,5 +690,18 @@ test('training history detects completion of an attempt inside an existing snaps
   c.db.sqlite.prepare("UPDATE estimation_training_attempts SET completed_at=?,reason='TEST' WHERE owner_id=? AND attempt_id='running'").run(c.now(),OWNER);
   const result=await mcp(c,'GetTrainingHistory',{limit:1,cursor:first.nextCursor});
   assert.equal(result.value.result.isError,true);assert.equal(result.value.result.structuredContent.code,'HISTORY_CHANGED');
+ }finally{c.close();}
+});
+
+test('read-only MCP and HTTP requests never update owner identity',async()=>{
+ const c=context();try{
+  await plannedAtlm(c);const before=rows(c),headers={'content-type':'application/json','oai-authenticated-user-id':OWNER,'oai-authenticated-user-email':'changed@example.invalid'};
+  for(const name of ['GetTrainingStatus','GetTrainingHistory','GetTrainingData','GetSavedEstimate']){
+   const r=await c.worker.fetch(new Request('http://localhost/mcp',{method:'POST',headers,body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:name==='GetSavedEstimate'?{planId:PLAN}:{}}})}),{DB:c.db});assert.equal((await r.json()).result.isError,undefined);
+  }
+  for(const path of ['/api/tracker/estimation-model','/api/tracker/estimation-training-history','/api/tracker/plans/'+PLAN+'/estimate']){
+   const r=await c.worker.fetch(new Request('http://localhost'+path,{headers}),{DB:c.db});assert.equal(r.status,200);
+  }
+  assert.deepEqual(rows(c),before);
  }finally{c.close();}
 });

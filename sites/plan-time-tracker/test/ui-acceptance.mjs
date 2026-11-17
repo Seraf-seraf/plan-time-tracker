@@ -82,7 +82,7 @@ try {
   const download = await downloadPromise;
   assert.equal(download.suggestedFilename(), "plan-time-tracker-export.json");
   const downloadedReport = JSON.parse(readFileSync(await download.path(), "utf8"));
-  assert.equal(downloadedReport.formatVersion, 2);
+  assert.equal(downloadedReport.formatVersion, 3);
   assert.equal(downloadedReport.timezone, "Asia/Omsk");
   assert.equal(downloadedReport.summary.planCount, 0);
   assert.deepEqual(downloadedReport.plans, []);
@@ -153,7 +153,7 @@ try {
   const populatedDownload = await populatedDownloadPromise;
   const populatedReport = JSON.parse(readFileSync(await populatedDownload.path(), 'utf8'));
   assert.equal(populatedDownload.suggestedFilename(), 'plan-time-tracker-export.json');
-  assert.equal(populatedReport.formatVersion, 2);
+  assert.equal(populatedReport.formatVersion, 3);
   const exportedPlan = populatedReport.plans.find(item => item.planId === plan);
   assert(exportedPlan, 'download includes the plan created through the UI');
   assert.equal(exportedPlan.intervals.length, 2);

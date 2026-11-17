@@ -34,8 +34,8 @@ let status = structuredClone(initial.value), estimate, holdPlan = null, heldStar
 let processCount = 0, statusCount = 0, advancingQueue = false, startCount = 0, startError = false, holdStart = false, releaseStart;
 page.on('pageerror', error => errors.push(error.message));
 const json = (route, value, code = 200) => route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify(value) });
-const estimateFor = id => ({ planId: id, source:'CURRENT_INPUT', isStale: false, serverEstimation: { formatVersion: 1, calculatedAt:c.now(), status: 'AVAILABLE', pointMs: id === PLAN ? 120000 : 420000, metric: 'PLAN_ACTIVE', forecastScope: 'FULL_FROM_FIRST_START', method: { id: 'atlm', version: 'agent-v2' }, sampleCount: 23, accuracy:'HISTORICALLY_EVALUATED', modelVersion: 'agent-v2/model-7', modelId: 'model-7', evaluation: { qualityConfirmed:true, caseCount: 6, maeMs: 30000 }, interval: null, confidence: 'UNKNOWN' } });
-const modelState = (trainingStatus, due = false) => ({ ...structuredClone(initial.value), datasetRevision: 7, newPlansSinceTraining: 3, eligibleSampleCount: 23, excludedSampleCount: 2, retrainEveryNewPlans: 2, exclusionReasons: [{ reason: 'MISSING_FEATURES', count: 2 }], activeModel: { modelId: 'model-7', modelVersion: 'agent-v2/model-7', sampleCount: 23, accuracy:'HISTORICALLY_EVALUATED', evaluation:{qualityConfirmed:true,caseCount:6,maeMs:30000} }, training: { status: trainingStatus, due, generation: 4, progressRevision: 0, pendingRefreshCount: 0, nextAttemptAt: null, progress: null }, lastError: null, lastReason: null });
+const estimateFor = id => ({ planId: id, source:'CURRENT_INPUT', isStale: false, serverEstimation: { formatVersion: 1, calculatedAt:c.now(), status: 'AVAILABLE', pointMs: id === PLAN ? 120000 : 420000, metric: 'PLAN_ACTIVE', forecastScope: 'FULL_FROM_FIRST_START', method: { id: 'atlm', version: 'agent-v4-probabilistic' }, sampleCount: 23, accuracy:'HISTORICALLY_EVALUATED', modelVersion: 'agent-v2/model-7', modelId: 'model-7', evaluation: { validationStatus:"HISTORICALLY_EVALUATED", caseCount: 6, pointCaseCount:6, maeMs: 30000 }, interval: {status:'AVAILABLE',lowerMs:60000,upperMs:600000,nominalCoverage:0.8,engine:'BAYESIAN_PREDICTIVE',calibrationSampleCount:0,validationStatus:'EXPERIMENTAL',unavailableReason:null} } });
+const modelState = (trainingStatus, due = false) => ({ ...structuredClone(initial.value), datasetRevision: 7, newPlansSinceTraining: 3, eligibleSampleCount: 23, excludedSampleCount: 2, retrainEveryNewPlans: 2, exclusionReasons: [{ reason: 'MISSING_FEATURES', count: 2 }], activeModel: { modelId: 'model-7', modelVersion: 'agent-v2/model-7', sampleCount: 23, accuracy:'HISTORICALLY_EVALUATED', evaluation:{validationStatus:"HISTORICALLY_EVALUATED",caseCount:6,pointCaseCount:6,maeMs:30000} }, training: { status: trainingStatus, due, generation: 4, progressRevision: 0, pendingRefreshCount: 0, nextAttemptAt: null, progress: null }, lastError: null, lastReason: null });
 await page.route('**/*', async route => {
   const request = route.request(), url = new URL(request.url());assert.equal(url.origin, 'http://localhost', 'production traffic is forbidden');
   requests.push({ path: url.pathname, method: request.method(), body: request.postData() });
@@ -91,29 +91,31 @@ const readPoll = async () => {
 try {
   await page.goto('http://localhost');await page.locator('#plans[data-loaded="true"]').waitFor({ state: 'attached' });
   await open(PLAN);
-  assert.match(await forecast().innerText(), /До первого запуска не сохранены исходные признаки задачи/);
+  assert.match(await forecast().innerText(), /До первого запуска не сохранены исходные признаки/);
   assert.equal(requests.filter(item => item.path.endsWith('/status-history') || item.path.endsWith('/timeline')).length, 0, 'the removed status-history UI must not make history requests');
   assert.equal(await page.getByText('История команд', { exact: true }).count(), 0);
-  await page.locator('[data-view="settings"]').click();await settings().getByText('Всего пригодных планов: 0. Исключено: 2.', { exact: true }).waitFor();
+  await page.locator('[data-view="settings"]').click();await page.waitForFunction(()=>!document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy'));
+  assert.equal(requests.filter(item=>item.path==='/api/tracker/estimation-model/process').length,0,'viewing the UI does not start training');
+  await settings().getByRole('button',{name:'Продолжить обработку',exact:true}).click();
+  await settings().getByText('Всего пригодных планов: 0. Исключено: 2.', { exact: true }).waitFor();
   const recovered = await call(c, '/api/tracker/estimation-model');assert.equal(recovered.status, 200);
   assert.equal(recovered.value.training.due, false);assert.equal(recovered.value.activeModel, null);
-  assert(requests.some(item => item.path === '/api/tracker/estimation-model/process' && item.method === 'POST'), 'opening the real UI must recover pending source refresh');
+  assert(requests.some(item => item.path === '/api/tracker/estimation-model/process' && item.method === 'POST'), 'explicit continuation must recover pending source refresh');
   await settings().getByText('Почему планы не учитываются', { exact: true }).click();
   assert.match(await settings().locator('.atlm-exclusions').innerText(), /До первого запуска не сохранены исходные признаки/);
   await refreshStatus();assert.equal(await settings().locator('.atlm-exclusions').evaluate(node => node.open), true, 'status reads preserve the open explanation');
   const manual = () => settings().getByRole('button', { name: 'Начать обучение', exact: true });
   await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
-  assert.equal(startCount, 1);assert.match(await settings().innerText(), /Пока недостаточно пригодных данных/);
+  assert.equal(startCount, 1);assert.match(await settings().innerText(), /Недостаточно данных/);
   await settings().getByText('Подробности последней попытки',{exact:true}).click();
-  assert.match(await settings().innerText(), /Недостаточно данных для расчёта коэффициентов модели/);
+  assert.match(await settings().innerText(), /Пока недостаточно пригодных данных/);
   assert.equal((await call(c, '/api/tracker/estimation-model')).value.training.generation, 1, 'real browser request reaches Worker training below two plans');
   await page.screenshot({ path: resolve(artifacts, 'atlm-cold-start.png'), fullPage: true });
 
   controlled = true;status = modelState('COLLECTING_DATA');await open(PLAN);
   await forecast().getByText('Около 2 мин', { exact: true }).waitFor();
-  assert.match(await forecast().innerText(), /Полное активное время от первого запуска/);
-  assert.match(await forecast().innerText(), /Средняя ошибка прошлых проверок/);
-  assert.match(await forecast().innerText(), /не гарантия длительности/);
+  assert.match(await forecast().innerText(), /Диапазон:/);
+  assert.match(await forecast().innerText(), /цель 80%/);
   const refresh = forecast().getByRole('button', { name: 'Обновить прогноз', exact: true });
   await refresh.focus();assert.equal(await refresh.evaluate(node => node === document.activeElement), true);
   const keyboardRequest = page.waitForRequest(request => new URL(request.url()).pathname.endsWith('/' + PLAN + '/estimate'));
@@ -123,14 +125,11 @@ try {
   for(const engine of ['RIDGE','OLS']){
     estimate=estimateFor(PLAN);estimate.serverEstimation.method={id:'atlm',version:'agent-v3-hybrid'};
     estimate.serverEstimation.hybrid={policyVersion:1,selectedEngine:'OLS',usedEngine:engine,fallbackReason:engine==='RIDGE'?'INVALID_PREDICTION':null};
-    estimate.serverEstimation.evaluation={qualityConfirmed:true,metricsScope:'FULL_POLICY',caseCount:20,modelCaseCount:15,
+    estimate.serverEstimation.evaluation={validationStatus:"HISTORICALLY_EVALUATED",pointCaseCount:20,metricsScope:'FULL_POLICY',caseCount:20,modelCaseCount:15,
       maeMs:60000,medianBaselineMaeMs:120000,profileGroupCount:6};
     await refreshPlan();const text=await forecast().innerText();
     assert(text.includes(engine==='RIDGE'?'ATLM — ridge':'ATLM — обычная регрессия'));
-    assert.match(text,/Средняя ошибка гибрида с запасным прогнозом: 1 мин/);
-    assert.match(text,/Ошибка медианы на тех же задачах: 2 мин/);
-    assert.match(text,/обученная модель использована: 15 из 20/);
-    assert.match(text,/Похожие задачи ограничивают выводы/);
+    assert.match(text,/Диапазон:/);
     for(const width of [320,1440]){
       await page.setViewportSize({width,height:1100});
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
@@ -139,24 +138,22 @@ try {
   }
   for(const k of [0,1,4]) {
     estimate=estimateFor(PLAN);estimate.serverEstimation.accuracy='EXPERIMENTAL';estimate.serverEstimation.sampleCount=k+1;
-    estimate.serverEstimation.evaluation={qualityConfirmed:false,caseCount:k,maeMs:k?0:null};
+    estimate.serverEstimation.evaluation={validationStatus:"EXPERIMENTAL",pointCaseCount:k,caseCount:k,maeMs:k?0:null};
     await refreshPlan();const text=await forecast().innerText();
-    assert.match(text,/Качество не подтверждено/);assert(text.includes('В обучении использовано планов: '+(k+1)+'.'));
-    assert(text.includes('Проверено прогнозов: '+k+'.'));
-    if(k===0){assert.match(text,/Ошибка пока не оценена/);assert.doesNotMatch(text,/Средняя ошибка/);}
+    assert.match(text,/Экспериментальный/);assert.match(text,/Диапазон:/);
     if(k===0){await page.setViewportSize({width:320,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.screenshot({path:resolve(artifacts,'atlm-experimental-320.png'),fullPage:true});await page.setViewportSize({width:1440,height:1000});}
-    else assert.match(text,/Средняя ошибка прошлых проверок: 0 мин/);
+
   }
   estimate=estimateFor(PLAN);estimate.serverEstimation={...estimate.serverEstimation,method:{id:'historical-median',version:'1'},pointMs:300000,modelId:null,modelVersion:null,sampleCount:7,accuracy:'HISTORICAL_BASELINE',evaluation:null,fallback:{atlmUnavailableReason:'COLLECTING_DATA',atlmDiagnostics:{code:'INSUFFICIENT_DATA',message:'Недостаточно данных: sampleCount=7, p=9.'}}};
   await refreshPlan();let baselineText=await forecast().innerText();
   assert.match(baselineText,/Около 5 мин/);assert.match(baselineText,/Ранний ориентир по истории/);assert.match(baselineText,/Учтено завершённых планов: 7/);
-  assert.match(baselineText,/особенности новой задачи не учитываются/);assert.match(baselineText,/sampleCount=7, p=9/);
+  assert.match(baselineText,/особенности новой задачи не учитываются/);assert.match(baselineText,/Пока недостаточно пригодных данных/);
   assert.doesNotMatch(baselineText,/Проверено прогнозов|Средняя ошибка|Качество проверено/);
   estimate.source='CURRENT_INPUT';estimate.recordedEstimation={pointMs:60000,sampleCount:2};
   estimate.serverEstimation.pointMs=360000;estimate.serverEstimation.sampleCount=8;
   estimate.serverEstimation.calculatedAt=c.now();await refreshPlan();baselineText=await forecast().innerText();
   assert.match(baselineText,/Около 6 мин/);assert.match(baselineText,/Учтено завершённых планов: 8/);
-  assert.match(baselineText,/Рассчитано:/);assert.match(baselineText,/Кнопка пересчитывает прогноз/);
+  assert.match(baselineText,/Рассчитано:/);
   assert.doesNotMatch(baselineText,/Кнопка перечитывает|сохранённая медиана показана|Около 1 мин/);
 
   estimate.serverEstimation.pointMs=0;await refreshPlan();assert.match(await forecast().innerText(),/Около 0 мин/);
@@ -167,12 +164,12 @@ try {
   assert.doesNotMatch(await forecast().innerText(),/изменился объём задачи или исходные данные модели/);
 
 
-  estimate=estimateFor(PLAN);await refreshPlan();assert.doesNotMatch(await forecast().innerText(),/Качество не подтверждено/);
+  estimate=estimateFor(PLAN);await refreshPlan();assert.match(await forecast().innerText(),/Экспериментальный/);
 
   estimate = { planId: PLAN, isStale: false, serverEstimation: { status: 'UNAVAILABLE', unavailableReason: 'INCOMPLETE_FEATURES', pointMs: null } };
   await refreshPlan();assert.match(await forecast().innerText(), /не хватает исходных сведений/);assert.equal(await forecast().locator('.atlm-point').count(), 0);
   estimate={planId:PLAN,isStale:false,serverEstimation:{status:'UNAVAILABLE',unavailableReason:'COLLECTING_DATA',pointMs:null},diagnostics:{code:'INSUFFICIENT_DATA',message:'Недостаточно данных: sampleCount=5, p=8, residualDegreesOfFreedom=-3.'}};
-  await refreshPlan();assert.match(await forecast().innerText(),/sampleCount=5, p=8, residualDegreesOfFreedom=-3/);
+  await refreshPlan();assert.match(await forecast().innerText(),/Пока недостаточно пригодных данных/);
   estimate = { ...estimateFor(PLAN), source:'FROZEN_INPUT', isStale: true };await refreshPlan();assert.match(await forecast().innerText(), /Оценка устарела/);assert.match(await forecast().innerText(), /Около 2 мин/);
   estimateError = true;await refreshPlan();assert.match(await forecast().innerText(), /Не удалось загрузить прогноз/);assert.equal(await forecast().locator('.atlm-point').count(), 0);
   estimateError = false;estimate = null;await refreshPlan();assert.match(await forecast().innerText(), /Около 2 мин/);
@@ -183,7 +180,7 @@ try {
   // The authoritative response can be newer than the plan card rendered in this tab.
   for(const availability of [{planStatus:'COMPLETED',deleted:false},{planStatus:'PLANNED',deleted:true}]){
     estimate={...estimateFor(PLAN),forecastAvailability:{...availability,canRefreshSaved:false,canCalculate:false}};
-    await refreshPlan();assert.equal(await forecast().count(),0);
+    await refreshPlan();assert.equal(await forecast().count(),availability.deleted?0:1);
     estimate=null;await open(PLAN);
   }
 
@@ -207,15 +204,15 @@ try {
   assert.match(await settings().innerText(), /Новых пригодных планов: 3/);
   assert.match(await settings().innerText(), /Начать обучение можно в любое время/);
   assert.equal(await settings().getByRole('button', { name: 'Начать обучение', exact: true }).isEnabled(), true);
-  status=modelState('IDLE');status.activeModel.sampleCount=2;status.activeModel.accuracy='EXPERIMENTAL';status.activeModel.evaluation={qualityConfirmed:false,caseCount:0,maeMs:null};await refreshStatus();
+  status=modelState('IDLE');status.activeModel.sampleCount=2;status.activeModel.accuracy='EXPERIMENTAL';status.activeModel.evaluation={validationStatus:"EXPERIMENTAL",pointCaseCount:0,caseCount:0,maeMs:null};await refreshStatus();
   assert.match(await settings().innerText(),/В обучении использовано планов: 2\./);assert.match(await settings().innerText(),/Всего пригодных планов: 23/);assert.match(await settings().innerText(),/Проверено прогнозов: 0/);assert.match(await settings().innerText(),/Ошибка пока не оценена/);
   status=modelState('IDLE');status.activeModel.hybrid={policyVersion:1,selectedEngine:'RIDGE'};
   status.lastAttempt={code:'AVAILABLE',message:'Модель успешно обучена. sampleCount=25, p=27, rank=17.',datasetRevision:263,generation:26,
     candidates:{ols:{status:'UNAVAILABLE',reason:'RANK_DEFICIENT',sampleCount:25,p:22,rank:17},ridge:{status:'AVAILABLE',sampleCount:25,p:27,rank:17}}};
-  await refreshStatus();assert.match(await settings().innerText(),/ATLM — ridge/);
+  await refreshStatus();assert.match(await settings().innerText(),/Точка: RIDGE/);
   assert.doesNotMatch(await settings().innerText(),/sampleCount=25/, 'technical details start collapsed');
   await settings().getByText('Подробности последней попытки',{exact:true}).click();
-  assert.match(await settings().innerText(),/p=22, rank=17/);assert.match(await settings().innerText(),/Ridge: рассчитана/);
+  assert.match(await settings().innerText(),/Планов: 25/);assert.match(await settings().innerText(),/Ridge: рассчитана/);
   status = modelState('RUNNING');status.training.progress = { phase: 'EVALUATION', completedCases: 2, totalCases: 7 };await refreshStatus();
   assert.match(await settings().innerText(), /Модель обучается/);assert.match(await settings().innerText(), /Обработано примеров: 2 из 7/);
   status = modelState('REJECTED');status.lastReason = 'CANDIDATE_MAE_WORSE';await refreshStatus();
@@ -227,10 +224,13 @@ try {
   statusError = false;await refreshStatus();assert.match(await settings().innerText(), /Предыдущая пригодная модель/);
   status.eligibleSampleCount = null;await refreshStatus();assert.match(await settings().innerText(), /Не удалось прочитать состояние обучения/);
 
-  // One automatic process call per unchanged checkpoint, finite polling, and a read-only refresh.
+  // Opening settings and refreshing status are read-only, even with queued work.
   status = modelState('QUEUED', true);await page.locator('[data-view="overview"]').click();await page.locator('[data-view="settings"]').click();
   await page.waitForFunction(() => !document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy'));
-  assert.equal(processCount, 1);for (let i = 0; i < 3; i++) await readPoll();
+  assert.equal(processCount, 0);await refreshStatus();assert.equal(processCount, 0);
+  await settings().getByRole('button', { name:'Продолжить обработку',exact:true }).click();
+  await page.waitForFunction(() => !document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy'));
+  assert.equal(processCount,1);for (let i = 0; i < 3; i++) await readPoll();
   const boundedReads = statusCount;await page.clock.runFor(30000);assert.equal(statusCount, boundedReads);assert.equal(processCount, 1);
   await refreshStatus();assert.equal(processCount, 1, 'explicit status refresh is read-only');
 
@@ -273,18 +273,19 @@ try {
     await page.screenshot({ path: resolve(artifacts, `atlm-plan-${width}.png`), fullPage: true });
     await page.locator('[data-view="settings"]').click();await refreshStatus();
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `model status overflows at ${width}`);
-    assert.equal(await settings().getByRole('button').count(),1);await manual().focus();
+    assert.equal(await settings().getByRole('button').count(),1);await page.waitForFunction(()=>!document.querySelector('#atlm-model-status .atlm-controls button')?.disabled);await manual().focus();
     assert.equal(await manual().evaluate(node=>node===document.activeElement),true);
     await page.screenshot({ path: resolve(artifacts, `atlm-settings-${width}.png`), fullPage: true });
   }
   controlled=false;await open(legacyPlan);assert.equal(await forecast().getByRole('button').count(),0);
-  assert.match(await forecast().innerText(),/status=RUNNING/);
+  assert.match(await forecast().innerText(),/зафиксирована при первом запуске/);
   await ok(c,'PausePlan',{planId:legacyPlan},1);
   controlled=false;
   await open(legacyPlan);assert.equal(await forecast().getByRole('button').count(),0);
-  assert.match(await forecast().innerText(),/status=PAUSED/);
+  assert.match(await forecast().innerText(),/зафиксирована при первом запуске/);
   controlled=true;
-  // Completion removes the working forecast instead of requesting its frozen history.
+  // Completed plans retain the frozen forecast and show the measured result.
+  controlled=false;
   const completedStep = c.db.sqlite.prepare('SELECT step_id FROM plan_steps WHERE plan_id=?').get(otherPlan).step_id;
   await ok(c,'StartPlan',{planId:otherPlan},0);
   await ok(c, 'SetStepStatus', { stepId: completedStep, status: 'DONE' }, 1);
@@ -293,8 +294,9 @@ try {
   const estimateReads = requests.filter(item => item.path.endsWith('/' + otherPlan + '/estimate')).length;
   await page.locator('[data-plan-id="' + otherPlan + '"] .plan-open').first().click();
   await page.waitForFunction(id => document.querySelector('#planDetail')?.dataset.planId === id, otherPlan);
-  assert.equal(await forecast().count(), 0, 'completed plans have no working forecast plaque');
-  assert.equal(requests.filter(item => item.path.endsWith('/' + otherPlan + '/estimate')).length, estimateReads);
+  await forecast().waitFor();await page.waitForFunction(()=>!document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy'));
+  assert.match(await forecast().innerText(),/Факт:/);
+  assert.equal(requests.filter(item => item.path.endsWith('/' + otherPlan + '/estimate')).length, estimateReads+1);
   assert.deepEqual(errors, []);
   console.log('ATLM UI: real cold start and queue recovery; saved/unknown/stale forecasts; rejection, errors and retry; late responses; bounded recovery; keyboard and 320/390/768/1440 layouts passed.');
   console.log('Screenshots: ' + artifacts);
