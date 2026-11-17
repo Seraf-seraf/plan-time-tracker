@@ -49,6 +49,25 @@ test("ListPlans places completed plans last across stable API pagination", async
     assert.deepEqual(await collectMcp(c), expected, "non-completed plans precede completed plans while registration ties stay stable");
     assert.deepEqual(await collectHttp(c), expected, "HTTP pagination uses the same sort key and cursor");
 
+    await assessForStart(c,D);
+    let cursor = null;
+    do {
+      const query = new URLSearchParams({limit:"1", ...(cursor ? {cursor} : {})});
+      const full = await call(c, "/api/plans?" + query);
+      query.set("view","cards");
+      const compact = await call(c, "/api/plans?" + query);
+      assert.equal(compact.status, 200);
+      assert.equal(compact.value.nextCursor, full.value.nextCursor);
+      const plan = full.value.plans[0], card = compact.value.plans[0];
+      for (const key of ["planId","title","status","version","registeredAt","firstStartedAt","finishedAt","activeMs"]) {
+        assert.equal(card[key], plan[key], key);
+      }
+      assert.equal(card.completion.readyToFinish, plan.completion.readyToFinish);
+      assert.equal(card.assessmentReadiness?.status, plan.assessmentReadiness?.status);
+      assert.equal("intervals" in card, false);
+      cursor = compact.value.nextCursor;
+    } while (cursor);
+
     const filtered = (await mcp(c, "ListPlans", { statuses: ["RUNNING", "COMPLETED"] })).value.result.structuredContent;
     assert.deepEqual(filtered.plans.map(plan => plan.planId), [PLAN, B]);
     const completed = (await mcp(c, "ListPlans", { statuses: ["COMPLETED"] })).value.result.structuredContent;
