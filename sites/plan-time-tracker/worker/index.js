@@ -662,7 +662,7 @@ export function selectHybridEvaluationCases(journal, options = {}) {
 }
 
 async function atlmFitCandidates(rows) {
-  return { ols: await fitAtlmV4Regression(rows, "OLS"), ridge: await fitAtlmV4Regression(rows, "RIDGE") };
+  return { ols: await fitAtlmV4Regression(rows, "OLS"), ridge: await fitAtlmV4Regression(rows, "RIDGE"), bayesian: await fitAtlmBayesian(rows) };
 }
 
 function atlmFitDiagnostic(fit) {
@@ -673,7 +673,7 @@ function atlmFitDiagnostic(fit) {
 }
 
 function atlmStrategyPrediction(base, engine) {
-  const order = engine === "OLS" ? ["ols", "ridge"] : engine === "RIDGE" ? ["ridge"] : [];
+  const order = engine === "OLS" ? ["ols", "ridge"] : engine === "RIDGE" ? ["ridge"] : engine === "BAYESIAN" ? ["bayesian"] : [];
   for (const name of order) if (base[name].status === "AVAILABLE") return { ...base[name],
     hybrid: { policyVersion: ATLM_POLICY_VERSION, selectedEngine: engine, usedEngine: name.toUpperCase(),
       fallbackReason: name.toUpperCase() === engine ? null : base.ols.reason } };
@@ -687,7 +687,7 @@ export function selectHybridEngine(candidates, cases) {
     .sort((a, b) => a.capturedAt - b.capturedAt || atlmCompareId(a.planId, b.planId)).slice(-ATLM_MAX_EVALUATION_CASES);
   const scores = { median: atlmScore(comparable, "median").maeMs }, ownPredictionCounts = {};
   const qualified = [];
-  for (const engine of ["RIDGE", "OLS"]) {
+  for (const engine of ["RIDGE", "BAYESIAN", "OLS"]) {
     const name = engine.toLowerCase();
     ownPredictionCounts[name] = comparable.filter(c => c[name].status === "AVAILABLE").length;
     const scored = comparable.map(c => { const prediction = atlmStrategyPrediction(c, engine); return { ...c,
@@ -701,7 +701,7 @@ export function selectHybridEngine(candidates, cases) {
     selectedEngine = eligible.find(engine => scores[engine.toLowerCase()] <= best + ATLM_MAE_TIE_MS);
     if (selectedEngine !== "MEDIAN") reason = "LOWEST_HISTORICAL_MAE";
   } else {
-    selectedEngine = candidates.ridge.status === "AVAILABLE" ? "RIDGE" : candidates.ols.status === "AVAILABLE" ? "OLS" : "MEDIAN";
+    selectedEngine = candidates.ridge.status === "AVAILABLE" ? "RIDGE" : candidates.bayesian.status === "AVAILABLE" ? "BAYESIAN" : candidates.ols.status === "AVAILABLE" ? "OLS" : "MEDIAN";
     reason = selectedEngine === "MEDIAN" ? "NO_MODEL_AVAILABLE" : "EARLY_EXPERIMENTAL";
   }
   return { policyVersion: ATLM_POLICY_VERSION, selectedEngine, reason, caseCount: comparable.length,
@@ -715,8 +715,8 @@ export async function evaluateHybridBaseCase(train, target) {
   const pointMs = train.length > ATLM_MAX_ROWS ? null : median(train.map(row => row.actualMs));
   return { ...atlmTrainingRow(target), trainSampleCount: train.length,
     trainDatasetDigest: "sha256:" + await hashCommandInput(atlmSortedRows(train)),
-    fits: { ols: atlmFitDiagnostic(candidates.ols), ridge: atlmFitDiagnostic(candidates.ridge) },
-    ols: prediction("ols", predictAtlmV4Regression), ridge: prediction("ridge", predictAtlmV4Regression),
+    fits: { ols: atlmFitDiagnostic(candidates.ols), ridge: atlmFitDiagnostic(candidates.ridge), bayesian: atlmFitDiagnostic(candidates.bayesian) },
+    ols: prediction("ols", predictAtlmV4Regression), ridge: prediction("ridge", predictAtlmV4Regression), bayesian: prediction("bayesian", predictAtlmBayesian),
     median: pointMs === null ? atlmUnavailable(train.length > ATLM_MAX_ROWS ? "DATASET_LIMIT_REACHED" : "INSUFFICIENT_DATA")
       : { status: "AVAILABLE", pointMs, reason: null } };
 }
@@ -733,12 +733,12 @@ export function summarizeHybridAtlmEvaluation(cases, selection) {
   if (selection?.status !== "AVAILABLE") return selection || atlmUnavailable("INVALID_EVALUATION");
   if (!Array.isArray(cases) || cases.length !== selection.caseSampleIds.length || new Set(cases.map(c => c.sampleId)).size !== cases.length
     || cases.some(c => !selection.caseSampleIds.includes(c.sampleId) || !isNonnegativeSafeInteger(c.actualMs)
-      || ["atlm", "median", "prediction", "ols", "ridge"].some(name => !c[name] || (c[name].pointMs !== null && !isNonnegativeSafeInteger(c[name].pointMs))))) return atlmUnavailable("INCOMPLETE_EVALUATION");
+      || ["atlm", "median", "prediction", "ols", "ridge", "bayesian"].some(name => !c[name] || (c[name].pointMs !== null && !isNonnegativeSafeInteger(c[name].pointMs))))) return atlmUnavailable("INCOMPLETE_EVALUATION");
   const ordered = selection.caseSampleIds.map(id => cases.find(c => c.sampleId === id));
   const comparable = ordered.filter(c => c.median.status === "AVAILABLE");
   const pairedCases = comparable.filter(c => c.atlm.status === "AVAILABLE");
   const metrics = { atlm: atlmScore(ordered, "atlm"), median: atlmScore(comparable, "median"),
-    operational: atlmScore(comparable, "prediction"), ols: atlmScore(ordered, "ols"), ridge: atlmScore(ordered, "ridge") };
+    operational: atlmScore(comparable, "prediction"), ols: atlmScore(ordered, "ols"), ridge: atlmScore(ordered, "ridge"), bayesian: atlmScore(ordered, "bayesian") };
   const paired = { caseCount: pairedCases.length, caseSampleIds: pairedCases.map(c => c.sampleId),
     atlm: atlmScore(pairedCases, "atlm"), median: atlmScore(pairedCases, "median") };
   const profileGroupCount = new Set(comparable.map(c => canonical(c.features))).size;
@@ -769,10 +769,10 @@ export async function evaluateHybridAtlmChronologically(journal, options = {}) {
 
 function atlmSelectionValid(selection) {
   if (!atlmExactKeys(selection, ["policyVersion", "selectedEngine", "reason", "caseCount", "ownPredictionCounts", "scores", "qualified"])
-    || selection.policyVersion !== ATLM_POLICY_VERSION || !["OLS", "RIDGE", "MEDIAN"].includes(selection.selectedEngine)
+    || selection.policyVersion !== ATLM_POLICY_VERSION || !["OLS", "RIDGE", "BAYESIAN", "MEDIAN"].includes(selection.selectedEngine)
     || !["EARLY_EXPERIMENTAL", "LOWEST_HISTORICAL_MAE", "MEDIAN_BASELINE_NOT_WORSE", "NO_MODEL_AVAILABLE"].includes(selection.reason)
     || !Number.isInteger(selection.caseCount) || selection.caseCount < 0 || selection.caseCount > ATLM_MAX_EVALUATION_CASES
-    || !atlmExactKeys(selection.ownPredictionCounts, ["ols", "ridge"]) || !atlmExactKeys(selection.scores, ["median", "ols", "ridge"])
+    || !atlmExactKeys(selection.ownPredictionCounts, ["ols", "ridge", "bayesian"]) || !atlmExactKeys(selection.scores, ["median", "ols", "ridge", "bayesian"])
     || !Object.values(selection.ownPredictionCounts).every(n => Number.isInteger(n) && n >= 0 && n <= selection.caseCount)
     || !Object.values(selection.scores).every(value => selection.caseCount === 0 ? value === null : Number.isFinite(value) && value >= 0)
     || typeof selection.qualified !== "boolean") return false;
@@ -782,12 +782,12 @@ function atlmSelectionValid(selection) {
 function atlmHybridArtifactValid(a) {
   if (!isPlainRecord(a) || a.formatVersion !== 2 || a.kind !== "HYBRID" || a.method?.id !== ATLM_HYBRID_METHOD.id
     || a.method.version !== ATLM_HYBRID_METHOD.version || a.featureSchemaVersion !== ATLM_FEATURE_VERSION || a.metric !== "PLAN_ACTIVE"
-    || a.policyVersion !== ATLM_POLICY_VERSION || !["OLS", "RIDGE"].includes(a.selectedEngine)
+    || a.policyVersion !== ATLM_POLICY_VERSION || !["OLS", "RIDGE", "BAYESIAN"].includes(a.selectedEngine)
     || !Number.isSafeInteger(a.n) || a.n < 1 || a.n > ATLM_MAX_ROWS || !atlmManifestValid(a.manifest, a.n)
     || !isSnapshotDigest(a.datasetDigest) || !isNonnegativeSafeInteger(a.trainCutoff)
-    || !atlmExactKeys(a.candidates, ["ols", "ridge"]) || !atlmSelectionValid(a.selection)
+    || !atlmExactKeys(a.candidates, ["ols", "ridge", "bayesian"]) || !atlmSelectionValid(a.selection)
     || a.selection.policyVersion !== ATLM_POLICY_VERSION || a.selection.selectedEngine !== a.selectedEngine) return false;
-  for (const [name, validate] of [["ols", atlmV4RegressionArtifactValid], ["ridge", atlmV4RegressionArtifactValid]]) {
+  for (const [name, validate] of [["ols", atlmV4RegressionArtifactValid], ["ridge", atlmV4RegressionArtifactValid], ["bayesian", atlmBayesArtifactValid]]) {
     const fit = a.candidates[name];
     if (!isPlainRecord(fit) || !["AVAILABLE", "UNAVAILABLE"].includes(fit.status)) return false;
     if (fit.status === "UNAVAILABLE" && (typeof fit.reason !== "string" || !fit.reason || fit.reason.length > 128)) return false;
@@ -802,13 +802,14 @@ export async function fitHybridAtlm(rows, { selection = null, candidates = null,
   const problem = atlmDatasetProblem(rows);
   if (problem) return problem;
   const sorted = atlmSortedRows(rows);
+  if (sorted.length < 2) return atlmUnavailable("INSUFFICIENT_DATA", { sampleCount: sorted.length });
   candidates ||= await atlmFitCandidates(sorted);
   selection ||= selectHybridEngine(candidates, []);
   if (!atlmSelectionValid(selection)) return atlmUnavailable("INVALID_PROTOCOL");
-  const diagnostics = { ols: atlmFitDiagnostic(candidates.ols), ridge: atlmFitDiagnostic(candidates.ridge) };
+  const diagnostics = { ols: atlmFitDiagnostic(candidates.ols), ridge: atlmFitDiagnostic(candidates.ridge), bayesian: atlmFitDiagnostic(candidates.bayesian) };
   if (selection.selectedEngine === "MEDIAN") {
-    const reason = candidates.ridge.status === "AVAILABLE" || candidates.ols.status === "AVAILABLE" ? "MEDIAN_BASELINE_NOT_WORSE"
-      : candidates.ridge.reason || candidates.ols.reason;
+    const reason = [candidates.ridge, candidates.bayesian, candidates.ols].some(candidate => candidate.status === "AVAILABLE") ? "MEDIAN_BASELINE_NOT_WORSE"
+      : candidates.ridge.reason || candidates.bayesian.reason || candidates.ols.reason;
     return atlmUnavailable(reason, { sampleCount: rows.length, candidates: diagnostics, selection });
   }
   const chosen = candidates[selection.selectedEngine.toLowerCase()];
@@ -827,7 +828,7 @@ export function predictHybridAtlm(artifact, features) {
   const problem = atlmFeatureProblem(features);
   if (problem) return problem;
   const base = {};
-  for (const [name, predict] of [["ols", predictAtlmV4Regression], ["ridge", predictAtlmV4Regression]]) {
+  for (const [name, predict] of [["ols", predictAtlmV4Regression], ["ridge", predictAtlmV4Regression], ["bayesian", predictAtlmBayesian]]) {
     const fit = artifact.candidates[name];
     base[name] = fit.status === "AVAILABLE" ? predict(fit.artifact, features) : atlmUnavailable(fit.reason);
   }
@@ -1156,9 +1157,12 @@ export function fitAtlmV4Preprocessor(featureRows) {
     const values = featureRows.map(row => v4RawColumn(row, candidate, manifest));
     if (values.some(value => !Number.isFinite(value))) return atlmUnavailable("INVALID_FEATURES");
     if (values.every(value => value === values[0])) { manifest.droppedColumns.push(candidate); continue; }
-    const center = atlmSum(values) / values.length;
-    const scale = Math.sqrt(atlmSum(values.map(value => (value - center) ** 2)) / values.length);
-    manifest.columns.push({ ...candidate, center, scale });
+    // Store the origin separately: subtracting a rounded large mean from
+    // nearby log values can otherwise destroy centering and conditioning.
+    const origin = values[0], offsets = values.map(value => value - origin);
+    const center = atlmSum(offsets) / values.length;
+    const scale = Math.sqrt(atlmSum(offsets.map(value => (value - center) ** 2)) / values.length);
+    manifest.columns.push({ ...candidate, origin, center, scale });
   }
   return { status: "AVAILABLE", manifest };
 }
@@ -1200,19 +1204,19 @@ export function encodeAtlmV4Features(features, manifest) {
   for (const column of manifest.columns) {
     if (!isPlainRecord(column) || !manifest.fields.includes(column.field)
       || !["category", "missing", "ordinal", "count"].includes(column.kind)
-      || !Number.isFinite(column.center) || !Number.isFinite(column.scale) || column.scale <= 0
+      || !Number.isFinite(column.origin) || !Number.isFinite(column.center) || !Number.isFinite(column.scale) || column.scale <= 0
       || (column.kind === "category" && (typeof column.level !== "string"
         || (!Object.hasOwn(V4_CATEGORY_FIELDS, column.field) && !V4_OPEN_CATEGORY_FIELDS.includes(column.field))))
       || (["count", "ordinal"].includes(column.kind) && !Number.isFinite(manifest.imputations[column.field]))) return atlmUnavailable("INVALID_ARTIFACT");
-    const binary = ["category", "missing"].includes(column.kind) || V4_FLAG_FIELDS.includes(column.field);
-    if (binary && (!(column.center > 0 && column.center < 1)
-      || Math.abs(column.scale - Math.sqrt(column.center * (1 - column.center))) > 1e-10)) return atlmUnavailable("INVALID_ARTIFACT");
-    if (!binary && (column.center < 0 || (column.kind === "ordinal" && column.center > 3)
-      || (column.kind === "count" && column.center > Math.log1p(Number.MAX_SAFE_INTEGER)))) return atlmUnavailable("INVALID_ARTIFACT");
+    const binary = ["category", "missing"].includes(column.kind) || V4_FLAG_FIELDS.includes(column.field), mean = column.origin + column.center;
+    if (binary && (!(mean > 0 && mean < 1) || ![0, 1].includes(column.origin)
+      || Math.abs(column.scale - Math.sqrt(mean * (1 - mean))) > 1e-10)) return atlmUnavailable("INVALID_ARTIFACT");
+    if (!binary && (column.origin < 0 || mean < 0 || (column.kind === "ordinal" && (mean > 3 || column.origin > 3))
+      || (column.kind === "count" && (mean > Math.log1p(Number.MAX_SAFE_INTEGER) || column.origin > Math.log1p(Number.MAX_SAFE_INTEGER))))) return atlmUnavailable("INVALID_ARTIFACT");
   }
   const problem = v4FeatureProblem(features);
   if (problem) return atlmUnavailable(problem);
-  const row = [1, ...manifest.columns.map(column => (v4RawColumn(features, column, manifest) - column.center) / column.scale)];
+  const row = [1, ...manifest.columns.map(column => ((v4RawColumn(features, column, manifest) - column.origin) - column.center) / column.scale)];
   return row.every(Number.isFinite) ? { status: "AVAILABLE", row } : atlmUnavailable("INVALID_FEATURES");
 }
 
@@ -1284,6 +1288,175 @@ export function predictAtlmV4Regression(artifact, features) {
   const ms = Math.max(0, ATLM_MS_PER_MINUTE * Math.expm1(z));
   return Number.isFinite(ms) && ms <= Number.MAX_SAFE_INTEGER
     ? { status: "AVAILABLE", pointMs: Math.round(ms), reason: null } : atlmUnavailable("INVALID_PREDICTION");
+}
+
+const ATLM_BAYES_INTERCEPT_PRECISION = 0.000001;
+const ATLM_BAYES_COEFFICIENT_PRECISION = 1;
+const ATLM_BAYES_PRIOR_SHAPE = 2;
+const ATLM_BAYES_PRIOR_SCALE = 1;
+const ATLM_BAYES_NOMINAL_COVERAGE = 0.8;
+
+function atlmCholesky(matrix) {
+  const p = matrix.length, lower = Array.from({ length: p }, () => Array(p).fill(0));
+  for (let i = 0; i < p; i++) for (let j = 0; j <= i; j++) {
+    let value = matrix[i][j];
+    for (let k = 0; k < j; k++) value -= lower[i][k] * lower[j][k];
+    if (i === j) {
+      if (!(value > 0) || !Number.isFinite(value)) return null;
+      lower[i][j] = Math.sqrt(value);
+    } else lower[i][j] = value / lower[j][j];
+  }
+  return lower;
+}
+
+function atlmLowerSolve(lower, vector) {
+  const solution = Array(vector.length).fill(0);
+  for (let i = 0; i < vector.length; i++) {
+    let value = vector[i];
+    for (let j = 0; j < i; j++) value -= lower[i][j] * solution[j];
+    solution[i] = value / lower[i][i];
+  }
+  return solution;
+}
+
+function atlmUpperTransposeSolve(lower, vector) {
+  const solution = Array(vector.length).fill(0);
+  for (let i = vector.length - 1; i >= 0; i--) {
+    let value = vector[i];
+    for (let j = i + 1; j < vector.length; j++) value -= lower[j][i] * solution[j];
+    solution[i] = value / lower[i][i];
+  }
+  return solution;
+}
+
+// Lanczos log-gamma and a bounded continued fraction for the Student-t CDF.
+function atlmLogGamma(z) {
+  const coefficients = [676.5203681218851, -1259.1392167224028, 771.3234287776531, -176.6150291621406,
+    12.507343278686905, -0.13857109526572012, 0.000009984369578019572, 0.00000015056327351493116];
+  if (z < 0.5) return Math.log(Math.PI) - Math.log(Math.sin(Math.PI * z)) - atlmLogGamma(1 - z);
+  z -= 1;
+  let sum = 0.9999999999998099;
+  for (let i = 0; i < coefficients.length; i++) sum += coefficients[i] / (z + i + 1);
+  const t = z + coefficients.length - 0.5;
+  return 0.5 * Math.log(2 * Math.PI) + (z + 0.5) * Math.log(t) - t + Math.log(sum);
+}
+
+function atlmBetaFraction(a, b, x) {
+  const tiny = 1e-300, tolerance = 3e-14, maxIterations = 1000;
+  let c = 1, d = 1 - (a + b) * x / (a + 1);
+  if (Math.abs(d) < tiny) d = tiny;
+  d = 1 / d;
+  let value = d;
+  for (let m = 1; m <= maxIterations; m++) {
+    const twice = 2 * m;
+    let numerator = m * (b - m) * x / ((a + twice - 1) * (a + twice));
+    d = 1 + numerator * d; if (Math.abs(d) < tiny) d = tiny;
+    c = 1 + numerator / c; if (Math.abs(c) < tiny) c = tiny;
+    d = 1 / d; value *= d * c;
+    numerator = -(a + m) * (a + b + m) * x / ((a + twice) * (a + twice + 1));
+    d = 1 + numerator * d; if (Math.abs(d) < tiny) d = tiny;
+    c = 1 + numerator / c; if (Math.abs(c) < tiny) c = tiny;
+    d = 1 / d;
+    const delta = d * c; value *= delta;
+    if (Math.abs(delta - 1) <= tolerance) return value;
+  }
+  return NaN;
+}
+
+function atlmRegularizedBeta(x, a, b) {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const factor = Math.exp(atlmLogGamma(a + b) - atlmLogGamma(a) - atlmLogGamma(b) + a * Math.log(x) + b * Math.log1p(-x));
+  return x < (a + 1) / (a + b + 2) ? factor * atlmBetaFraction(a, b, x) / a
+    : 1 - factor * atlmBetaFraction(b, a, 1 - x) / b;
+}
+
+function atlmStudentT90(degreesOfFreedom) {
+  const cdf = value => 1 - atlmRegularizedBeta(degreesOfFreedom / (degreesOfFreedom + value * value), degreesOfFreedom / 2, 0.5) / 2;
+  let low = 0, high = 1;
+  while (cdf(high) < 0.9 && high < 1e6) high *= 2;
+  if (!Number.isFinite(cdf(high)) || cdf(high) < 0.9) return NaN;
+  for (let i = 0; i < 80; i++) { const middle = (low + high) / 2; if (cdf(middle) < 0.9) low = middle; else high = middle; }
+  return (low + high) / 2;
+}
+
+function atlmBayesArtifactValid(artifact) {
+  if (!isPlainRecord(artifact) || artifact.formatVersion !== 3 || artifact.kind !== "BAYESIAN"
+    || artifact.featureSchemaVersion !== "agent-task-v3" || artifact.metric !== "PLAN_ACTIVE" || artifact.priorVersion !== 1 || artifact.targetTransform !== "log1p-minutes-v1"
+    || !Number.isSafeInteger(artifact.n) || artifact.n < 1 || artifact.n > ATLM_MAX_ROWS
+    || !Number.isSafeInteger(artifact.p) || artifact.p < 1 || artifact.p > V4_MODEL_COLUMN_LIMIT + 1
+    || !Number.isSafeInteger(artifact.rank) || artifact.rank < 1 || artifact.rank > Math.min(artifact.n, artifact.p)
+    || !atlmManifestValid(artifact.manifest, artifact.n) || !isSnapshotDigest(artifact.datasetDigest)
+    || !isPlainRecord(artifact.posterior) || artifact.posterior.shape !== ATLM_BAYES_PRIOR_SHAPE + artifact.n / 2
+    || !Number.isFinite(artifact.posterior.scale) || artifact.posterior.scale < ATLM_BAYES_PRIOR_SCALE
+    || !Array.isArray(artifact.posterior.coefficients) || artifact.posterior.coefficients.length !== artifact.p
+    || !artifact.posterior.coefficients.every(Number.isFinite) || !Array.isArray(artifact.posterior.cholesky)
+    || artifact.posterior.cholesky.length !== artifact.p) return false;
+  for (let i = 0; i < artifact.p; i++) {
+    const row = artifact.posterior.cholesky[i];
+    if (!Array.isArray(row) || row.length !== artifact.p || !row.every(Number.isFinite) || row[i] <= 0
+      || row.some((value, j) => j > i && value !== 0)) return false;
+    const diagonal = atlmSum(row.map(value => value * value));
+    const expected = artifact.n + (i === 0 ? ATLM_BAYES_INTERCEPT_PRECISION : ATLM_BAYES_COEFFICIENT_PRECISION);
+    if (Math.abs(diagonal - expected) > 1e-8 * expected || (i > 0 && Math.abs(row[0]) > 1e-7 * Math.sqrt(artifact.n))) return false;
+  }
+  const defaults = Object.fromEntries(V4_FEATURE_FIELDS.map(field => {
+    if (field === "doneBoundary") return [field, "ANALYSIS"];
+    if (field === "environmentId" || V4_OPEN_CATEGORY_FIELDS.includes(field) || field === "plannedParallelAgents") return [field, null];
+    if (Object.hasOwn(V4_CATEGORY_FIELDS, field)) return [field, V4_CATEGORY_FIELDS[field][0]];
+    return [field, field === "workUnits.CREATE" ? 1 : 0];
+  }));
+  const encoded = encodeAtlmV4Features(defaults, artifact.preprocessor);
+  return encoded.status === "AVAILABLE" && encoded.row.length === artifact.p;
+}
+
+export async function fitAtlmBayesian(rows) {
+  const problem = atlmDatasetProblem(rows);
+  if (problem) return problem;
+  if (!rows.length) return atlmUnavailable("INSUFFICIENT_DATA");
+  const sorted = atlmSortedRows(rows);
+  for (const row of sorted) { const missing = atlmFeatureProblem(row.features); if (missing) return missing; }
+  const fitted = fitAtlmV4Preprocessor(sorted.map(row => row.features));
+  if (fitted.status !== "AVAILABLE") return fitted;
+  const encoded = sorted.map(row => encodeAtlmV4Features(row.features, fitted.manifest));
+  if (encoded.some(row => row.status !== "AVAILABLE")) return atlmUnavailable("INVALID_FEATURES");
+  const matrix = encoded.map(row => row.row), n = matrix.length, p = matrix[0].length;
+  const target = sorted.map(row => Math.log1p(row.actualMs / ATLM_MS_PER_MINUTE));
+  const precision = Array.from({ length:p }, (_, i) => Array.from({ length:p }, (_, j) =>
+    atlmSum(matrix.map(row => row[i] * row[j])) + (i === j ? (i === 0 ? ATLM_BAYES_INTERCEPT_PRECISION : ATLM_BAYES_COEFFICIENT_PRECISION) : 0)));
+  const lower = atlmCholesky(precision);
+  if (!lower) return atlmUnavailable("NUMERICAL_FAILURE", { sampleCount:n, p });
+  const rhs = Array.from({ length:p }, (_, i) => atlmSum(matrix.map((row, j) => row[i] * target[j])));
+  const coefficients = atlmUpperTransposeSolve(lower, atlmLowerSolve(lower, rhs));
+  const residualSquares = atlmSum(matrix.map((row, i) => (target[i] - atlmSum(row.map((x, j) => x * coefficients[j]))) ** 2));
+  const priorPenalty = coefficients.reduce((sum, value, i) => sum + value * value * (i === 0 ? ATLM_BAYES_INTERCEPT_PRECISION : ATLM_BAYES_COEFFICIENT_PRECISION), 0);
+  const shape = ATLM_BAYES_PRIOR_SHAPE + n / 2, scale = ATLM_BAYES_PRIOR_SCALE + (residualSquares + priorPenalty) / 2;
+  if (!coefficients.every(Number.isFinite) || !Number.isFinite(scale) || scale <= 0) return atlmUnavailable("NUMERICAL_FAILURE", { sampleCount:n, p });
+  const rank = atlmQr(matrix, Array(n).fill(0)).rank;
+  const artifact = atlmFreeze({ formatVersion:3, kind:"BAYESIAN", featureSchemaVersion:"agent-task-v3", metric:"PLAN_ACTIVE", n, p, rank,
+    priorVersion:1, targetTransform:"log1p-minutes-v1", preprocessor:fitted.manifest,
+    posterior:{ coefficients, cholesky:lower, shape, scale }, manifest:sorted.map(({ sampleId, planId }) => ({ sampleId, planId })),
+    datasetDigest:"sha256:" + await hashCommandInput(sorted) });
+  return { status:"AVAILABLE", artifact };
+}
+
+export function predictAtlmBayesian(artifact, features) {
+  if (!atlmBayesArtifactValid(artifact) || artifact.priorVersion !== 1 || artifact.targetTransform !== "log1p-minutes-v1") return atlmUnavailable("INVALID_ARTIFACT");
+  const encoded = encodeAtlmV4Features(features, artifact.preprocessor);
+  if (encoded.status !== "AVAILABLE") return encoded;
+  const posterior = artifact.posterior, x = encoded.row, transformed = atlmLowerSolve(posterior.cholesky, x);
+  const location = atlmSum(x.map((value, i) => value * posterior.coefficients[i]));
+  const scale = Math.sqrt(posterior.scale / posterior.shape * (1 + atlmSum(transformed.map(value => value * value))));
+  const degreesOfFreedom = 2 * posterior.shape, quantile = atlmStudentT90(degreesOfFreedom);
+  const ms = z => Math.max(0, ATLM_MS_PER_MINUTE * Math.expm1(z));
+  const point = ms(location);
+  if (!Number.isFinite(location) || !(scale > 0) || !Number.isFinite(scale) || !Number.isFinite(point) || point > Number.MAX_SAFE_INTEGER) return atlmUnavailable("INVALID_PREDICTION");
+  const lower = ms(location - quantile * scale), upper = ms(location + quantile * scale);
+  const available = Number.isFinite(quantile) && Number.isFinite(lower) && Number.isFinite(upper) && upper <= Number.MAX_SAFE_INTEGER;
+  return { status:"AVAILABLE", pointMs:Math.round(point), reason:null,
+    predictive:{ location, scale, degreesOfFreedom },
+    interval:available ? { status:"AVAILABLE", lowerMs:Math.round(lower), upperMs:Math.round(upper), nominalCoverage:ATLM_BAYES_NOMINAL_COVERAGE, engine:"BAYESIAN_PREDICTIVE" }
+      : { status:"UNAVAILABLE", lowerMs:null, upperMs:null, nominalCoverage:ATLM_BAYES_NOMINAL_COVERAGE, engine:"BAYESIAN_PREDICTIVE", unavailableReason:"NUMERICAL_FAILURE" } };
 }
 
 export const AGENT_TASK_SCHEMA = V4_TASK_SCHEMA;
@@ -3284,7 +3457,7 @@ function atlmDiagnostics(code, facts = {}) {
 function atlmAttemptDiagnostics(result, snapshot, job, nowMs) {
   const candidates = result.details?.candidates;
   return {...atlmDiagnostics(result.reason || "AVAILABLE", {...result.details?.artifact,...result.details,status:undefined}),
-    ...(candidates ? { candidates: Object.fromEntries(["ols", "ridge"].map(name => [name, atlmFitDiagnostic(candidates[name])])) } : {}),
+    ...(candidates ? { candidates: Object.fromEntries(["ols", "ridge", "bayesian"].map(name => [name, atlmFitDiagnostic(candidates[name])])) } : {}),
     ...(result.details?.selection ? { selection: result.details.selection } : {}),
     methodVersion:ATLM_METHOD.version,featureSchemaVersion:ATLM_FEATURE_VERSION,
     datasetRevision:snapshot?.datasetRevision ?? null,generation:job.generation,completedAt:nowMs};
