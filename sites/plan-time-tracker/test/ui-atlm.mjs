@@ -110,6 +110,8 @@ try {
   await settings().getByText('Подробности последней попытки',{exact:true}).click();
   assert.match(await settings().innerText(), /Пока недостаточно пригодных данных/);
   assert.equal((await call(c, '/api/tracker/estimation-model')).value.training.generation, 1, 'real browser request reaches Worker training below two plans');
+  await page.locator('[data-view="settings"]').click();await page.waitForFunction(()=>!document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy'));
+  const readsAfterReopen=statusCount;await page.clock.runFor(3000);assert.equal(statusCount,readsAfterReopen,'reopening settings cancels stale polling');
   await page.screenshot({ path: resolve(artifacts, 'atlm-cold-start.png'), fullPage: true });
 
   controlled = true;status = modelState('COLLECTING_DATA');await open(PLAN);

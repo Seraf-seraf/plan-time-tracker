@@ -3299,7 +3299,7 @@ const UI_ATLM = String.raw`(()=>{
   }
   window.addEventListener("plan-time-tracker:plan-will-render",()=>{planToken++;planAbort?.abort();});
   window.addEventListener("plan-time-tracker:plan-rendered",event=>{loadPlan(event.detail?.planId);loadStatus(false);});
-  document.querySelector('[data-view="settings"]')?.addEventListener("click",()=>{pollsLeft=0;loadStatus(false);loadAttempts();});
+  document.querySelector('[data-view="settings"]')?.addEventListener("click",()=>{clearTimeout(pollTimer);pollsLeft=0;loadStatus(false);loadAttempts();});
   window.addEventListener("pagehide",()=>{clearTimeout(pollTimer);planAbort?.abort();});
   discover();
 })();`;
