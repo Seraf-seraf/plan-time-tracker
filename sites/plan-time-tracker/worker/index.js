@@ -2636,6 +2636,15 @@ async function listPlans(db, ownerId, nowMs, filter = {}) {
   };
 }
 
+function intervalsByPlan(rows) {
+  const grouped = new Map();
+  for (const { plan_id, ...interval } of rows) {
+    if (!grouped.has(plan_id)) grouped.set(plan_id, []);
+    grouped.get(plan_id).push(interval);
+  }
+  return grouped;
+}
+
 async function planSummary(db, ownerId, row, nowMs, intervalRows, summary) {
   const intervals = intervalRows ?? await dbAll(db, "SELECT interval_id,start_ms,end_ms,opened_by,closed_by FROM work_intervals WHERE owner_id=? AND plan_id=? ORDER BY start_ms", ownerId, row.plan_id);
   const activeMs = row.first_started_at == null ? null : intervals.reduce((sum, interval) =>
