@@ -19,6 +19,15 @@ try{
  const forecast=page.locator('.atlm-plan-estimate');await forecast.waitFor();await page.waitForFunction(()=>!document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy'));
  const txt=await forecast.innerText();assert.match(txt,/Около/);assert.match(txt,/Диапазон:/);assert.match(txt,/цель 80%/);assert.match(txt,/Зафиксировано при запуске/);assert.match(txt,/Факт:/);
  assert.equal(await forecast.locator('.atlm-scale').getAttribute('aria-hidden'),'true');await forecast.getByText('Признаки',{exact:true}).click();assert.match(await forecast.innerText(),/Результаты/);
+ const features=forecast.locator('.atlm-features');
+ const featureValue=label=>features.locator('dt').filter({has:page.getByText(label,{exact:true})}).locator('xpath=following-sibling::dd[1]');
+ assert.match(await featureValue('Готовность рабочей среды').innerText(),/^Готова$/);
+ assert.match(await featureValue('Среда выполнения').innerText(),/^Облачная рабочая среда$/);
+ assert.match(await featureValue('Развёртывание').innerText(),/^Развёртывание не требуется$/);
+ assert.match(await featureValue('Технологии для изучения').innerText(),/Неизвестно[\s\S]*Not yet established/);
+ assert.doesNotMatch(await features.innerText(),/environmentId:|modelId:|AI_AGENT/);
+ await page.setViewportSize({width:320,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ await page.screenshot({path:resolve(dir,'features-mobile.png'),fullPage:true});await page.setViewportSize({width:1440,height:1000});
  taskFailure=true;await page.locator('[data-view="overview"]').click();await page.locator('[data-plan-id="'+target.planId+'"] .plan-open').first().click();await forecast.waitFor();await page.waitForFunction(()=>!document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy'));
  await forecast.getByText('Признаки',{exact:true}).click();assert.match(await forecast.innerText(),/Не удалось загрузить признаки/);assert.match(await forecast.innerText(),/Около/);
  taskFailure=false;await forecast.getByRole('button',{name:'Повторить загрузку признаков'}).click();await page.waitForFunction(()=>!document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy'));

@@ -834,6 +834,40 @@ const V4_TASK_SCHEMA = {
   },
 };
 
+
+// JSON keys are the stable agent-task-v3 contract; descriptions disambiguate their meaning in MCP discovery.
+const V4_TASK_DESCRIPTIONS = {
+  workUnits:"Самостоятельные проверяемые результаты задачи, не этапы работы.",
+  doneBoundary:"Состояние, до которого по требованиям нужно довести результат.",
+  reuseLevel:"Насколько существующее решение подходит для задачи: от 0 (нет основы) до 3 (готовый путь).",
+  components:"Модули, сервисы или приложения, которые создаются, меняются или удаляются.",
+  contracts:"Изменяемые интерфейсы и форматы; используемый без изменений контракт не включается.",
+  integrations:"Внешние системы, которые используются, меняются или добавляются в рамках задачи.",
+  migrationEntities:"Сохранённые сущности, чьи данные нужно преобразовать.",
+  dataVolumeBand:"Диапазон объёма сохранённых данных, затронутых задачей; UNKNOWN, если неизвестен.",
+  requirementsUncertainty:"Ясность требуемого результата: 0 — правила определены; 1 — открыты локальные детали; 2 — открыт существенный сценарий; 3 — результат требует согласования; null — неизвестно.",
+  solutionUncertainty:"Ясность способа реализации: 0 — способ проверен; 1 — выбран, но не проверен; 2 — открыт ключевой технический вопрос; 3 — способ не определён; null — неизвестно.",
+  diagnosisState:"Состояние установления причины для DEBUG; иначе NOT_APPLICABLE.",
+  unfamiliarTechnologies:"Технологии, чьи контракты требуется изучить; [] — изучение не требуется, null — неизвестно.",
+  scopeChangeRisk:"Риск дополнительной работы за границами задачи: 0 — границы зафиксированы, 1 — локальные уточнения, 2 — существенная дополнительная работа, 3 — несколько открытых внешних зависимостей или исследование; null — неизвестно.",
+  verificationKinds:"Требуемые виды проверок, без повторов.",verificationScenarios:"Независимые сценарии, которые необходимо проверить.",
+  verificationReadiness:"Готовность проверок: READY, ADAPT, CREATE, NONE_REQUIRED или UNKNOWN.",
+  requiredReviewPasses:"Число обязательных независимых ревью; null — неизвестно.",
+  environmentReadiness:"Готовность рабочей среды к началу работы: READY, SETUP_KNOWN, BLOCKED или UNKNOWN. Не тип среды и не цель развёртывания.",
+  accessReadiness:"Доступность необходимых доступов: AVAILABLE, MISSING или UNKNOWN.",
+  deploymentTargets:"Окружения или сервисы, куда требуется развернуть результат; [] — не требуется, null — неизвестно.",
+  execution:"Исполнитель и условия выполнения работы; не цели развёртывания.",
+  evidence:"Основания известных скалярных признаков по полным путям полей.",unknownReasons:"Причины неизвестных признаков по полным путям полей."
+};
+for (const [key, description] of Object.entries(V4_TASK_DESCRIPTIONS)) V4_TASK_SCHEMA.properties[key].description = description;
+const V4_EXECUTION_DESCRIPTIONS = {
+  mode:"Кто выполняет задачу: AI_AGENT, HUMAN, HYBRID или UNKNOWN.",modelId:"Идентификатор модели, если известен; иначе null.",
+  reasoningEffort:"Уровень рассуждения модели, если известен; иначе null.",environmentId:"Место работы исполнителя: local или cloud_workspace; null — неизвестно. Не готовность среды и не цель развёртывания.",
+  plannedParallelAgents:"Планируемое число одновременно работающих агентов; null — неизвестно.",
+  codebaseFamiliarity:"Знакомство с кодом до оценки: NOT_READ, MAPPED, PRIOR_VERIFIED_WORK или UNKNOWN."
+};
+for (const [key, description] of Object.entries(V4_EXECUTION_DESCRIPTIONS)) V4_TASK_SCHEMA.properties.execution.properties[key].description = description;
+
 export function normalizeAgentTask(input) {
   if (new TextEncoder().encode(JSON.stringify(input)).length > V4_TASK_MAX_BYTES) throw appError("VALIDATION_ERROR", "agentTask exceeds 64 KiB UTF-8.");
   validateAssessmentValue(input, V4_TASK_SCHEMA, "agentTask");
@@ -3022,6 +3056,7 @@ const UI_ATLM = String.raw`(()=>{
   const statuses={IDLE:"Ожидание новых планов",QUEUED:"Обучение в очереди",RUNNING:"Модель обучается",RETRY_WAIT:"Ожидание повторной попытки",COLLECTING_DATA:"Накапливаем опыт",REJECTED:"Новая модель не прошла проверку",FAILED:"Не удалось завершить обучение"};
   const style=make("style");style.textContent=".atlm-panel{min-width:0;overflow-wrap:anywhere}.atlm-panel p{margin:9px 0}.atlm-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.atlm-heading h2,.atlm-heading h3{margin:0}.atlm-panel button{min-height:44px;white-space:normal}.atlm-controls{display:flex;gap:8px;flex-wrap:wrap}.atlm-point{font-size:1.35rem;font-weight:700;color:var(--ink)}.atlm-plan-estimate{margin:18px 0;padding:16px;border:1px solid var(--line-strong,var(--line));border-radius:var(--radius,10px);background:var(--paper-3,var(--panel))}.atlm-note{color:var(--ink-2,var(--muted));font-size:.9rem}.atlm-stale{border-left:3px solid var(--amber,var(--amber));padding-left:10px}.atlm-range-text,.atlm-fact{font-variant-numeric:tabular-nums}.atlm-scale{height:14px;position:relative;margin:18px 6px;background:var(--paper-2);border-radius:8px}.atlm-band{position:absolute;height:8px;top:3px;background:var(--amber);border-radius:8px}.atlm-marker,.atlm-fact-marker{position:absolute;top:0;height:14px;border-left:3px solid var(--ink)}.atlm-fact-marker{border-color:var(--blue)}.atlm-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:1px;background:var(--line);border:1px solid var(--line)}.atlm-metric{display:grid;gap:8px;padding:12px;background:var(--paper-2)}.atlm-metric strong{font-variant-numeric:tabular-nums}.atlm-metrics-help{margin:16px 0}.atlm-attempts{margin-top:24px}.atlm-table-wrap{max-width:100%;overflow-x:auto}.atlm-table-wrap table{width:100%;border-collapse:collapse;text-align:left;font-size:.9rem}.atlm-table-wrap th,.atlm-table-wrap td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}.atlm-panel summary{min-height:44px;display:flex;align-items:center;cursor:pointer}.atlm-panel summary::before{content:'▸';margin-right:6px}.atlm-panel details[open]>summary::before{content:'▾'}.atlm-table-wrap:focus-visible{outline:3px solid var(--amber-text);outline-offset:2px}.atlm-features{margin-top:16px}.atlm-features dl{display:grid;grid-template-columns:minmax(8rem,1fr) minmax(0,2fr);gap:6px 12px}.atlm-features dd{margin:0}.atlm-features h4{margin:14px 0 4px}@media(max-width:390px){.atlm-heading{align-items:flex-start}.atlm-controls{width:100%}.atlm-controls button{flex:1 1 100%}}";document.head.append(style);
   style.textContent += "#atlm-model-status{grid-column:1/-1}.atlm-attempts table{min-width:680px}.atlm-attempts th{white-space:nowrap;overflow-wrap:normal}.atlm-cell-label{display:none}@media(max-width:600px){.atlm-attempts .atlm-table-wrap{overflow:visible}.atlm-attempts table,.atlm-attempts tbody{display:block;min-width:0}.atlm-attempts thead{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.atlm-attempts tr{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px;padding:12px 0;border-top:1px solid var(--line)}.atlm-attempts td{display:block;min-width:0;padding:8px 0;border:0;overflow-wrap:anywhere}.atlm-attempts td:first-child,.atlm-attempts td:nth-child(4),.atlm-attempts td:nth-child(5),.atlm-attempts td:last-child{grid-column:1/-1}.atlm-cell-label{display:block;color:var(--muted);font-size:var(--text-sm);margin-bottom:4px}.atlm-attempts summary{min-height:44px}}";
+  style.textContent += ".atlm-feature-hint,.atlm-feature-reason{display:block;color:var(--ink-2,var(--muted));font-size:.85rem;line-height:1.4;margin-top:3px}.atlm-features dl{row-gap:14px}@media(max-width:600px){.atlm-features dl{grid-template-columns:1fr;gap:4px}.atlm-features dd{margin-bottom:12px}}";
   let supported=false,capabilityPending=false,planToken=0,planAbort=null,statusPending=null,pollTimer=null,pollsLeft=0,autoBudget=8,processPending=false,startPending=false,lastProcessFailure=null,latestStatus=null,recoveryAction=null;
   const processed=new Set();
   const statusPanel=make("article",null,"panel atlm-panel");statusPanel.id="atlm-model-status";statusPanel.setAttribute("aria-labelledby","atlm-model-heading");
@@ -3124,12 +3159,57 @@ const UI_ATLM = String.raw`(()=>{
     const details=make("details",null,"atlm-features");details.append(make("summary","Признаки"));
     if(failed){details.append(make("p","Не удалось загрузить признаки.","error"),button("Повторить загрузку признаков",retry));target.append(details);return;}
     if(!task){details.append(make("p","Нужны признаки.","atlm-note"));target.append(details);return;}
-    const groups=[["Работа",["workUnits","doneBoundary","reuseLevel"]],["Изменения",["components","contracts","integrations","migrationEntities","dataVolumeBand"]],
+    const groups=[
+      ["Работа",["workUnits","doneBoundary","reuseLevel"]],
+      ["Изменения",["components","contracts","integrations","migrationEntities","dataVolumeBand"]],
       ["Неопределённость",["requirementsUncertainty","solutionUncertainty","diagnosisState","unfamiliarTechnologies","scopeChangeRisk"]],
-      ["Проверки",["verificationKinds","verificationScenarios","verificationReadiness","requiredReviewPasses"]],["Исполнение",["environmentReadiness","accessReadiness","deploymentTargets","execution"]]];
-    const names={workUnits:"Результаты",doneBoundary:"Граница готовности",reuseLevel:"Основа",components:"Компоненты",contracts:"Контракты",integrations:"Интеграции",migrationEntities:"Миграция",dataVolumeBand:"Объём данных",requirementsUncertainty:"Неопределённость требований",solutionUncertainty:"Неопределённость решения",diagnosisState:"Диагностика",unfamiliarTechnologies:"Неизученные технологии",scopeChangeRisk:"Риск изменения границ",verificationKinds:"Виды проверок",verificationScenarios:"Сценарии",verificationReadiness:"Готовность проверок",requiredReviewPasses:"Независимые ревью",environmentReadiness:"Среда",accessReadiness:"Доступы",deploymentTargets:"Цели развёртывания",execution:"Исполнение"};
-    const display=value=>value===null||value===undefined||value==="UNKNOWN"?"Неизвестно":Array.isArray(value)?(value.length?value.map(item=>typeof item==="object"?(item.description||item.key||item.id||item.kind):item).join(", "):"Нет"):typeof value==="object"?Object.entries(value).map(([key,item])=>key+": "+display(item)).join(", "):String(value);
-    for(const [title,keys] of groups){details.append(make("h4",title));const list=make("dl");for(const key of keys){list.append(make("dt",names[key]),make("dd",display(task[key])));}details.append(list);}target.append(details);
+      ["Проверки",["verificationKinds","verificationScenarios","verificationReadiness","requiredReviewPasses"]],
+      ["Условия работы",["environmentReadiness","accessReadiness","deploymentTargets"]],
+      ["Исполнитель",["execution.mode","execution.modelId","execution.reasoningEffort","execution.environmentId","execution.plannedParallelAgents","execution.codebaseFamiliarity"]]
+    ];
+    const fields={
+      workUnits:["Результаты","Что должно быть получено в результате задачи."],doneBoundary:["Граница готовности","До какого состояния нужно довести результат."],reuseLevel:["Готовая основа","Насколько существующее решение подходит для задачи."],
+      components:["Компоненты","Какие модули, сервисы или приложения меняются."],contracts:["Контракты","Какие интерфейсы и форматы меняются."],integrations:["Интеграции","Какие внешние системы используются или меняются."],migrationEntities:["Миграция данных","Какие сохранённые сущности нужно преобразовать."],dataVolumeBand:["Объём данных","Сколько сохранённых записей затрагивает задача."],
+      requirementsUncertainty:["Ясность требований","Насколько понятно, какой результат нужен."],solutionUncertainty:["Ясность решения","Насколько понятно, как получить результат."],diagnosisState:["Причина проблемы","Насколько установлена причина, если задача включает диагностику."],unfamiliarTechnologies:["Технологии для изучения","Технологии, чьи контракты нужно изучить для задачи."],scopeChangeRisk:["Риск расширения задачи","Насколько вероятно, что понадобится работа за текущими границами."],
+      verificationKinds:["Виды проверок","Какие виды проверок нужны."],verificationScenarios:["Сценарии проверок","Что именно нужно проверить."],verificationReadiness:["Готовность проверок","Можно ли использовать существующие проверки."],requiredReviewPasses:["Независимые ревью","Сколько независимых ревью обязательно."],
+      environmentReadiness:["Готовность рабочей среды","Можно ли начать работу или среду нужно подготовить."],accessReadiness:["Доступы","Есть ли необходимые доступы."],deploymentTargets:["Развёртывание","Куда нужно развернуть результат по условиям задачи."],
+      "execution.mode":["Кто выполняет","Человек, ИИ-агент или они вместе."],"execution.modelId":["Модель","Модель ИИ-агента, если известна."],"execution.reasoningEffort":["Уровень рассуждения","Заданный уровень рассуждения модели, если известен."],"execution.environmentId":["Среда выполнения","Где работает исполнитель: локально или в облаке."],"execution.plannedParallelAgents":["Параллельные агенты","Сколько агентов планируется использовать одновременно."],"execution.codebaseFamiliarity":["Знакомство с кодом","Что исполнитель успел изучить до оценки."]
+    };
+    const values={
+      doneBoundary:{ANALYSIS:"Анализ завершён",LOCAL_VERIFIED:"Проверено локально",LOCAL_STAGED:"Проверено локально и подготовлено в индексе Git",PUBLISHED:"Опубликовано",DEPLOYED_VERIFIED:"Развёрнуто и проверено"},
+      reuseLevel:{0:"Основы нет",1:"Есть отдельные части",2:"Рабочее решение нужно изменить",3:"Достаточно выполнить готовое решение"},
+      requirementsUncertainty:{0:"Требования определены",1:"Открыты отдельные детали",2:"Открыт существенный сценарий",3:"Результат требует согласования"},solutionUncertainty:{0:"Способ проверен",1:"Способ выбран, но не проверен",2:"Открыт ключевой технический вопрос",3:"Способ не определён"},
+      diagnosisState:{NOT_APPLICABLE:"Диагностика не требуется",PROVEN:"Причина подтверждена",HYPOTHESIS:"Есть гипотеза"},scopeChangeRisk:{0:"Границы зафиксированы",1:"Возможны локальные уточнения",2:"Возможны дополнительные существенные работы",3:"Есть несколько открытых внешних зависимостей или требуется исследование"},
+      dataVolumeBand:{NONE:"Сохранённые данные не затрагиваются",LE_1K:"До 1 000 записей включительно",LE_100K:"До 100 000 записей включительно",LE_10M:"До 10 млн записей включительно",GT_10M:"Более 10 млн записей"},
+      verificationKinds:{BUILD_STATIC:"Сборка и статическая проверка",UNIT:"Модульные",INTEGRATION:"Интеграционные",UI_E2E:"Сквозные проверки интерфейса",DEPLOY_SMOKE:"Проверка после развёртывания"},
+      verificationReadiness:{READY:"Готовы",ADAPT:"Нужно доработать",CREATE:"Нужно создать",NONE_REQUIRED:"Не требуются"},environmentReadiness:{READY:"Готова",SETUP_KNOWN:"Нужна известная настройка",BLOCKED:"Работа в среде заблокирована"},accessReadiness:{AVAILABLE:"Есть",MISSING:"Нет необходимых доступов"},
+      "execution.mode":{AI_AGENT:"ИИ-агент",HUMAN:"Человек",HYBRID:"Человек и ИИ-агент"},"execution.environmentId":{local:"Локальная",cloud_workspace:"Облачная рабочая среда"},"execution.codebaseFamiliarity":{NOT_READ:"Код не изучен",MAPPED:"Структура кода изучена",PRIOR_VERIFIED_WORK:"Есть ранее проверенная работа с кодом"}
+    };
+    const empty={components:"Изменений компонентов нет",contracts:"Изменений контрактов нет",integrations:"Интеграции не требуются",migrationEntities:"Миграция не требуется",unfamiliarTechnologies:"Технологий для изучения нет",verificationKinds:"Проверки не требуются",verificationScenarios:"Сценариев нет",deploymentTargets:"Развёртывание не требуется"};
+    const read=path=>path.split(".").reduce((value,key)=>value?.[key],task);
+    const changes={CREATE:"создать",MODIFY:"изменить",REMOVE:"удалить",ADD:"добавить",COMPATIBLE:"совместимое изменение",BREAKING:"несовместимое изменение",USE:"использовать",CHANGE:"изменить"};
+    function itemText(path,item){
+      const label=item.description||item.key||item.id||item.kind;
+      if(["components","contracts","integrations"].includes(path)&&item.change)return label+" — "+(changes[item.change]||item.change);
+      return label;
+    }
+    function display(path,value){
+      if(value===null||value===undefined||value==="UNKNOWN")return "Неизвестно";
+      if(Array.isArray(value))return value.length?value.map(item=>typeof item==="object"?itemText(path,item):(values[path]?.[item]||item)).join(", "):(empty[path]||"Нет");
+      return values[path]?.[value]||String(value);
+    }
+    for(const [title,keys] of groups){
+      details.append(make("h4",title));const list=make("dl");
+      for(const key of keys){
+        const [name,hint]=fields[key],term=make("dt"),description=make("dd"),value=read(key);
+        term.append(make("span",name),make("small",hint,"atlm-feature-hint"));description.append(make("span",display(key,value)));
+        const reason=task.unknownReasons?.[key];
+        if((value===null||value===undefined||value==="UNKNOWN")&&typeof reason==="string"&&reason.trim())description.append(make("small",reason,"atlm-feature-reason"));
+        list.append(term,description);
+      }
+      details.append(list);
+    }
+    target.append(details);
   }
   function appendQuality(target,model){
     const evaluation=model.evaluation,n=model.sampleCount,k=evaluation?.pointCaseCount;

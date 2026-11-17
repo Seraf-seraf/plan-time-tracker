@@ -24,6 +24,12 @@ test('MCP discovery matches the instructions',async()=>{
    assert(JSON.stringify(capability).includes(name));const tool=listing.find(t=>t.name===name);assert(tool,name);assert.equal(tool.inputSchema.additionalProperties,false);assert.equal(tool.annotations.readOnlyHint,name!=='ContinueTraining');
   }
   const schema=listing.find(t=>t.name==='EstimatePlanTime').inputSchema;assert.deepEqual([...schema.required].sort(),['agentTask','expectedRequirementsDigest','planId']);
+  const props=schema.properties.agentTask.properties;
+  assert.match(props.environmentReadiness.description,/Не тип среды/);
+  assert.match(props.deploymentTargets.description,/развернуть результат/);
+  assert.match(props.unfamiliarTechnologies.description,/null — неизвестно/);
+  assert.match(props.scopeChangeRisk.description,/1 — локальные уточнения/);
+  assert.match(props.execution.properties.environmentId.description,/Место работы исполнителя/);
  }finally{c.close();}
 });
 
