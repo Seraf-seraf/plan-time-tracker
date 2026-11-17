@@ -1,0 +1,19 @@
+[Unit]
+Description=Plan Time Tracker SQLite
+After=network.target
+
+[Service]
+User=plan-time-tracker
+Group=plan-time-tracker
+StateDirectory=plan-time-tracker
+UMask=0077
+EnvironmentFile=/etc/plan-time-tracker/db.env
+ExecStart=/usr/bin/python3 /opt/plan-time-tracker/server.py
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

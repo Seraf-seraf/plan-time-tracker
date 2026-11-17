@@ -27,5 +27,8 @@ if (process.argv.includes('--write')) {
   const source = await readFile(resolve(root, 'worker/index.js'), 'utf8');
   const importLine = 'import { UI_FONT_CSS } from "./fonts.js";';
   if (!source.includes(importLine)) throw new Error('Font import missing from Worker');
-  await writeFile(resolve(root, 'dist/server/index.js'), source.replace(importLine, generated.replace('export const', 'const')));
+  const dbImport = 'import { configuredDatabase } from "../tracker-db/index.js";';
+  const dbModule = (await readFile(resolve(root, 'tracker-db/index.js'), 'utf8')).replace('export function configuredDatabase', 'function configuredDatabase');
+  if (!source.includes(dbImport)) throw new Error('Database configuration import missing');
+  await writeFile(resolve(root, 'dist/server/index.js'), source.replace(importLine, () => generated.replace('export const', 'const')).replace(dbImport, () => dbModule));
 }

@@ -1,3 +1,4 @@
+import { configuredDatabase } from "../tracker-db/index.js";
 import { UI_FONT_CSS } from "./fonts.js";
 
 const TRACKER_VERSION = "0.8.0";
@@ -4680,6 +4681,7 @@ function mcpTools() {
 function unexpectedMcpErrorReason(error) {
   for (let current = error, depth = 0; current && depth < 3; current = current.cause, depth++) {
     const message = typeof current.message === "string" ? current.message : "";
+    if (current.name === "TimeoutError") return "DB_REQUEST_TIMEOUT";
     if (message.includes("too many terms in compound SELECT")) return "D1_COMPOUND_SELECT_LIMIT";
     if (message.includes("D1 DB is overloaded.")) return "D1_RESOURCE_LIMIT";
   }
@@ -4757,6 +4759,7 @@ export function createWorker(clock) {
       const url = new URL(request.url);
       try {
         const now = getNow();
+        env = { ...env, DB: configuredDatabase(env) };
         if (url.pathname === "/mcp") return await mcpRoute(request, env, now, ctx, getNow);
         if (url.pathname.startsWith("/api/")) {
           const response=await apiRoute(request,env,url,"ui",now,getNow,ctx);
