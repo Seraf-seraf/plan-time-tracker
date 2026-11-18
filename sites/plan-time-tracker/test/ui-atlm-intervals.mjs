@@ -11,6 +11,15 @@ for(let i=0;i<2;i++){const p=await plannedAtlm(c,crypto.randomUUID());await comp
 await mcp(c,'ContinueTraining');
 const mixed=taskV4();mixed.systemBoundaries=goldenBoundary(goldenCases[0]);delete mixed.evidence.systemBoundaries;
 const target=await plannedAtlm(c,crypto.randomUUID(),mixed);await completeAtlm(c,target,80000);c.advance(1);await mcp(c,'ContinueTraining');
+// History fixtures cover the failure details alongside the successful model above.
+const insertAttempt = c.db.sqlite.prepare(`INSERT INTO estimation_training_attempts
+  (owner_id,attempt_id,started_at,completed_at,method_version,feature_version,dataset_revision,
+    manifest_json,reason,diagnostics_json) VALUES(?,?,?,?,?,?,?,?,?,?)`);
+insertAttempt.run(OWNER, 'fixture-budget', c.now(), c.now() + 20400, 'agent-v5-operations',
+  'agent-task-v4', 42, '[1,2]', 'TRAINING_TIME_BUDGET', JSON.stringify({
+    code: 'TRAINING_TIME_BUDGET',
+    parameters: {phase:'FIT',completedCases:2,stalledPasses:3,passElapsedMs:9001},
+  }));
 const dir=resolve(process.env.UI_ACCEPTANCE_ARTIFACT_DIR||'/tmp/tracker-atlm-v4/ui');mkdirSync(dir,{recursive:true});
 const browser=await chromium.launch({executablePath:process.env.CHROMIUM_EXECUTABLE||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
 const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];let datasetOverride=null,historyFailure=false,datasetFailure=false,taskFailure=false,planFailure=false,planReads=0;page.on('pageerror',e=>errors.push(e.message));
@@ -54,8 +63,20 @@ try{
   else assert.ok(layout.headLines.every(lines=>lines<=1),`table headings must remain on one line at ${width}`);
   await page.screenshot({path:resolve(dir,'attempts-'+width+'.png'),fullPage:true});
  }
- await page.locator('.atlm-attempts summary').first().focus();await page.keyboard.press('Enter');
- assert.equal(await page.locator('.atlm-attempts details').first().evaluate(node=>node.open),true);
+ const attempts = page.locator('.atlm-attempts');
+ const timeout = attempts.getByRole('row').filter({hasText:'Таймаут'});
+ assert.match(await timeout.innerText(),/20,4 с/);
+ assert.match(await attempts.innerText(),/Модель обучена/);
+ await timeout.locator('summary').focus();
+ await page.keyboard.press('Enter');
+ assert.equal(await timeout.locator('details').evaluate(node=>node.open),true);
+ assert.match(await timeout.innerText(),/Расчёт моделей/);
+ assert.match(await timeout.innerText(),/Проходов без прогресса\s+3/);
+ for (const width of [1440, 390]) {
+   await page.setViewportSize({width,height:1000});
+   await attempts.screenshot({path:resolve(dir,'attempts-detail-'+width+'.png')});
+ }
+ await page.setViewportSize({width:1440,height:1000});
 
  historyFailure=true;await page.locator('[data-view="settings"]').click();await page.getByRole('button',{name:'Повторить загрузку истории'}).waitFor();historyFailure=false;await page.getByRole('button',{name:'Повторить загрузку истории'}).click();await page.locator('.atlm-attempts table').waitFor();
  await page.locator('[data-view="analytics"]').click();await page.locator('.atlm-analytics table').waitFor();const analytics=await page.locator('.atlm-analytics').innerText();assert.match(analytics,/Попадания в диапазон/);assert.match(analytics,/Прогноз/);assert.match(analytics,/Факт/);

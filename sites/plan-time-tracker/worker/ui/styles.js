@@ -10,6 +10,40 @@ button,input,textarea,select{font-family:var(--font-body)}button{background:var(
 .tracker-section{border-color:var(--line)}.tracker-list{gap:0}.tracker-card{background:var(--paper-2);border:0;border-top:1px solid var(--line);border-radius:0;padding:16px 0}.tracker-card:last-child{border-bottom:1px solid var(--line)}.tracker-card-toggle{min-height:42px}.tracker-card-toggle:hover:not(:disabled){background:transparent;color:var(--amber)}.tracker-meta,.tracker-card-status{color:var(--muted)}.tracker-marker{border-radius:4px;background:var(--paper-3);font-weight:500}.tracker-marker.GAP,.tracker-marker.LATE,.tracker-marker.STALE_EXECUTOR{background:var(--amber-soft);color:var(--amber-text)}.tracker-marker.CORRECTION{background:var(--blue-soft);color:var(--blue)}
 .period-filter,.period-filter .toolbar,.period-filter .metrics,.period-filter .metric{min-width:0;max-width:100%}.period-filter .metric{overflow-wrap:anywhere}.period-filter .toolbar>button{min-width:0;max-width:100%;overflow-wrap:anywhere}
 @media(max-width:720px){.shell{padding:24px 16px 60px}.grid{grid-template-columns:minmax(0,1fr)}.panel{padding:18px}.top{align-items:start}#who{text-align:left}}@media(max-width:600px){.tracker-card-toggle{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px}.tracker-card-toggle>strong{grid-column:1;grid-row:1}.tracker-card-toggle>.tracker-card-status{grid-column:1;grid-row:2}.tracker-card-toggle>span:last-child{grid-column:2;grid-row:1}.nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible}.nav button{padding:12px;text-align:center}.tracker-card{padding:14px 0}.modalbox{padding:18px}.metrics,#view-overview .grid .metrics{grid-template-columns:1fr}.row{padding:14px 0}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:0s!important;animation-duration:0s!important;animation-iteration-count:1!important}}
+/* Hallmark · component: training history · genre: modern-minimal · theme: Console Paper · v2.0.0 */
+/* Critique: the result leads each row, while timestamps and calculation details remain easy to compare. */
+.atlm-attempts .atlm-history{min-width:610px;line-height:1.4}
+.atlm-attempts .atlm-history th,.atlm-attempts .atlm-history td{padding:12px}
+.atlm-history th{background:var(--paper-3);color:var(--ink-2);font-weight:500;white-space:nowrap}
+.atlm-history tbody tr:nth-child(even){background:var(--paper)}
+.atlm-history .atlm-attempt-date,.atlm-history .atlm-attempt-count{font-variant-numeric:tabular-nums}
+.atlm-history time{white-space:nowrap;font-weight:500}
+.atlm-history .atlm-attempt-count,.atlm-history th:nth-child(3){text-align:right}
+.atlm-attempt-duration{display:block;margin-top:4px;color:var(--muted);font-size:.8rem}
+.atlm-attempt-outcome{display:block;font-weight:600}
+.atlm-history tr[data-outcome="success"] .atlm-attempt-outcome{color:var(--blue)}
+.atlm-history tr[data-outcome="error"] .atlm-attempt-outcome{color:var(--red)}
+.atlm-history tr[data-outcome="pending"] .atlm-attempt-outcome{color:var(--amber-text)}
+.atlm-attempt-reason{color:var(--ink-2)}
+.atlm-attempt-details{margin-top:4px}
+.atlm-attempt-details summary{width:fit-content;color:var(--ink-2);text-decoration:underline;text-decoration-color:var(--line-strong);text-underline-offset:3px}
+.atlm-attempt-details summary:hover,.atlm-attempt-details summary:active{color:var(--ink);text-decoration-color:var(--amber)}
+.atlm-attempt-details dl{margin:8px 0 0;display:grid;grid-template-columns:minmax(0,auto) minmax(0,1fr);gap:4px 12px;font-size:.83rem}
+.atlm-attempt-details dd{margin:0;color:var(--muted)}
+.atlm-attempts .atlm-cell-label{display:none}
+.atlm-history-wrap+button{margin-top:12px}
+@media(max-width:720px){
+  .atlm-attempts .atlm-history-wrap{overflow:visible}
+  .atlm-attempts .atlm-history,.atlm-history tbody{display:block;min-width:0}
+  .atlm-history thead{position:absolute;width:1px;height:1px;overflow:clip;clip-path:inset(50%);white-space:nowrap}
+  .atlm-history tbody tr{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 16px;padding:12px;border-top:1px solid var(--line)}
+  .atlm-history tbody tr:last-child{border-bottom:1px solid var(--line)}
+  .atlm-attempts .atlm-history td{display:block;min-width:0;padding:0;border:0;text-align:left}
+  .atlm-history .atlm-attempt-reason{grid-column:1/-1}
+  .atlm-history time{white-space:normal}
+  .atlm-attempts .atlm-cell-label{display:block;margin-bottom:4px;color:var(--muted);font-size:.8rem}
+}
+
 `;
 
 export const UI_TYPOGRAPHY_CSS = String.raw`

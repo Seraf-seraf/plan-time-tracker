@@ -9,7 +9,7 @@ export const UI_ATLM = String.raw`(()=>{
     MISSING_FEATURES:"До первого запуска не сохранены исходные признаки.",INVALID_FEATURES:"Исходные признаки не соответствуют схеме.",PLAN_DELETED:"План удалён.",PLAN_NOT_COMPLETED:"План ещё не завершён.",RESULT_NOT_VERIFIED:"Результат и обязательные проверки не подтверждены.",SCOPE_CHANGED:"После начала изменился объём задачи.",INCOMPLETE_MEASUREMENT:"Нет полного подтверждённого измерения активного времени."};
   const statuses={IDLE:"Ожидание новых планов",QUEUED:"Обучение в очереди",RUNNING:"Модель обучается",RETRY_WAIT:"Ожидание повторной попытки",COLLECTING_DATA:"Накапливаем опыт",REJECTED:"Новая модель не прошла проверку",FAILED:"Не удалось завершить обучение"};
   const style=make("style");style.textContent=".atlm-panel{min-width:0;overflow-wrap:anywhere}.atlm-panel p{margin:9px 0}.atlm-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.atlm-heading h2,.atlm-heading h3{margin:0}.atlm-panel button{min-height:44px;white-space:normal}.atlm-controls{display:flex;gap:8px;flex-wrap:wrap}.atlm-point{font-size:1.35rem;font-weight:700;color:var(--ink)}.atlm-plan-estimate{margin:18px 0;padding:16px;border:1px solid var(--line-strong,var(--line));border-radius:var(--radius,10px);background:var(--paper-3,var(--panel))}.atlm-note{color:var(--ink-2,var(--muted));font-size:.9rem}.atlm-stale{border-left:3px solid var(--amber,var(--amber));padding-left:10px}.atlm-range-text,.atlm-fact{font-variant-numeric:tabular-nums}.atlm-scale{height:14px;position:relative;margin:18px 6px;background:var(--paper-2);border-radius:8px}.atlm-band{position:absolute;height:8px;top:3px;background:var(--amber);border-radius:8px}.atlm-marker,.atlm-fact-marker{position:absolute;top:0;height:14px;border-left:3px solid var(--ink)}.atlm-fact-marker{border-color:var(--blue)}.atlm-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:1px;background:var(--line);border:1px solid var(--line)}.atlm-metric{display:grid;gap:8px;padding:12px;background:var(--paper-2)}.atlm-metric strong{font-variant-numeric:tabular-nums}.atlm-metrics-help{margin:16px 0}.atlm-attempts{margin-top:24px}.atlm-table-wrap{max-width:100%;overflow-x:auto}.atlm-table-wrap table{width:100%;border-collapse:collapse;text-align:left;font-size:.9rem}.atlm-table-wrap th,.atlm-table-wrap td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}.atlm-panel summary{min-height:44px;display:flex;align-items:center;cursor:pointer}.atlm-panel summary::before{content:'▸';margin-right:6px}.atlm-panel details[open]>summary::before{content:'▾'}.atlm-table-wrap:focus-visible{outline:3px solid var(--amber-text);outline-offset:2px}.atlm-features{margin-top:16px}.atlm-features dl{display:grid;grid-template-columns:minmax(8rem,1fr) minmax(0,2fr);gap:6px 12px}.atlm-features dd{margin:0}.atlm-features h4{margin:14px 0 4px}@media(max-width:390px){.atlm-heading{align-items:flex-start}.atlm-controls{width:100%}.atlm-controls button{flex:1 1 100%}}";document.head.append(style);
-  style.textContent += "#atlm-model-status{grid-column:1/-1}.atlm-attempts table{min-width:680px}.atlm-attempts th{white-space:nowrap;overflow-wrap:normal}.atlm-cell-label{display:none}@media(max-width:600px){.atlm-attempts .atlm-table-wrap{overflow:visible}.atlm-attempts table,.atlm-attempts tbody{display:block;min-width:0}.atlm-attempts thead{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.atlm-attempts tr{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px;padding:12px 0;border-top:1px solid var(--line)}.atlm-attempts td{display:block;min-width:0;padding:8px 0;border:0;overflow-wrap:anywhere}.atlm-attempts td:first-child,.atlm-attempts td:nth-child(4),.atlm-attempts td:nth-child(5),.atlm-attempts td:last-child{grid-column:1/-1}.atlm-cell-label{display:block;color:var(--muted);font-size:var(--text-sm);margin-bottom:4px}.atlm-attempts summary{min-height:44px}}";
+  style.textContent += "#atlm-model-status{grid-column:1/-1}";
   style.textContent += ".atlm-feature-hint,.atlm-feature-reason{display:block;color:var(--ink-2,var(--muted));font-size:.85rem;line-height:1.4;margin-top:3px}.atlm-features dl{row-gap:14px}@media(max-width:600px){.atlm-features dl{grid-template-columns:1fr;gap:4px}.atlm-features dd{margin-bottom:12px}}";
   let supported=false,capabilityPending=false,planToken=0,planAbort=null,statusPending=null,pollTimer=null,pollsLeft=0,autoBudget=8,processPending=false,startPending=false,lastProcessFailure=null,latestStatus=null,recoveryAction=null;
   const processed=new Set();
@@ -31,25 +31,127 @@ export const UI_ATLM = String.raw`(()=>{
       if(!Array.isArray(page.rows))throw new Error("Неполная история обучения.");
       attemptsRows.push(...page.rows);attemptsCursor=page.nextCursor;attemptsBody.replaceChildren();
       if(!attemptsRows.length){attemptsBody.append(make("p","Попыток обучения пока нет.","atlm-note"));return;}
-      const wrap=make("div",null,"atlm-table-wrap"),table=make("table"),head=make("thead"),headRow=make("tr");
-      wrap.setAttribute("tabindex","0");wrap.setAttribute("role","region");wrap.setAttribute("aria-label","Таблица попыток обучения");
-      const columns=["Дата","Примеры","Точка","Интервал","Результат","Причина"];
-      table.setAttribute("role","table");head.setAttribute("role","rowgroup");headRow.setAttribute("role","row");
-      for(const label of columns){const th=make("th",label);th.scope="col";th.setAttribute("role","columnheader");headRow.append(th);}head.append(headRow);table.append(head);
-      const tbody=make("tbody");tbody.setAttribute("role","rowgroup");for(const item of attemptsRows.slice().reverse()){
-        const row=make("tr"),date=Number.isSafeInteger(item.startedAt)?new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short",timeZone:document.querySelector("#tz")?.value||"UTC"}).format(new Date(item.startedAt)):"—";
-        const reason=item.reason?reasonText(item.reason):(item.completedAt===null?"Выполняется":"Модель обучена");
-        const outcome=item.completedAt===null?"В работе":!item.reason?"Завершено":item.reason.startsWith("INSUFFICIENT_")?"Недостаточно данных":
-          ["LEASE_EXPIRED","TRAINING_EXECUTION_FAILED","SOURCE_UNAVAILABLE","INVALID_ESTIMATION_SOURCE","TRAINING_TIME_BUDGET","DATASET_LIMIT_REACHED"].includes(item.reason)?"Обучение не завершилось":"Кандидат не заменил модель";
-        row.setAttribute("role","row");
-        const cellFor=index=>{const cell=make("td"),label=make("span",columns[index],"atlm-cell-label");label.setAttribute("aria-hidden","true");cell.setAttribute("role","cell");cell.append(label);return cell;};
-        for(const [index,text] of [date,Array.isArray(item.manifest)?String(item.manifest.length):"—",item.selected?.point?.selectedEngine??"—",item.selected?.interval?.selectedEngine??"—",outcome].entries()){const cell=cellFor(index);cell.append(document.createTextNode(text));row.append(cell);}
-        const cell=cellFor(5),details=make("details");details.append(make("summary",reason));
-        for(const [name,value] of Object.entries(item.diagnostics?.candidates||{}))details.append(make("p",name+": "+(value.status||"—")+(value.reason?", "+reasonText(value.reason):""),"atlm-note"));
-        cell.append(details);row.append(cell);tbody.append(row);
-      }table.append(tbody);wrap.append(table);attemptsBody.append(wrap);
+      attemptsBody.append(renderAttempts(attemptsRows));
       if(attemptsCursor)attemptsBody.append(button("Показать ещё",()=>loadAttempts(true)));
     }catch(error){if(token!==attemptsToken)return;attemptsBody.replaceChildren(make("p","Не удалось загрузить историю. "+error.message,"error"),button("Повторить загрузку истории",()=>loadAttempts()));}
+  }
+  const trainingColumns = ["Дата", "Результат", "Примеры", "Точка", "Интервал", "Причина"];
+  const trainingEngines = {
+    OLS: "OLS", RIDGE: "Ridge", BAYESIAN: "Байесовская",
+    BAYESIAN_PREDICTIVE: "Байесовский", BAYES_QUANTILE: "Квантильный"
+  };
+  const trainingPhases = {EVALUATE: "Проверка на истории", FIT: "Расчёт моделей", CALIBRATION: "Калибровка интервала"};
+  const trainingFailures = new Set([
+    "LEASE_EXPIRED", "TRAINING_EXECUTION_FAILED", "SOURCE_UNAVAILABLE",
+    "INVALID_ESTIMATION_SOURCE", "TRAINING_TIME_BUDGET", "DATASET_LIMIT_REACHED"
+  ]);
+  function attemptOutcome(item) {
+    if (item.completedAt === null) return {tone: "pending", label: "В работе"};
+    if (!item.reason) return {tone: "success", label: "Модель обучена"};
+    if (item.reason === "TRAINING_TIME_BUDGET") return {tone: "error", label: "Таймаут"};
+    if (trainingFailures.has(item.reason)) return {tone: "error", label: "Прервано"};
+    if (item.reason.startsWith("INSUFFICIENT_")) return {tone: "neutral", label: "Недостаточно данных"};
+    return {tone: "neutral", label: "Кандидат отклонён"};
+  }
+  function candidateSummary(candidate) {
+    if (candidate.status === "AVAILABLE") return "Доступен";
+    if (candidate.reason === "INSUFFICIENT_DATA" && candidate.p > candidate.sampleCount) {
+      return "Примеров: " + candidate.sampleCount + ", коэффициентов: " + candidate.p;
+    }
+    return candidate.reason ? reasonText(candidate.reason) : "Недоступен";
+  }
+  function renderAttempts(attempts) {
+    const wrap = make("div", null, "atlm-table-wrap atlm-history-wrap");
+    wrap.tabIndex = 0;
+    wrap.setAttribute("role", "region");
+    wrap.setAttribute("aria-label", "Таблица попыток обучения");
+    const table = make("table", null, "atlm-history");
+    table.setAttribute("role", "table");
+    const head = make("thead"), headRow = make("tr"), body = make("tbody");
+    head.setAttribute("role", "rowgroup");
+    headRow.setAttribute("role", "row");
+    body.setAttribute("role", "rowgroup");
+    for (const label of trainingColumns) {
+      const th = make("th", label);
+      th.scope = "col";
+      th.setAttribute("role", "columnheader");
+      headRow.append(th);
+    }
+    head.append(headRow);
+    table.append(head, body);
+    const timeZone = document.querySelector("#tz")?.value || "UTC";
+    const timestamp = new Intl.DateTimeFormat("ru-RU", {dateStyle: "short", timeStyle: "short", timeZone});
+    const seconds = new Intl.NumberFormat("ru-RU", {maximumFractionDigits: 1});
+    for (const item of attempts.slice().reverse()) {
+      const outcome = attemptOutcome(item);
+      const row = make("tr");
+      row.dataset.outcome = outcome.tone;
+      row.setAttribute("role", "row");
+      const appendCell = (index, content, className) => {
+        const cell = make("td", null, className);
+        const label = make("span", trainingColumns[index], "atlm-cell-label");
+        label.setAttribute("aria-hidden", "true");
+        cell.setAttribute("role", "cell");
+        cell.append(label, content);
+        row.append(cell);
+      };
+      const date = make("time", "Неизвестно");
+      if (Number.isSafeInteger(item.startedAt)) {
+        const start = new Date(item.startedAt);
+        date.dateTime = start.toISOString();
+        date.textContent = timestamp.format(start);
+      }
+      const time = make("div");
+      time.append(date);
+      if (Number.isSafeInteger(item.startedAt) && Number.isSafeInteger(item.completedAt) && item.completedAt >= item.startedAt) {
+        time.append(make("span", seconds.format((item.completedAt - item.startedAt) / 1000) + " с", "atlm-attempt-duration"));
+      }
+      appendCell(0, time, "atlm-attempt-date");
+      appendCell(1, make("strong", outcome.label, "atlm-attempt-outcome"), "atlm-attempt-status");
+      appendCell(2, make("span", Array.isArray(item.manifest) ? String(item.manifest.length) : "Неизвестно"), "atlm-attempt-count");
+      const point = item.selected?.point?.selectedEngine;
+      const interval = item.selected?.interval?.selectedEngine;
+      appendCell(3, make("span", trainingEngines[point] ?? point ?? "Нет"), "atlm-attempt-point");
+      appendCell(4, make("span", trainingEngines[interval] ?? interval ?? "Нет"), "atlm-attempt-interval");
+
+      const reason = make("div");
+      if (item.reason) {
+        const explanation = item.reason === "TRAINING_TIME_BUDGET"
+          ? "Исчерпан бюджет времени прохода."
+          : reasonText(item.reason);
+        reason.append(make("span", explanation));
+      }
+      const candidates = Object.entries(item.diagnostics?.candidates || {});
+      const diagnostic = item.diagnostics?.parameters;
+      const phase = trainingPhases[diagnostic?.phase];
+      if (phase || candidates.length) {
+        const details = make("details", null, "atlm-attempt-details");
+        details.append(make("summary", "Подробности"));
+        const facts = make("dl");
+        const addFact = (label, value) => facts.append(make("dt", label), make("dd", value));
+        if (phase) {
+          addFact("Этап", phase);
+          if (Number.isSafeInteger(diagnostic.completedCases))
+            addFact("Обработано примеров", String(diagnostic.completedCases));
+          if (Number.isSafeInteger(diagnostic.stalledPasses))
+            addFact("Проходов без прогресса", String(diagnostic.stalledPasses));
+          if (Number.isFinite(diagnostic.passElapsedMs))
+            addFact("Последний проход", seconds.format(diagnostic.passElapsedMs / 1000) + " с");
+        }
+        for (const [name, candidate] of candidates) {
+          const engine = name.toUpperCase();
+          addFact(trainingEngines[engine] ?? engine, candidateSummary(candidate));
+        }
+        details.append(facts);
+        reason.append(details);
+      } else if (!item.reason) {
+        reason.append(make("span", "Нет", "atlm-note"));
+      }
+      appendCell(5, reason, "atlm-attempt-reason");
+      body.append(row);
+    }
+    wrap.append(table);
+    return wrap;
   }
   function updateControls(){
     startTraining.disabled=startPending||processPending||statusPending!==null;
