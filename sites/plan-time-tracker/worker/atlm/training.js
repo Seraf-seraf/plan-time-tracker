@@ -34,6 +34,8 @@ const ATLM_RETRAIN_EVERY_NEW_PLANS = 2;
 const ATLM_TRAINING_LEASE_MS = 60000;
 
 const ATLM_TRAINING_BUDGET_MS = 10000;
+const ATLM_TRAINING_CHECKPOINT_RESERVE_MS = 1000;
+const ATLM_TRAINING_MAX_STALLED_PASSES = 3;
 
 const ATLM_TRAINING_LIMIT = 5000;
 
@@ -102,6 +104,10 @@ function atlmDiagnostics(code, facts = {}) {
     'limit',
     'status',
     'firstStartedAt',
+    'phase',
+    'completedCases',
+    'stalledPasses',
+    'passElapsedMs',
   ])
     if (
       facts[key] !== undefined &&
@@ -143,7 +149,8 @@ function atlmDiagnostics(code, facts = {}) {
       'Не удаётся независимо оценить коэффициенты: признаки в обучающей выборке линейно зависимы.',
     MODEL_CAPACITY_LIMIT: 'Число коэффициентов превышает ресурсный предел модели.',
     MODEL_RESOURCE_LIMIT: 'Расчёт модели превышает установленный предел вычислений.',
-    TRAINING_TIME_BUDGET: 'Не удалось начать расчёт в пределах времени фоновой задачи.',
+    TRAINING_TIME_BUDGET:
+      'Обучение остановилось после нескольких проходов без прогресса в пределах бюджета времени.',
     DATASET_LIMIT_REACHED: 'Число обучающих примеров превышает допустимый предел.',
     UNSUPPORTED_FORECAST_SCOPE:
       'Новый расчёт доступен только до первого запуска плана. Показана исходная сохранённая оценка.',
@@ -1173,8 +1180,10 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
     typeof options.clock === 'function'
       ? options.clock
       : () => nowMs + Math.max(0, Math.floor(wallClock() - started));
-  const budget = () => wallClock() - started < ATLM_TRAINING_BUDGET_MS;
-  const fitBudget = () => wallClock() - started < 2000;
+  const elapsed = () => Math.max(0, Math.floor(wallClock() - started));
+  const budget = () => elapsed() < ATLM_TRAINING_BUDGET_MS;
+  const canStartWork = () =>
+    elapsed() < ATLM_TRAINING_BUDGET_MS - ATLM_TRAINING_CHECKPOINT_RESERVE_MS;
   await db
     .prepare(
       'INSERT OR IGNORE INTO estimation_owner_state(owner_id) SELECT owner_id FROM owners WHERE owner_id=?',
@@ -1264,6 +1273,7 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
       let snapshot = atlmTrainingJson(job.snapshot_json),
         checkpoint = await readAtlmCheckpoint(db, ownerId, job),
         rows;
+      const initialRevision = checkpoint?.progressRevision ?? 0;
       if (
         !snapshot ||
         snapshot.methodVersion !== ATLM_METHOD.version ||
@@ -1333,6 +1343,39 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
         );
         continue;
       }
+      async function deferTraining(phase, evaluation = null) {
+        const previous = checkpoint.stall;
+        const stalled = checkpoint.progressRevision === initialRevision;
+        const previousPasses = previous?.phase === phase ? previous.passes : 0;
+        const stalledPasses = stalled ? previousPasses + 1 : 0;
+        checkpoint.stall = { phase, passes: stalledPasses };
+        if (stalledPasses < ATLM_TRAINING_MAX_STALLED_PASSES) {
+          await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true });
+          return;
+        }
+        await atlmFinalizeTraining(
+          db,
+          ownerId,
+          job,
+          snapshot,
+          checkpoint,
+          {
+            activate: false,
+            status: 'FAILED',
+            reason: 'TRAINING_TIME_BUDGET',
+            details: {
+              phase,
+              sampleCount: rows.length,
+              completedCases: checkpoint.cases.length,
+              stalledPasses,
+              passElapsedMs: elapsed(),
+            },
+            artifact: null,
+            evaluation,
+          },
+          clock(),
+        );
+      }
       let lostLease = false,
         yielded = false;
       checkpoint.policyCases ||= {};
@@ -1340,9 +1383,8 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
         atlmHistoricalRows(db, ownerId, snapshot, row.capturedAt, row.planId);
       const replayYield = Symbol('ATLM_REPLAY_YIELD'),
         replayLost = Symbol('ATLM_REPLAY_LOST');
-      const replayStartRevision = checkpoint.progressRevision;
       const beforeReplayWork = async () => {
-        if (!fitBudget()) throw replayYield;
+        if (!canStartWork()) throw replayYield;
       };
       const saveReplay = async () => {
         checkpoint.progressRevision++;
@@ -1391,89 +1433,37 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
         else throw error;
       }
       if (lostLease) break;
-      if (yielded) {
-        checkpoint.replayDeferrals =
-          checkpoint.progressRevision === replayStartRevision
-            ? (checkpoint.replayDeferrals ?? 0) + 1
-            : 0;
-        if (checkpoint.replayDeferrals >= 2) {
-          await atlmFinalizeTraining(
-            db,
-            ownerId,
-            job,
-            snapshot,
-            checkpoint,
-            {
-              activate: false,
-              status: 'FAILED',
-              reason: 'TRAINING_TIME_BUDGET',
-              details: { sampleCount: rows.length },
-              artifact: null,
-              evaluation: null,
-            },
-            clock(),
-          );
-          break;
-        }
-      }
       if (
         yielded ||
-        !budget() ||
         checkpoint.cases.length < snapshot.selection.caseSampleIds.length ||
         rows.some((row) => !checkpoint.policyCases[row.sampleId])
       ) {
-        await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true });
+        await deferTraining('EVALUATE');
         break;
       }
       const evaluation = summarizeHybridAtlmEvaluation(checkpoint.cases, snapshot.selection);
       if (evaluation.status !== 'AVAILABLE')
         throw appError('INVALID_ESTIMATION_SOURCE', 'Invalid hybrid evaluation.', 500);
       if (!checkpoint.fitCheckpointed) {
-        checkpoint = {
-          ...checkpoint,
-          phase: 'FIT',
-          fitCheckpointed: true,
-          progressRevision: checkpoint.progressRevision + 1,
-        };
+        checkpoint.phase = 'FIT';
+        checkpoint.fitCheckpointed = true;
+        checkpoint.progressRevision++;
         if (!(await atlmCheckpoint(db, ownerId, job, checkpoint, clock()))) break;
-        if (!budget()) {
-          await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true });
-          break;
-        }
       }
       let candidates = checkpoint.finalCandidates;
       if (!candidates) {
-        if (!fitBudget()) {
-          checkpoint.fitDeferrals = (checkpoint.fitDeferrals ?? 0) + 1;
-          if (checkpoint.fitDeferrals >= 2)
-            await atlmFinalizeTraining(
-              db,
-              ownerId,
-              job,
-              snapshot,
-              checkpoint,
-              {
-                activate: false,
-                status: 'FAILED',
-                reason: 'TRAINING_TIME_BUDGET',
-                details: { sampleCount: rows.length },
-                artifact: null,
-                evaluation,
-              },
-              clock(),
-            );
-          else await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true });
+        if (!canStartWork()) {
+          await deferTraining('FIT', evaluation);
           break;
         }
-        checkpoint.fitDeferrals = 0;
         candidates = await atlmFitCandidates(rows);
         checkpoint.finalCandidates = candidates;
         checkpoint.progressRevision++;
         if (!(await atlmCheckpoint(db, ownerId, job, checkpoint, clock()))) break;
-        if (!budget()) {
-          await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true });
-          break;
-        }
+      }
+      if (!canStartWork()) {
+        await deferTraining('CALIBRATION', evaluation);
+        break;
       }
       const incumbent = snapshot.incumbentId
         ? await dbFirst(
@@ -1514,38 +1504,15 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
       });
       let quantiles = checkpoint.quantileFit;
       if (!quantiles) {
-        if (!fitBudget()) {
-          checkpoint.quantileDeferrals = (checkpoint.quantileDeferrals ?? 0) + 1;
-          if (checkpoint.quantileDeferrals >= 2)
-            await atlmFinalizeTraining(
-              db,
-              ownerId,
-              job,
-              snapshot,
-              checkpoint,
-              {
-                activate: false,
-                status: 'FAILED',
-                reason: 'TRAINING_TIME_BUDGET',
-                details: { sampleCount: rows.length },
-                artifact: null,
-                evaluation,
-              },
-              clock(),
-            );
-          else await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true });
+        if (!canStartWork()) {
+          await deferTraining('CALIBRATION', evaluation);
           break;
         }
-        checkpoint.quantileDeferrals = 0;
         quantiles = await fitAtlmResidualQuantiles(residuals);
         checkpoint.quantileFit = quantiles;
         checkpoint.phase = 'CALIBRATION';
         checkpoint.progressRevision++;
         if (!(await atlmCheckpoint(db, ownerId, job, checkpoint, clock()))) break;
-        if (!budget()) {
-          await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true });
-          break;
-        }
       }
       const priorCases = checkpoint.cases
         .filter((item) => item.prediction?.status === 'AVAILABLE')
@@ -1563,16 +1530,20 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
       );
       checkpoint.calibrationProof ||= {};
       let proofYielded = false;
-      const initialProofCount = Object.keys(checkpoint.calibrationProof).length;
       if (quantiles.status === 'AVAILABLE') {
         for (const planId of quantiles.artifact.models[0].manifest) {
           if (checkpoint.calibrationProof[planId]) continue;
-          if (!fitBudget()) {
+          if (!canStartWork()) {
             proofYielded = true;
             break;
           }
           const target = rows.find((row) => row.planId === planId);
-          const reconstructed = await atlmReconstructResidual(target, await historyFor(target));
+          const history = await historyFor(target);
+          if (!canStartWork()) {
+            proofYielded = true;
+            break;
+          }
+          const reconstructed = await atlmReconstructResidual(target, history);
           if (!reconstructed)
             throw appError('INVALID_ESTIMATION_SOURCE', 'Invalid calibration history.', 500);
           checkpoint.calibrationProof[planId] = reconstructed;
@@ -1585,33 +1556,8 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
         }
       }
       if (lostLease) break;
-      if (proofYielded) {
-        checkpoint.proofDeferrals =
-          Object.keys(checkpoint.calibrationProof).length === initialProofCount
-            ? (checkpoint.proofDeferrals ?? 0) + 1
-            : 0;
-        if (checkpoint.proofDeferrals >= 2) {
-          await atlmFinalizeTraining(
-            db,
-            ownerId,
-            job,
-            snapshot,
-            checkpoint,
-            {
-              activate: false,
-              status: 'FAILED',
-              reason: 'TRAINING_TIME_BUDGET',
-              details: { sampleCount: rows.length },
-              artifact: null,
-              evaluation,
-            },
-            clock(),
-          );
-          break;
-        }
-      }
-      if (proofYielded || !budget()) {
-        await atlmCheckpoint(db, ownerId, job, checkpoint, clock(), { release: true });
+      if (proofYielded || !canStartWork()) {
+        await deferTraining('CALIBRATION', evaluation);
         break;
       }
       const fitted = await fitAtlm(rows, {

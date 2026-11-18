@@ -83,14 +83,89 @@ test('failure to create an attempt leaves the lease recoverable',async()=>{
  }finally{c.close();}
 });
 
-test('repeatedly insufficient time to start fitting ends explicitly instead of yielding forever',async()=>{
- const c=context();try{
-  for(let i=0;i<2;i++){const p=await plannedAtlm(c,crypto.randomUUID());await completeAtlm(c,p,1000);c.advance(1);}
-  const slowSetup=()=>{let calls=0;return ()=>calls++===0?0:2001;};
-  let result=await processEstimationTraining(c.db,OWNER,c.now(),{clock:c.now,wallClock:slowSetup()});
-  assert.equal(result.training.status,'QUEUED');
-  result=await processEstimationTraining(c.db,OWNER,c.now(),{clock:c.now,wallClock:slowSetup()});
-  assert.equal(result.training.status,'FAILED');assert.equal(result.lastReason,'TRAINING_TIME_BUDGET');
-  assert.equal(c.db.sqlite.prepare('SELECT reason FROM estimation_training_attempts').get().reason,'TRAINING_TIME_BUDGET');
- }finally{c.close();}
+test('training tolerates slow setup and resumes after the candidate checkpoint', async () => {
+  const c = context();
+  try {
+    for (const duration of [1000, 1500]) {
+      const plan = await plannedAtlm(c, crypto.randomUUID());
+      await completeAtlm(c, plan, duration);
+      c.advance(1);
+    }
+    const job = c.db.sqlite.prepare("SELECT checkpoint_json FROM estimation_jobs WHERE job_key='train'");
+    const wallClock = () => {
+      const fields = JSON.parse(job.get()?.checkpoint_json ?? '{}').fields;
+      return fields?.includes('finalCandidates') ? 10001 : 2001;
+    };
+    let first = true;
+    const paused = await processEstimationTraining(c.db, OWNER, c.now(), {
+      clock: c.now,
+      wallClock: () => {
+        if (!first) return wallClock();
+        first = false;
+        return 0;
+      },
+    });
+    assert.equal(paused.training.status, 'QUEUED');
+    assert.equal(paused.lastReason, null);
+    assert.ok(JSON.parse(job.get().checkpoint_json).fields.includes('finalCandidates'));
+
+    const pending = c.db.sqlite.prepare('SELECT * FROM estimation_training_attempts').all();
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].completed_at, null);
+    c.db.sqlite.exec(`CREATE TRIGGER forbid_rewriting_candidates
+      BEFORE INSERT ON estimation_checkpoint_parts WHEN NEW.field='finalCandidates'
+      BEGIN SELECT RAISE(ABORT, 'The saved candidate checkpoint must be reused'); END`);
+    const resumed = await processEstimationTraining(c.db, OWNER, c.now(), {
+      clock: c.now,
+      wallClock: () => 0,
+    });
+    assert.equal(resumed.activeModel.sampleCount, 2);
+    const completed = c.db.sqlite.prepare('SELECT * FROM estimation_training_attempts').all();
+    assert.equal(completed.length, 1);
+    assert.equal(completed[0].attempt_id, pending[0].attempt_id);
+    assert.notEqual(completed[0].completed_at, null);
+    assert.equal(completed[0].reason, null);
+  } finally {
+    c.close();
+  }
+});
+
+test('consecutive passes without progress record the stalled phase', async () => {
+  const c = context();
+  try {
+    for (let i = 0; i < 2; i++) {
+      const plan = await plannedAtlm(c, crypto.randomUUID());
+      await completeAtlm(c, plan, 1000);
+      c.advance(1);
+    }
+    const slowSetup = () => {
+      let first = true;
+      return () => {
+        if (!first) return 9001;
+        first = false;
+        return 0;
+      };
+    };
+    // The first pass saves its snapshot. Only later passes without progress count.
+    for (let pass = 0; pass < 3; pass++) {
+      const result = await processEstimationTraining(c.db, OWNER, c.now(), {
+        clock: c.now, wallClock: slowSetup(),
+      });
+      assert.equal(result.training.status, 'QUEUED');
+    }
+    const result = await processEstimationTraining(c.db, OWNER, c.now(), {
+      clock: c.now, wallClock: slowSetup(),
+    });
+    assert.equal(result.training.status, 'FAILED');
+    assert.equal(result.lastReason, 'TRAINING_TIME_BUDGET');
+    assert.deepEqual(result.lastAttempt.parameters, {
+      phase: 'EVALUATE',
+      sampleCount: 2,
+      completedCases: 0,
+      stalledPasses: 3,
+      passElapsedMs: 9001,
+    });
+  } finally {
+    c.close();
+  }
 });
