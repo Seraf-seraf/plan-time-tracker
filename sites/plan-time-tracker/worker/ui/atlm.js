@@ -7,7 +7,7 @@ export const UI_ATLM = String.raw`(()=>{
   const count=value=>Number.isSafeInteger(value)&&value>=0?value:0;
   const reasons={ASSESSMENT_REQUIRED:"До первого запуска не сохранены исходные признаки.",ASSESSMENT_INCOMPLETE:"Заполните обязательные поля оценки.",ASSESSMENT_INVALID:"Исправьте ошибки в оценке.",ASSESSMENT_SCHEMA_OUTDATED:"Требуется оценка по актуальной схеме.",ASSESSMENT_CONTEXT_CHANGED:"Требования или признаки изменились. Обновите оценку.",AVAILABLE:"Модель успешно обучена.",MISSING_REQUIRED_FEATURES:"Нужны признаки задачи.",HISTORY_RESET:"Нет нового прогноза для ранее начатого плана.",TRAINING_TIME_BUDGET:"Обучение не завершилось в отведённое время.",COLLECTING_DATA:"Пока недостаточно проверенных завершённых планов.",INCOMPLETE_FEATURES:"Для прогноза не хватает исходных сведений о задаче.",UNSUPPORTED_CATEGORY:"В накопленной истории ещё нет опыта для этого вида задачи.",MODEL_INVALIDATED:"Исходные данные модели изменились; требуется пересборка.",INVALID_PREDICTION:"Модель не смогла получить корректную оценку.",UNSUPPORTED_FORECAST_SCOPE:"Прогноз доступен для полного плана до первого запуска.",DATASET_LIMIT_REACHED:"Накопленные данные сохранены, но превышен текущий предел обучения.",RANK_DEFICIENT:"Данных пока недостаточно для независимой оценки влияния признаков.",MODEL_CAPACITY_LIMIT:"Превышен ресурсный предел числа коэффициентов модели. История сохранена.",INSUFFICIENT_DATA:"Пока недостаточно пригодных данных для обучения и проверки.",INSUFFICIENT_VALIDATION:"Пока недостаточно случаев для проверки новой модели.",INSUFFICIENT_EVALUATION_CASES:"В последней попытке не хватило проверочных сравнений. Новая версия допускает ранний прогноз с неподтверждённым качеством.",INSUFFICIENT_INCUMBENT_CASES:"Для замены действующей модели недостаточно независимых сравнений с ней.",MEDIAN_BASELINE_BETTER:"Новая модель ошибается сильнее обычной медианы прошлых длительностей.",MEDIAN_BASELINE_NOT_WORSE:"Медиана прошлых длительностей не хуже проверенных обучаемых способов. Новая обученная модель не активирована.",CANDIDATE_COVERAGE_WORSE:"Новая модель даёт прогноз для меньшей доли задач, чем действующая.",CANDIDATE_MAE_WORSE:"Средняя ошибка новой модели выше, чем у действующей.",SNAPSHOT_INVALIDATED:"Исходные данные изменились; подготовлена новая попытка обучения.",LEASE_EXPIRED:"Предыдущая обработка не завершилась вовремя; её состояние сохранено.",TRAINING_EXECUTION_FAILED:"Во время обучения произошёл технический сбой.",SOURCE_UNAVAILABLE:"Источник данных временно недоступен.",INVALID_ESTIMATION_SOURCE:"Сохранённый источник оценки не удалось проверить.",AVAILABLE:"Модель успешно обучена.",
     MISSING_FEATURES:"До первого запуска не сохранены исходные признаки.",INVALID_FEATURES:"Исходные признаки не соответствуют схеме.",PLAN_DELETED:"План удалён.",PLAN_NOT_COMPLETED:"План ещё не завершён.",RESULT_NOT_VERIFIED:"Результат и обязательные проверки не подтверждены.",SCOPE_CHANGED:"После начала изменился объём задачи.",INCOMPLETE_MEASUREMENT:"Нет полного подтверждённого измерения активного времени."};
-  const statuses={IDLE:"Ожидание новых планов",QUEUED:"Обучение в очереди",RUNNING:"Модель обучается",RETRY_WAIT:"Ожидание повторной попытки",COLLECTING_DATA:"Накапливаем опыт",REJECTED:"Новая модель не прошла проверку",FAILED:"Не удалось завершить обучение"};
+  const statuses={IDLE:"Ожидаем новые планы",QUEUED:"Обучение в очереди",RUNNING:"Модель обучается",RETRY_WAIT:"Ожидание повторной попытки",COLLECTING_DATA:"Недостаточно данных",REJECTED:"Новая модель не прошла проверку",FAILED:"Не удалось завершить обучение"};
   const style=make("style");style.textContent=".atlm-panel{min-width:0;overflow-wrap:anywhere}.atlm-panel p{margin:9px 0}.atlm-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.atlm-heading h2,.atlm-heading h3{margin:0}.atlm-panel button{min-height:44px;white-space:normal}.atlm-controls{display:flex;gap:8px;flex-wrap:wrap}.atlm-point{font-size:1.35rem;font-weight:700;color:var(--ink)}.atlm-plan-estimate{margin:18px 0;padding:16px;border:1px solid var(--line-strong,var(--line));border-radius:var(--radius,10px);background:var(--paper-3,var(--panel))}.atlm-note{color:var(--ink-2,var(--muted));font-size:.9rem}.atlm-stale{border-left:3px solid var(--amber,var(--amber));padding-left:10px}.atlm-range-text,.atlm-fact{font-variant-numeric:tabular-nums}.atlm-scale{height:14px;position:relative;margin:18px 6px;background:var(--paper-2);border-radius:8px}.atlm-band{position:absolute;height:8px;top:3px;background:var(--amber);border-radius:8px}.atlm-marker,.atlm-fact-marker{position:absolute;top:0;height:14px;border-left:3px solid var(--ink)}.atlm-fact-marker{border-color:var(--blue)}.atlm-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:1px;background:var(--line);border:1px solid var(--line)}.atlm-metric{display:grid;gap:8px;padding:12px;background:var(--paper-2)}.atlm-metric strong{font-variant-numeric:tabular-nums}.atlm-metrics-help{margin:16px 0}.atlm-attempts{margin-top:24px}.atlm-table-wrap{max-width:100%;overflow-x:auto}.atlm-table-wrap table{width:100%;border-collapse:collapse;text-align:left;font-size:.9rem}.atlm-table-wrap th,.atlm-table-wrap td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}.atlm-panel summary{min-height:44px;display:flex;align-items:center;cursor:pointer}.atlm-panel summary::before{content:'▸';margin-right:6px}.atlm-panel details[open]>summary::before{content:'▾'}.atlm-table-wrap:focus-visible{outline:3px solid var(--amber-text);outline-offset:2px}.atlm-features{margin-top:16px}.atlm-features dl{display:grid;grid-template-columns:minmax(8rem,1fr) minmax(0,2fr);gap:6px 12px}.atlm-features dd{margin:0}.atlm-features h4{margin:14px 0 4px}@media(max-width:390px){.atlm-heading{align-items:flex-start}.atlm-controls{width:100%}.atlm-controls button{flex:1 1 100%}}";document.head.append(style);
   style.textContent += "#atlm-model-status{grid-column:1/-1}";
   style.textContent += ".atlm-feature-hint,.atlm-feature-reason{display:block;color:var(--ink-2,var(--muted));font-size:.85rem;line-height:1.4;margin-top:3px}.atlm-features dl{row-gap:14px}@media(max-width:600px){.atlm-features dl{grid-template-columns:1fr;gap:4px}.atlm-features dd{margin-bottom:12px}}";
@@ -18,9 +18,15 @@ export const UI_ATLM = String.raw`(()=>{
   const statusBody=make("div");statusBody.setAttribute("role","status");statusBody.setAttribute("aria-live","polite");
   const startTraining=button("Начать обучение",trainingAction);
   const controls=make("div",null,"atlm-controls");controls.append(startTraining);
+  const statusOverview = make("div", null, "atlm-status-overview");
+  statusOverview.append(statusBody, controls);
+  const statusDetails = make("details", null, "atlm-status-details");
+  const statusFacts = make("div");
+  statusDetails.hidden = true;
+  statusDetails.append(make("summary", "Данные и качество"), statusFacts);
   const attemptsRegion=make("section",null,"atlm-attempts");attemptsRegion.append(make("h3","Попытки обучения"));
   const attemptsBody=make("div","Загружаем историю…");attemptsBody.setAttribute("aria-live","polite");attemptsRegion.append(attemptsBody);
-  statusPanel.append(statusHeading,statusBody,controls,attemptsRegion);
+  statusPanel.append(statusHeading, statusOverview, statusDetails, attemptsRegion);
   let attemptsToken=0,attemptsCursor=null,attemptsRows=[];
   async function loadAttempts(more=false){
     const token=++attemptsToken;if(!more){attemptsRows=[];attemptsCursor=null;attemptsBody.replaceChildren(make("p","Загружаем историю…","atlm-note"));}
@@ -175,7 +181,7 @@ export const UI_ATLM = String.raw`(()=>{
       const data=await api("/api/tracker/estimation-model/start",{method:"POST",body:"{}"});
       lastProcessFailure=null;recoveryAction=null;processed.clear();autoBudget=8;pollsLeft=3;showStatus(data);loadAttempts();
       const pending=data.training.due||["QUEUED","RUNNING","RETRY_WAIT"].includes(data.training.status);
-      statusBody.append(make("p",pending?"Запрос принят. Обработка ещё не завершена.":"Попытка обучения завершена. Результат показан выше.","atlm-note atlm-start-feedback"));
+      statusBody.append(make("p",pending?"Запрос принят.":"Попытка обучения завершена.","atlm-note atlm-start-feedback"));
       schedulePoll();
     }catch(error){
       recoveryAction="status";lastProcessFailure="Не удалось подтвердить запуск обучения. "+error.message+" Обновите состояние перед повторным запуском.";
@@ -268,54 +274,95 @@ export const UI_ATLM = String.raw`(()=>{
     }
     target.append(details);
   }
-  function appendQuality(target,model){
-    const evaluation=model.evaluation,n=model.sampleCount,k=evaluation?.pointCaseCount;
-    target.append(make("p",Number.isSafeInteger(n)&&n>=1?"В обучении использовано планов: "+n+".":"Размер обучающей выборки не сохранён.","atlm-note"));
-    target.append(make("p",Number.isSafeInteger(k)&&k>=0?"Проверено прогнозов: "+k+".":"Число проверенных прогнозов не сохранено.","atlm-note"));
-    const fullPolicy=evaluation?.metricsScope==="FULL_POLICY";
-    if(fullPolicy&&Number.isSafeInteger(evaluation.modelCaseCount)&&Number.isSafeInteger(k))target.append(make("p","В сравнениях обученная модель использована: "+evaluation.modelCaseCount+" из "+k+".","atlm-note"));
-    const confirmed=model.accuracy==="HISTORICALLY_EVALUATED"&&Number.isSafeInteger(k)&&k>=5&&(!fullPolicy||evaluation.modelCaseCount>=5);
-    const quality=make("p",null,"atlm-note atlm-quality");
-    quality.append(make("strong",confirmed?"Проверен на истории":"Экспериментальный"));target.append(quality);
-    if(Number.isSafeInteger(k)&&k>0&&Number.isFinite(evaluation?.maeMs)&&evaluation.maeMs>=0)target.append(make("p",(fullPolicy?"Средняя ошибка гибрида с запасным прогнозом: ":"Средняя ошибка прошлых проверок: ")+minutes(evaluation.maeMs)+". Это не гарантия длительности.","atlm-note"));
-    else target.append(make("p","Ошибка пока не оценена.","atlm-note"));
-    if(fullPolicy&&Number.isFinite(evaluation.medianBaselineMaeMs))target.append(make("p","Ошибка медианы на тех же задачах: "+minutes(evaluation.medianBaselineMaeMs)+".","atlm-note"));
-    if(fullPolicy&&Number.isSafeInteger(evaluation.profileGroupCount))target.append(make("p","Разных профилей задач: "+evaluation.profileGroupCount+". Похожие задачи ограничивают выводы о качестве на другой работе.","atlm-note"));
+  function modelQuality(model) {
+    const evaluation = model.evaluation;
+    const checked = count(evaluation?.pointCaseCount);
+    const confirmed = model.accuracy === "HISTORICALLY_EVALUATED" && checked >= 5
+      && (evaluation.metricsScope !== "FULL_POLICY" || evaluation.modelCaseCount >= 5);
+    return confirmed ? "Проверена на истории" : "Экспериментальная";
   }
-  function showStatus(data){
-    if(!data.training||!statuses[data.training.status]||![data.newPlansSinceTraining,data.eligibleSampleCount,data.excludedSampleCount].every(value=>Number.isSafeInteger(value)&&value>=0)||!Number.isSafeInteger(data.retrainEveryNewPlans)||data.retrainEveryNewPlans<1||typeof data.training.due!=="boolean"||!Object.hasOwn(data,"activeModel")||(data.activeModel!==null&&(!Number.isSafeInteger(data.activeModel.sampleCount)||data.activeModel.sampleCount<1)))throw new Error("Не удалось прочитать состояние обучения.");
-    const exclusionsOpen=statusBody.querySelector(".atlm-exclusions")?.open===true,methodOpen=statusBody.querySelector(".atlm-method")?.open===true;
-    latestStatus=data;
-    statusBody.replaceChildren();statusBody.append(make("p",statuses[data.training.status]));
-    statusBody.append(make("p","Новых пригодных планов: "+count(data.newPlansSinceTraining)+". Начать обучение можно в любое время."));
-    statusBody.append(make("p","Автоматическое обучение запускается после "+data.retrainEveryNewPlans+" новых пригодных планов. Для ручного запуска ждать не нужно.","atlm-note"));
-    statusBody.append(make("p",data.training.due?"Новые планы ожидают обработки.":"До следующего автоматического обучения: "+Math.max(0,data.retrainEveryNewPlans-data.newPlansSinceTraining)+".","atlm-note"));
-    statusBody.append(make("p","Всего пригодных планов: "+count(data.eligibleSampleCount)+". Исключено: "+count(data.excludedSampleCount)+".","atlm-note"));
-    if(Array.isArray(data.exclusionReasons)&&data.exclusionReasons.length){
-      const disclosure=make("details",null,"atlm-exclusions"),list=make("ul");disclosure.open=exclusionsOpen;disclosure.append(make("summary","Почему планы не учитываются"));
-      for(const item of data.exclusionReasons)if(typeof item.reason==="string"&&Number.isSafeInteger(item.count)&&item.count>0)list.append(make("li",reasonText(item.reason)+" Планов: "+item.count+"."));
-      disclosure.append(list,make("p","У одного плана может быть несколько причин.","atlm-note"));statusBody.append(disclosure);
+  function addStatusFact(list, label, value) {
+    const item = make("div");
+    item.append(make("dt", label), make("dd", String(value)));
+    list.append(item);
+  }
+  function renderStatusDetails(data) {
+    const facts = make("dl", null, "atlm-status-facts");
+    addStatusFact(facts, "Исключено планов", data.excludedSampleCount);
+    const model = data.activeModel;
+    if (model) {
+      const evaluation = model.evaluation;
+      const fullPolicy = evaluation?.metricsScope === "FULL_POLICY";
+      const point = model.hybrid?.selectedEngine;
+      const interval = model.hybrid?.intervalEngine;
+      const checked = evaluation?.pointCaseCount;
+      const version = model.modelVersion ?? model.modelId;
+      if (version != null) addStatusFact(facts, "Версия модели", version);
+      addStatusFact(facts, "Планов в модели", model.sampleCount);
+      if (point) addStatusFact(facts, "Точечный метод", trainingEngines[point] ?? point);
+      if (interval) addStatusFact(facts, "Интервал", trainingEngines[interval] ?? interval);
+      if (Number.isSafeInteger(checked)) addStatusFact(facts, "Проверено прогнозов", checked);
+      if (fullPolicy && Number.isSafeInteger(evaluation.modelCaseCount))
+        addStatusFact(facts, "Из них прогнозы модели", evaluation.modelCaseCount);
+      const mae = evaluation?.maeMs;
+      const errorLabel = fullPolicy ? "Средняя ошибка с учётом запасного прогноза" : "Средняя ошибка";
+      addStatusFact(facts, errorLabel, checked > 0 && Number.isFinite(mae) && mae >= 0 ? minutes(mae) : "Нет оценки");
+      if (fullPolicy && Number.isFinite(evaluation.medianBaselineMaeMs))
+        addStatusFact(facts, "Ошибка медианы на тех же задачах", minutes(evaluation.medianBaselineMaeMs));
+      if (fullPolicy && Number.isSafeInteger(evaluation.profileGroupCount))
+        addStatusFact(facts, "Разных профилей задач", evaluation.profileGroupCount);
     }
-    if(data.activeModel){statusBody.append(make("p","Действующая модель: "+String(data.activeModel.modelVersion||data.activeModel.modelId)+".","atlm-note"),make("p","Точка: "+(data.activeModel.hybrid?.selectedEngine||"—")+". Интервал: "+(data.activeModel.hybrid?.intervalEngine||"—")+".","atlm-note"));appendQuality(statusBody,data.activeModel);}
-    if(data.training.status==="REJECTED"&&data.activeModel)statusBody.append(make("p","Предыдущая пригодная модель продолжает давать прогнозы.","atlm-note"));
-    if(data.training.progress&&Number.isSafeInteger(data.training.progress.totalCases)&&data.training.progress.totalCases>0)statusBody.append(make("p","Обработано примеров: "+count(data.training.progress.completedCases)+" из "+data.training.progress.totalCases+".","atlm-note"));
-    if(data.training.status==="RETRY_WAIT"&&Number.isFinite(data.training.nextAttemptAt))statusBody.append(make("p","Повторная попытка не раньше "+new Intl.DateTimeFormat("ru-RU",{dateStyle:"short",timeStyle:"short",timeZone:document.querySelector("#tz")?.value||"UTC"}).format(new Date(data.training.nextAttemptAt))+".","atlm-note"));
-    const reason=data.lastError||data.lastReason;
-    if(data.lastAttempt){
-      statusBody.append(make("p","Последняя завершённая попытка: "+reasonText(data.lastAttempt.code),"atlm-note"));
-      const facts=data.lastAttempt;
-      const technical=make("details",null,"atlm-candidates");technical.append(make("summary","Подробности последней попытки"));
-      technical.append(make("p",reasonText(facts.code),"atlm-note"));
-      for(const [name,label] of [["ols","Обычная регрессия"],["ridge","Ridge"],["bayesian","Bayesian"]]){
-        const candidate=facts.candidates?.[name];if(!candidate)continue;
-        technical.append(make("p",label+": "+(candidate.status==="AVAILABLE"?"рассчитана":reasonText(candidate.reason))+" Планов: "+candidate.sampleCount+".","atlm-note"));
-      }
-      statusBody.append(technical);
+    statusFacts.replaceChildren(facts);
+    const exclusions = make("ul", null, "atlm-status-exclusions");
+    for (const item of Array.isArray(data.exclusionReasons) ? data.exclusionReasons : []) {
+      if (typeof item.reason === "string" && Number.isSafeInteger(item.count) && item.count > 0)
+        exclusions.append(make("li", reasonText(item.reason) + " Планов: " + item.count + "."));
     }
-    if(reason&&(!data.lastAttempt||data.lastAttempt.code!==reason))
-      statusBody.append(make("p",reasonText(reason)+" Подробные параметры этой причины не сохранены.",data.lastError?"error":"atlm-note"));
-    if(lastProcessFailure)statusBody.append(make("p",lastProcessFailure,"error atlm-process-feedback"));
-    const method=make("details",null,"atlm-method");method.open=methodOpen;method.append(make("summary","Кто рассчитывает прогноз"),make("p","Сервер использует исходные признаки и активное время завершённых планов. При первом запуске прогноз фиксируется. Диапазон имеет целевой охват 80%, фактические попадания показаны в аналитике.","atlm-note"));statusBody.append(method);updateControls();
+    if (exclusions.childElementCount) {
+      statusFacts.append(exclusions);
+      if (exclusions.childElementCount > 1)
+        statusFacts.append(make("p", "У одного плана может быть несколько причин.", "atlm-note"));
+    }
+    statusDetails.hidden = false;
+  }
+  function showStatus(data) {
+    const training = data.training;
+    const counts = [data.newPlansSinceTraining, data.eligibleSampleCount, data.excludedSampleCount];
+    if (!training || !Object.hasOwn(statuses, training.status)
+      || !counts.every(value => Number.isSafeInteger(value) && value >= 0)
+      || !Number.isSafeInteger(data.retrainEveryNewPlans) || data.retrainEveryNewPlans < 1
+      || typeof training.due !== "boolean" || !Object.hasOwn(data, "activeModel")
+      || (data.activeModel !== null && (!Number.isSafeInteger(data.activeModel?.sampleCount) || data.activeModel.sampleCount < 1))) {
+      throw new Error("Не удалось прочитать состояние обучения.");
+    }
+
+    latestStatus = data;
+    const busy = ["QUEUED", "RUNNING", "RETRY_WAIT"].includes(training.status);
+    statusBody.replaceChildren(make("p", statuses[training.status], "atlm-status-title"));
+    const progress = training.progress;
+    if (busy && progress?.phase !== "DONE" && Number.isSafeInteger(progress?.totalCases) && progress.totalCases > 0) {
+      statusBody.append(make("p", "Проверено примеров: " + count(progress.completedCases) + " из " + progress.totalCases, "atlm-note"));
+    }
+    if (training.status === "RETRY_WAIT" && Number.isFinite(training.nextAttemptAt)) {
+      const timeZone = document.querySelector("#tz")?.value || "UTC";
+      const time = new Intl.DateTimeFormat("ru-RU", {dateStyle: "short", timeStyle: "short", timeZone});
+      statusBody.append(make("p", "Повтор с " + time.format(new Date(training.nextAttemptAt)), "atlm-note"));
+    }
+    const reason = data.lastError || data.lastReason;
+    if (reason && (training.status === "FAILED" || training.status === "REJECTED")) {
+      statusBody.append(make("p", reasonText(reason), training.status === "FAILED" ? "error" : "atlm-note"));
+    }
+
+    const overview = make("dl", null, "atlm-status-metrics");
+    addStatusFact(overview, "Активная модель", data.activeModel ? modelQuality(data.activeModel) : "Нет");
+    addStatusFact(overview, "Пригодных планов", data.eligibleSampleCount);
+    if (!busy && !training.due && data.newPlansSinceTraining < data.retrainEveryNewPlans) {
+      addStatusFact(overview, "Планов до автообучения", data.retrainEveryNewPlans - data.newPlansSinceTraining);
+    }
+    statusBody.append(overview);
+    if (lastProcessFailure) statusBody.append(make("p", lastProcessFailure, "error atlm-process-feedback"));
+    renderStatusDetails(data);
+    updateControls();
   }
   function queueKey(data){const t=data.training;return JSON.stringify([data.datasetRevision,t.generation,t.progressRevision,t.pendingRefreshCount,t.nextAttemptAt]);}
   function schedulePoll(){clearTimeout(pollTimer);if(pollsLeft>0){pollsLeft--;pollTimer=setTimeout(()=>loadStatus(true),750);}}
@@ -333,7 +380,7 @@ export const UI_ATLM = String.raw`(()=>{
           finally{processPending=false;updateControls();}
           schedulePoll();
         }else if(allowProcess&&(data.training.status==="RUNNING"||data.training.due))schedulePoll();
-      }catch(error){recoveryAction="status";statusBody.replaceChildren(make("p","Не удалось загрузить состояние обучения. "+error.message,"error"));}
+      }catch(error){recoveryAction="status";statusDetails.hidden=true;statusBody.replaceChildren(make("p","Не удалось загрузить состояние обучения. "+error.message,"error"));}
       finally{statusPending=null;updateControls();statusPanel.removeAttribute("aria-busy");}
     })();updateControls();return statusPending;
   }

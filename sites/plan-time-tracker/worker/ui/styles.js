@@ -10,6 +10,15 @@ button,input,textarea,select{font-family:var(--font-body)}button{background:var(
 .tracker-section{border-color:var(--line)}.tracker-list{gap:0}.tracker-card{background:var(--paper-2);border:0;border-top:1px solid var(--line);border-radius:0;padding:16px 0}.tracker-card:last-child{border-bottom:1px solid var(--line)}.tracker-card-toggle{min-height:42px}.tracker-card-toggle:hover:not(:disabled){background:transparent;color:var(--amber)}.tracker-meta,.tracker-card-status{color:var(--muted)}.tracker-marker{border-radius:4px;background:var(--paper-3);font-weight:500}.tracker-marker.GAP,.tracker-marker.LATE,.tracker-marker.STALE_EXECUTOR{background:var(--amber-soft);color:var(--amber-text)}.tracker-marker.CORRECTION{background:var(--blue-soft);color:var(--blue)}
 .period-filter,.period-filter .toolbar,.period-filter .metrics,.period-filter .metric{min-width:0;max-width:100%}.period-filter .metric{overflow-wrap:anywhere}.period-filter .toolbar>button{min-width:0;max-width:100%;overflow-wrap:anywhere}
 @media(max-width:720px){.shell{padding:24px 16px 60px}.grid{grid-template-columns:minmax(0,1fr)}.panel{padding:18px}.top{align-items:start}#who{text-align:left}}@media(max-width:600px){.tracker-card-toggle{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 8px}.tracker-card-toggle>strong{grid-column:1;grid-row:1}.tracker-card-toggle>.tracker-card-status{grid-column:1;grid-row:2}.tracker-card-toggle>span:last-child{grid-column:2;grid-row:1}.nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible}.nav button{padding:12px;text-align:center}.tracker-card{padding:14px 0}.modalbox{padding:18px}.metrics,#view-overview .grid .metrics{grid-template-columns:1fr}.row{padding:14px 0}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{transition-duration:0s!important;animation-duration:0s!important;animation-iteration-count:1!important}}
+.atlm-status-overview{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px 24px;align-items:start}
+.atlm-status-overview .atlm-status-title{margin:0;font-weight:600}
+.atlm-status-metrics{display:flex;flex-wrap:wrap;gap:8px 28px;margin:12px 0 0}
+.atlm-status-metrics dt,.atlm-status-facts dt{color:var(--muted);font-size:var(--text-sm)}
+.atlm-status-metrics dd,.atlm-status-facts dd{margin:0;font-variant-numeric:tabular-nums}
+.atlm-status-details{margin-top:12px}
+.atlm-status-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:8px 24px;margin:0}
+.atlm-status-exclusions{margin:12px 0;padding-inline-start:20px;font-size:var(--text-sm)}
+@media(max-width:600px){.atlm-status-overview{grid-template-columns:minmax(0,1fr)}}
 /* Hallmark · component: training history · genre: modern-minimal · theme: Console Paper · v2.0.0 */
 /* Critique: the result leads each row, while timestamps and calculation details remain easy to compare. */
 .atlm-attempts .atlm-history{min-width:610px;line-height:1.4}

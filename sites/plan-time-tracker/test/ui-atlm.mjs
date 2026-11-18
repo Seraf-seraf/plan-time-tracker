@@ -97,18 +97,25 @@ try {
   await page.locator('[data-view="settings"]').click();await page.waitForFunction(()=>!document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy'));
   assert.equal(requests.filter(item=>item.path==='/api/tracker/estimation-model/process').length,0,'viewing the UI does not start training');
   await settings().getByRole('button',{name:'Продолжить обработку',exact:true}).click();
-  await settings().getByText('Всего пригодных планов: 0. Исключено: 2.', { exact: true }).waitFor();
+  await page.waitForFunction(() => !document.querySelector('#atlm-model-status').hasAttribute('aria-busy'));
+  await readPoll();
+  await settings().getByRole('button', {name:'Начать обучение', exact:true}).waitFor();
   const recovered = await call(c, '/api/tracker/estimation-model');assert.equal(recovered.status, 200);
   assert.equal(recovered.value.training.due, false);assert.equal(recovered.value.activeModel, null);
   assert(requests.some(item => item.path === '/api/tracker/estimation-model/process' && item.method === 'POST'), 'explicit continuation must recover pending source refresh');
-  await settings().getByText('Почему планы не учитываются', { exact: true }).click();
-  assert.match(await settings().locator('.atlm-exclusions').innerText(), /План ещё не завершён/);
-  await refreshStatus();assert.equal(await settings().locator('.atlm-exclusions').evaluate(node => node.open), true, 'status reads preserve the open explanation');
+  const details = () => settings().locator('.atlm-status-details');
+  await details().getByText('Данные и качество', { exact: true }).click();
+  assert.match(await details().innerText(), /Исключено планов\s+2/);
+  assert.match(await details().innerText(), /План ещё не завершён/);
+  await refreshStatus();
+  assert.equal(await details().evaluate(node => node.open), true, 'status reads preserve the open explanation');
+  await details().getByText('Данные и качество', { exact: true }).click();
   const manual = () => settings().getByRole('button', { name: 'Начать обучение', exact: true });
-  await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
+  await manual().click();await settings().getByText('Попытка обучения завершена.', { exact: true }).waitFor();
   assert.equal(startCount, 1);assert.match(await settings().innerText(), /Недостаточно данных/);
-  await settings().getByText('Подробности последней попытки',{exact:true}).click();
-  assert.match(await settings().innerText(), /Пока недостаточно пригодных данных/);
+  const history = settings().locator('.atlm-history');
+  await history.getByText('Недостаточно данных', { exact: true }).waitFor();
+  assert.match(await history.innerText(), /Пока недостаточно пригодных данных/);
   assert.equal((await call(c, '/api/tracker/estimation-model')).value.training.generation, 1, 'real browser request reaches Worker training below two plans');
   await page.locator('[data-view="settings"]').click();await page.waitForFunction(()=>!document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy'));
   const readsAfterReopen=statusCount;await page.clock.runFor(3000);assert.equal(statusCount,readsAfterReopen,'reopening settings cancels stale polling');
@@ -202,28 +209,49 @@ try {
   releaseHeld();releaseHeld = null;await finished;
   assert.equal(await forecast().getAttribute('data-plan-id'), otherPlan);assert.match(await forecast().innerText(), /Около 7 мин/);assert.doesNotMatch(await forecast().innerText(), /Около 2 мин/);
 
-  await page.locator('[data-view="settings"]').click();await refreshStatus();
-  assert.match(await settings().innerText(), /Новых пригодных планов: 3/);
-  assert.match(await settings().innerText(), /Начать обучение можно в любое время/);
-  assert.equal(await settings().getByRole('button', { name: 'Начать обучение', exact: true }).isEnabled(), true);
-  status=modelState('IDLE');status.activeModel.sampleCount=2;status.activeModel.accuracy='EXPERIMENTAL';status.activeModel.evaluation={validationStatus:"EXPERIMENTAL",pointCaseCount:0,caseCount:0,maeMs:null};await refreshStatus();
-  assert.match(await settings().innerText(),/В обучении использовано планов: 2\./);assert.match(await settings().innerText(),/Всего пригодных планов: 23/);assert.match(await settings().innerText(),/Проверено прогнозов: 0/);assert.match(await settings().innerText(),/Ошибка пока не оценена/);
-  status=modelState('IDLE');status.activeModel.hybrid={policyVersion:1,selectedEngine:'RIDGE'};
-  status.lastAttempt={code:'AVAILABLE',message:'Модель успешно обучена. sampleCount=25, p=27, rank=17.',datasetRevision:263,generation:26,
-    candidates:{ols:{status:'UNAVAILABLE',reason:'RANK_DEFICIENT',sampleCount:25,p:22,rank:17},ridge:{status:'AVAILABLE',sampleCount:25,p:27,rank:17}}};
-  await refreshStatus();assert.match(await settings().innerText(),/Точка: RIDGE/);
-  assert.doesNotMatch(await settings().innerText(),/sampleCount=25/, 'technical details start collapsed');
-  await settings().getByText('Подробности последней попытки',{exact:true}).click();
-  assert.match(await settings().innerText(),/Планов: 25/);assert.match(await settings().innerText(),/Ridge: рассчитана/);
-  status = modelState('RUNNING');status.training.progress = { phase: 'EVALUATION', completedCases: 2, totalCases: 7 };await refreshStatus();
-  assert.match(await settings().innerText(), /Модель обучается/);assert.match(await settings().innerText(), /Обработано примеров: 2 из 7/);
-  status = modelState('REJECTED');status.lastReason = 'CANDIDATE_MAE_WORSE';await refreshStatus();
-  assert.match(await settings().innerText(), /Новая модель не прошла проверку/);assert.match(await settings().innerText(), /Предыдущая пригодная модель продолжает/);
-  assert.match(await settings().innerText(), /Средняя ошибка новой модели выше/);
+  await page.locator('[data-view="settings"]').click();
+  status = modelState('IDLE');
+  status.newPlansSinceTraining = 1;
+  status.activeModel.sampleCount = 2;
+  status.activeModel.accuracy = 'EXPERIMENTAL';
+  status.activeModel.evaluation = {validationStatus:'EXPERIMENTAL', pointCaseCount:0, caseCount:0, maeMs:null};
+  status.activeModel.hybrid = {policyVersion:2, selectedEngine:'RIDGE', intervalEngine:'BAYESIAN_PREDICTIVE'};
+  await refreshStatus();
+  const overview = settings().locator('.atlm-status-overview');
+  const summary = await overview.innerText();
+  assert.match(summary, /Активная модель\s+Экспериментальная/);
+  assert.match(summary, /Пригодных планов\s+23/);
+  assert.match(summary, /Планов до автообучения\s+1/);
+  assert.equal(await manual().isEnabled(), true);
+  assert.equal(await details().evaluate(node => node.open), false);
+  assert.equal(await details().getByText('Планов в модели', { exact: true }).isVisible(), false);
+
+  const disclosure = details().getByText('Данные и качество', { exact: true });
+  await disclosure.focus();
+  await page.keyboard.press('Enter');
+  const facts = await details().innerText();
+  assert.match(facts, /Планов в модели\s+2/);
+  assert.match(facts, /Точечный метод\s+Ridge/);
+  assert.match(facts, /Проверено прогнозов\s+0/);
+  assert.match(facts, /Средняя ошибка\s+Нет оценки/);
+  await disclosure.click();
+
+  status = modelState('RUNNING');
+  status.training.progress = {phase:'EVALUATION', completedCases:2, totalCases:7};
+  await refreshStatus();
+  assert.match(await overview.innerText(), /Модель обучается/);
+  assert.match(await overview.innerText(), /Проверено примеров: 2 из 7/);
+  assert.doesNotMatch(await overview.innerText(), /Планов до автообучения/);
+  status = modelState('REJECTED');
+  status.lastReason = 'CANDIDATE_MAE_WORSE';
+  await refreshStatus();
+  assert.match(await overview.innerText(), /Новая модель не прошла проверку/);
+  assert.match(await overview.innerText(), /Активная модель\s+Проверена на истории/);
+  assert.match(await overview.innerText(), /Средняя ошибка новой модели выше/);
   await open(PLAN);assert.match(await forecast().innerText(), /Около 2 мин/, 'a rejected candidate must not hide the saved forecast');
   await page.locator('[data-view="settings"]').click();statusError = true;await refreshStatus();
-  assert.match(await settings().innerText(), /Не удалось загрузить состояние/);assert.doesNotMatch(await settings().innerText(), /Всего пригодных планов: 0/);
-  statusError = false;await refreshStatus();assert.match(await settings().innerText(), /Предыдущая пригодная модель/);
+  assert.match(await settings().innerText(), /Не удалось загрузить состояние/);assert.equal(await details().isVisible(), false);
+  statusError = false;await refreshStatus();assert.match(await overview.innerText(), /Активная модель\s+Проверена на истории/);
   status.eligibleSampleCount = null;await refreshStatus();assert.match(await settings().innerText(), /Не удалось прочитать состояние обучения/);
 
   // Opening settings and refreshing status are read-only, even with queued work.
@@ -265,7 +293,7 @@ try {
   startError = true;await manual().click();await settings().getByText(/Не удалось подтвердить запуск обучения/).waitFor();
   assert.doesNotMatch(await settings().innerText(), /Попытка обучения завершена/, 'a new attempt cannot retain the previous success message');
   const failedStarts = startCount;await page.clock.runFor(30000);assert.equal(startCount, failedStarts, 'a lost start response is never retried automatically');
-  startError = false;await settings().getByRole('button',{name:'Проверить состояние',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('#atlm-model-status').hasAttribute('aria-busy'));assert.equal(startCount,failedStarts,'reconciling an unknown start outcome only reads status');await manual().click();await settings().getByText('Попытка обучения завершена. Результат показан выше.', { exact: true }).waitFor();
+  startError = false;await settings().getByRole('button',{name:'Проверить состояние',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('#atlm-model-status').hasAttribute('aria-busy'));assert.equal(startCount,failedStarts,'reconciling an unknown start outcome only reads status');await manual().click();await settings().getByText('Попытка обучения завершена.', { exact: true }).waitFor();
   assert.doesNotMatch(await settings().innerText(), /Не удалось подтвердить запуск/);
 
   for (const width of [320, 390, 768, 1440]) {
