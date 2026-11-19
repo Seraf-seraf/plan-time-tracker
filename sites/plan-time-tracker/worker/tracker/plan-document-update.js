@@ -1,5 +1,6 @@
 import { appError, dbFirst, messageFor } from '../shared/index.js';
 import { revisePlanDocument, validateDocumentUpdate } from './plan-document.js';
+import { SqlTransaction } from '../application/transaction.js';
 
 function preparePlanAssessmentTargets(db, ownerId, planId, plan, guard, guardArgs) {
   return [
@@ -20,7 +21,7 @@ function preparePlanAssessmentTargets(db, ownerId, planId, plan, guard, guardArg
   ];
 }
 
-async function updatePlanDocumentBatch(db, insertReceipt, receiptValues, envelope, nowMs) {
+async function updatePlanDocumentBatch(db, insertReceipt, receiptValues, envelope, nowMs, nonce) {
   const [ownerId, commandId] = receiptValues;
   const { payload, expectedVersion } = envelope;
   const { planId } = payload;
@@ -41,7 +42,6 @@ async function updatePlanDocumentBatch(db, insertReceipt, receiptValues, envelop
   const oldSteps = JSON.parse(current.steps);
   const revision = revisePlanDocument(payload, current.markdown, oldSteps, fullSections);
   const removed = JSON.stringify(revision.removed);
-  const nonce = crypto.randomUUID();
   const guard = `EXISTS(SELECT 1 FROM command_receipts WHERE owner_id=? AND command_id=?
     AND outcome_code='OK' AND json_extract(payload_json,'$.nonce')=?)`;
   const guardArgs = [ownerId, commandId, nonce];
@@ -66,10 +66,10 @@ async function updatePlanDocumentBatch(db, insertReceipt, receiptValues, envelop
     ${insertReceipt}
     SELECT ?,?,?,?,?,?,?,?,?,CASE WHEN code='OK' THEN ? ELSE '{}' END,
       code,json_object('planId',?,'status',status,'version',version+(code='OK'),
-        'currentVersion',version+(code='OK'),'serverNow',?),? FROM decision`,
+        'currentVersion',version+(code='OK'),'serverNow',?),?,? FROM decision`,
   ).bind(
     expectedVersion, removed, removed, ownerId, planId, ...receiptValues,
-    JSON.stringify({ nonce }), planId, nowMs, nowMs,
+    JSON.stringify({ nonce }), planId, nowMs, nowMs, nonce,
   );
   const oldOrdinalMax = oldSteps.at(-1)?.ordinal ?? 0;
   const statements = [
@@ -104,7 +104,9 @@ async function updatePlanDocumentBatch(db, insertReceipt, receiptValues, envelop
       result_version=json_extract(result_json,'$.version') WHERE owner_id=? AND command_id=?
       AND json_extract(payload_json,'$.nonce')=?`).bind(...guardArgs),
   ];
-  return (await db.batch(statements))[0];
+  const transaction = new SqlTransaction(db);
+  for (const statement of statements) transaction.addPrepared(statement);
+  return (await transaction.commit())[0];
 }
 
 export { preparePlanAssessmentTargets, updatePlanDocumentBatch };

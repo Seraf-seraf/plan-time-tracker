@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {context, migrations, migration, envelope, call, command, ok, mcp, assessForStart, PLAN, OWNER} from './fixtures/tracker-db.mjs';
 
+import { seedLegacyPlan, applyRemainingMigrations } from './fixtures/legacy-schema.mjs';
+
 test('0027 retains owner data, v3 provenance and receipts, resets training and permits legacy resume', async () => {
   const name = '0027_agent_task_v4_gate.sql', c = context(migrations.indexOf(name));
   try {
@@ -9,7 +11,7 @@ test('0027 retains owner data, v3 provenance and receipts, resets training and p
     db.exec('PRAGMA foreign_keys=ON');
     const paused = crypto.randomUUID();
     for (const [planId, owner] of [[PLAN,OWNER],[paused,'owner-2']]) {
-      assert.equal((await call(c,'/api/commands',envelope('CreatePlan',{planId,title:'Migration',planText:'## Этап 1. Миграция\nПроверка',planCreatedAt:{precision:'dateOnly',on:'2027-01-01',timeZone:'UTC'}}),owner)).status,200);
+      await seedLegacyPlan(c,{planId,title:'Migration',planText:'## Этап 1. Миграция\nПроверка',planCreatedAt:{precision:'dateOnly',on:'2027-01-01',timeZone:'UTC'}},owner);
     }
     db.prepare("UPDATE plans SET status='PAUSED',first_started_at=?,version=2 WHERE plan_id=?").run(c.now(),paused);
     db.prepare("INSERT INTO work_intervals(interval_id,owner_id,plan_id,start_ms,end_ms,opened_by,closed_by) VALUES('old','owner-2',?,?,?,'owner-2','owner-2')").run(paused,c.now(),c.now()+100);
@@ -31,16 +33,21 @@ test('0027 retains owner data, v3 provenance and receipts, resets training and p
     for(const table of ['plan_estimation_inputs','estimation_samples','estimation_models','estimation_jobs','estimation_training_attempts'])
       assert.equal(db.prepare('SELECT count(*) AS n FROM '+table).get().n,0);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
+    // Seed post-reset model/sample state using that historical schema, then prove
+    // reapplying 0027 cannot reset v4 data. Current runtime starts only after upgrade.
+    db.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,manifest_json,dataset_digest,train_cutoff,sample_count,created_at) VALUES(?,'v4-after-reset',1,'REJECTED','[]','new',0,0,0)").run(OWNER);
+    db.prepare("INSERT INTO estimation_samples(owner_id,plan_id,source_digest,source_generation,eligibility,reasons_json,source_available_at,observed_at,is_first_eligible) VALUES(?,?,'new',1,'EXCLUDED','[\"NOT_COMPLETED\"]',0,0,0)").run(OWNER,PLAN);
+    const snapshot = () => ['estimation_owner_state','estimation_models','estimation_samples','estimation_jobs','plan_estimation_inputs','assessment_revisions','command_receipts','work_intervals'].map(t=>db.prepare('SELECT * FROM '+t+' ORDER BY rowid').all());
+    const v4=snapshot();
+    db.exec('BEGIN'); db.exec(migration(name)); db.exec('COMMIT');
+    assert.deepEqual(snapshot(),v4);
+    applyRemainingMigrations(c, name);
     assert.equal((await call(c,'/api/commands',old)).value.replayed,true);
     assert.equal((await mcp(c,'GetSavedEstimate',{planId:PLAN})).value.result.structuredContent.assessmentReadiness.status,'OUTDATED');
     assert.equal((await command(c,'StartPlan',{planId:PLAN},0)).value.error.code,'ASSESSMENT_SCHEMA_OUTDATED');
     c.advance(200);
     assert.equal((await command(c,'ResumePlan',{planId:paused},2,undefined,'owner-2')).status,200);
     await assessForStart(c); await ok(c,'StartPlan',{planId:PLAN},0);
-    const snapshot = () => ['estimation_owner_state','estimation_jobs','plan_estimation_inputs','assessment_revisions','command_receipts','work_intervals'].map(t=>db.prepare('SELECT * FROM '+t+' ORDER BY rowid').all());
-    const v4=snapshot();
-    db.exec('BEGIN'); db.exec(migration(name)); db.exec('COMMIT');
-    assert.deepEqual(snapshot(),v4);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
   } finally {c.close();}
 });

@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { payloadHash, claimAtlmJob } from '../worker/index.js';
 import { assessForStart, context, migrations, ok, call, mcp, envelope, command, taskV4, atlmAssessment, PLAN, OWNER } from './fixtures/tracker-db.mjs';
 
+import { seedLegacyPlan, applyRemainingMigrations } from './fixtures/legacy-schema.mjs';
+
 const resetUrl = new URL('../drizzle/0026_atlm_v4_reset.sql', import.meta.url);
 const snapshot = (db, table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().map(row => ({ ...row }));
 
@@ -12,12 +14,11 @@ test('v4 reset removes old estimation data while retaining plans, time and recei
   const c = context(index < 0 ? migrations.length : index);
   try {
     c.db.sqlite.exec('PRAGMA foreign_keys=ON');
-    await ok(c, 'CreatePlan', { planId: PLAN, title: 'Preserve plan', planText: '# Plan\n\n## Этап 1. Работа\nТекст',
+    await seedLegacyPlan(c, { planId: PLAN, title: 'Preserve plan', planText: '# Plan\n\n## Этап 1. Работа\nТекст',
       planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } });
     const secondPlan = '77777777-7777-4777-8777-777777777777';
-    const second = await call(c, '/api/commands', envelope('CreatePlan', { planId: secondPlan, title: 'Other owner',
-      planText: '# Other\n\n## Этап 1. Работа\nТекст', planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } }), 'second-owner');
-    assert.equal(second.status, 200);
+    await seedLegacyPlan(c, { planId: secondPlan, title: 'Other owner',
+      planText: '# Other\n\n## Этап 1. Работа\nТекст', planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } }, 'second-owner');
     const db = c.db.sqlite, oldCommand = '99999999-9999-4999-8999-999999999999', assessmentId = '88888888-8888-4888-8888-888888888888';
     const oldEnvelope = { schemaVersion: 1, commandId: oldCommand, commandType: 'RecordAssessment', expectedVersion: 0,
       payload: { context: { agentTask: { schemaVersion: 'agent-task-v1', old: 'old-marker' } } } };
@@ -98,13 +99,14 @@ test('v4 reset removes old estimation data while retaining plans, time and recei
     assert.equal(estimate.serverEstimation, null);
     assert.equal(estimate.forecastAvailability.reason, 'HISTORY_RESET');
     db.exec(readFileSync(new URL("../drizzle/0027_agent_task_v4_gate.sql",import.meta.url),"utf8"));
+    applyRemainingMigrations(c, '0027_agent_task_v4_gate.sql');
     const freshPlan = '55555555-5555-4555-8555-555555555555';
     await ok(c, 'CreatePlan', { planId: freshPlan, title: 'New plan', planText: '# New\n\n## Этап 1. Работа\nТекст',
       planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } });
     const freshAssessment = await atlmAssessment(c, freshPlan, taskV4(), { predictionRequest: { method: 'ATLM', methodVersion: 1 } });
     assert.equal((await command(c, 'RecordAssessment', freshAssessment, 0)).status, 200);
-    assert.throws(() => db.prepare(`INSERT INTO command_receipts(owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at)
-      VALUES(?,?,?,'StartPlan',?,0,?,?,'agent',?,'PENDING',?)`).run(OWNER,'22222222-2222-4222-8222-222222222222','hash',freshPlan,c.now(),OWNER,
+    assert.throws(() => db.prepare(`INSERT INTO command_receipts(owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at,execution_nonce)
+      VALUES(?,?,?,'StartPlan',?,0,?,?,'agent',?,'PENDING',?,'55555555-5555-4555-8555-555555555555')`).run(OWNER,'22222222-2222-4222-8222-222222222222','hash',freshPlan,c.now(),OWNER,
       '{"atlmStartForecast":{"estimation":{"formatVersion":1}}}',c.now()), /ATLM_CLIENT_RETIRED/);
     assert.equal(db.prepare('SELECT status FROM plans WHERE owner_id=? AND plan_id=?').get(OWNER, freshPlan).status, 'PLANNED');
     const freshStartId = '44444444-4444-4444-8444-444444444444';
@@ -139,7 +141,7 @@ test('a failed reset rolls back schema, receipts and data atomically', async () 
   const index = migrations.indexOf('0026_atlm_v4_reset.sql'), c = context(index < 0 ? migrations.length : index);
   try {
     c.db.sqlite.exec('PRAGMA foreign_keys=ON');
-    await ok(c, 'CreatePlan', { planId: PLAN, title: 'Rollback', planText: '# Plan\n\n## Этап 1. Работа\nТекст',
+    await seedLegacyPlan(c, { planId: PLAN, title: 'Rollback', planText: '# Plan\n\n## Этап 1. Работа\nТекст',
       planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } });
     const db = c.db.sqlite, before = Object.fromEntries(['plans','plan_steps','command_receipts','assessment_targets'].map(table => [table, snapshot(db, table)]));
     db.exec('BEGIN');
@@ -156,7 +158,7 @@ test('a failed reset rolls back schema, receipts and data atomically', async () 
 test('reset refuses to reuse a fence newer than its reset marker', async () => {
   const index = migrations.indexOf('0026_atlm_v4_reset.sql'), c = context(index < 0 ? migrations.length : index);
   try {
-    await ok(c, 'CreatePlan', { planId: PLAN, title: 'Fence', planText: '# Plan\n\n## Этап 1. Работа\nТекст',
+    await seedLegacyPlan(c, { planId: PLAN, title: 'Fence', planText: '# Plan\n\n## Этап 1. Работа\nТекст',
       planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } });
     const db = c.db.sqlite;
     db.prepare("INSERT INTO estimation_jobs(owner_id,job_key,kind,generation,status,fence,created_at,updated_at) VALUES(?,'train','TRAIN',1,'QUEUED',?,?,?)")

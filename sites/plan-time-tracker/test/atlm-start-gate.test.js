@@ -59,17 +59,14 @@ test('superseding revision immediately before the receipt insert rejects the cal
   try {
     await ok(c,'CreatePlan',{planId:PLAN,title:'Revision race',planCreatedAt:{precision:'dateOnly',on:'2027-01-01',timeZone:'UTC'}});
     const assessment=await assessForStart(c);
-    const prepare=c.db.prepare.bind(c.db);
+    const batch=c.db.batch.bind(c.db);
     let raced=false;
-    c.db.prepare=sql=>{
-      const stmt=prepare(sql);
-      if (!raced && sql.includes('INSERT OR IGNORE INTO command_receipts') && sql.includes('source.snapshot_key')) {
-        const bind=stmt.bind.bind(stmt);
-        stmt.bind=(...args)=>{const bound=bind(...args), run=bound.run.bind(bound);
-          bound.run=async()=>{raced=true;await ok(c,'RecordAssessment',{...assessment,reason:'Confirm a revised input'},1);return run();};
-          return bound;};
+    c.db.batch=async statements=>{
+      if (!raced && statements.some(({sql}) => sql.includes('INSERT OR IGNORE INTO command_receipts') && sql.includes('source.snapshot_key'))) {
+        raced=true;
+        await ok(c,'RecordAssessment',{...assessment,reason:'Confirm a revised input'},1);
       }
-      return stmt;
+      return batch(statements);
     };
     const rejected=await command(c,'StartPlan',{planId:PLAN},0);
     assert.equal(raced,true);assert.equal(rejected.value.error.code,'ASSESSMENT_CONTEXT_CHANGED');

@@ -220,7 +220,7 @@ async function beginAttempt(c, stepId) {
 const closeAttempt = (c, lease) => ok(c, "CloseStepAttempt", { ...lease, disposition: "CLOSED", reason: "Period fixture completed" });
 
 test("calendar facts remain measured when historical active intervals are missing", async () => {
-  const c = context(migrations.indexOf("0027_agent_task_v4_gate.sql"));
+  const c = context();
   try {
     await planned(c);
     c.db.sqlite.prepare("UPDATE plans SET status='COMPLETED',first_started_at=?,finished_at=? WHERE owner_id=? AND plan_id=?")

@@ -44,8 +44,13 @@ class SqliteD1 {
     try {
       const results = [];
       for (const statement of statements) {
-        const result = this.sqlite.prepare(statement.sql).run(...statement.args);
-        results.push({ success: true, meta: { changes: Number(result.changes) } });
+        const prepared = this.sqlite.prepare(statement.sql);
+        if (prepared.columns().length) {
+          results.push({ success: true, results: prepared.all(...statement.args), meta: {} });
+        } else {
+          const result = prepared.run(...statement.args);
+          results.push({ success: true, results: [], meta: { changes: Number(result.changes) } });
+        }
       }
       this.sqlite.exec("COMMIT");
       return results;

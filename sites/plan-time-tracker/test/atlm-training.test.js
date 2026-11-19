@@ -160,7 +160,7 @@ test("checkpoint survives a database reopen and queued continuation does not con
     const initial = await paused.reached;
     c.advance(60001); paused.release(); await pending;
     const persisted = trainJob(c), resumeAt = c.now();
-    c.db.sqlite.prepare("UPDATE estimation_jobs SET status='QUEUED',lease_until=NULL,executor_epoch=executor_epoch+2 WHERE owner_id=? AND job_key='train'").run(OWNER);
+    c.db.sqlite.prepare("UPDATE estimation_jobs SET status='QUEUED',lease_until=NULL,executor_epoch=executor_epoch+3 WHERE owner_id=? AND job_key='train'").run(OWNER);
     c.close(); c = context(0, { databasePath }); c.advance(resumeAt - c.now()); await drain(c);
     assert.equal(trainJob(c).attempts, persisted.attempts);
     assert.equal(models(c)[0].manifest_json, JSON.stringify(JSON.parse(initial.snapshot_json).manifest));
@@ -312,6 +312,11 @@ function cloneStoredExperience(c, sourcePlanId, count) {
       const inserted = insertAssessment({ ...assessment, plan_id: planId, command_id: commandId, assessment_id: crypto.randomUUID() });
       insertSample({ ...sample, plan_id: planId, input_assessment_sequence: Number(inserted.lastInsertRowid), source_digest: "capacity-" + i });
     }
+    // This capacity fixture bypasses the application observer deliberately; seed
+    // its matching counters explicitly, in the same transaction as the sample rows.
+    c.db.sqlite.prepare(`UPDATE estimation_owner_state SET dataset_revision=dataset_revision+?,
+      new_sample_count=new_sample_count+?,updated_at=? WHERE owner_id=?`)
+      .run(count, count * sample.is_first_eligible, sample.observed_at, OWNER);
     c.db.sqlite.exec("COMMIT");
   } catch (error) { c.db.sqlite.exec("ROLLBACK"); throw error; }
 }

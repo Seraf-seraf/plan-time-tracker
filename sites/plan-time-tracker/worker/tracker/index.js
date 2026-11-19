@@ -50,8 +50,22 @@ import { ATLM_RETRAIN_EVERY_NEW_PLANS, atlmDiagnostics } from '../atlm/training.
 
 import { isDocumentUpdate, parsePlanDocument } from './plan-document.js';
 import { preparePlanAssessmentTargets, updatePlanDocumentBatch } from './plan-document-update.js';
+import { SqlTransaction } from '../application/transaction.js';
+import { appendCommand } from './command-handlers.js';
 
 const FORECAST_METRICS = ['PLAN_ACTIVE', 'CALENDAR', 'PAUSED'];
+
+function receiptContext(receiptValues, values, executionNonce) {
+  const [ownerId, commandId, , commandType, planId, expectedVersion, nowMs, actorId] = receiptValues;
+  return { ownerId, commandId, commandType, planId, expectedVersion, nowMs, actorId, values, executionNonce };
+}
+
+async function commitReceiptCommand(db, insertion, receiptValues, values, executionNonce) {
+  const transaction = new SqlTransaction(db);
+  transaction.addPrepared(insertion);
+  appendCommand(transaction, receiptContext(receiptValues, values, executionNonce));
+  return (await transaction.commit())[0];
+}
 
 const assessmentPayloadSchema = {
   type: 'object',
@@ -645,6 +659,7 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
   }
   const actorType = channel === 'mcp' ? 'agent' : 'user';
   let receiptInserted = false;
+  const executionNonce = crypto.randomUUID();
   try {
     const values = [
       identity.ownerId,
@@ -666,10 +681,10 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
         serverPrediction?.fallback?.kind === 'HISTORICAL_MEDIAN'
           ? serverPrediction.fallback.datasetRevision
           : null;
-      write = await db
+      write = db
         .prepare(
           `INSERT OR IGNORE INTO command_receipts
-        (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,result_json,recorded_at)
+        (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,result_json,recorded_at,execution_nonce)
         SELECT ?,?,?,?,?,?,?,?,?,?,CASE
           WHEN NOT EXISTS(SELECT 1 FROM plans WHERE owner_id=? AND plan_id=?) THEN 'PLAN_NOT_FOUND'
           WHEN EXISTS(SELECT 1 FROM plans WHERE owner_id=? AND plan_id=? AND deleted_at IS NOT NULL) THEN 'PLAN_DELETED'
@@ -678,7 +693,7 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
           WHEN ? IS NOT NULL AND NOT EXISTS(${ATLM_CURRENT_MODEL_SQL}) THEN 'ATLM_MODEL_CHANGED'
           WHEN ? IS NOT NULL AND (COALESCE((SELECT dataset_revision FROM estimation_owner_state WHERE owner_id=?),0)<>?
             OR EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND kind='REFRESH_SAMPLE' AND generation>processed_generation)) THEN 'ATLM_MODEL_CHANGED'
-          ELSE 'PENDING' END,?,?`,
+          ELSE 'PENDING' END,?,?,?`,
         )
         .bind(
           ...values,
@@ -699,17 +714,17 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
           identity.ownerId,
           JSON.stringify({ serverNow: nowMs }),
           nowMs,
-        )
-        .run();
+          executionNonce,
+        );
     } else {
-      write = await db
+      write = db
         .prepare(
-          "INSERT OR IGNORE INTO command_receipts (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?)",
+          "INSERT OR IGNORE INTO command_receipts (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at,execution_nonce) VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',?,?)",
         )
-        .bind(...values, nowMs)
-        .run();
+        .bind(...values, nowMs, executionNonce);
     }
-    receiptInserted = Number(write.meta?.changes) > 0;
+    const inserted = await commitReceiptCommand(db, write, values.slice(0, 9), payload, executionNonce);
+    receiptInserted = Number(inserted.meta?.changes) > 0;
   } catch (error) {
     throw mapDbError(error);
   }
@@ -726,7 +741,7 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
   return resultFromReceipt(receipt, !receiptInserted);
 }
 
-async function createPlanBatch(db, insertReceipt, receiptValues, payload, nowMs) {
+async function createPlanBatch(db, insertReceipt, receiptValues, payload, nowMs, nonce) {
   const [ownerId, commandId] = receiptValues;
   const {
     title,
@@ -738,7 +753,6 @@ async function createPlanBatch(db, insertReceipt, receiptValues, payload, nowMs)
     documentSteps,
     planId,
   } = payload;
-  const nonce = crypto.randomUUID();
   const receipt = JSON.stringify({
     title,
     description,
@@ -748,12 +762,16 @@ async function createPlanBatch(db, insertReceipt, receiptValues, payload, nowMs)
     nonce,
   });
   const insertion = db
-    .prepare(insertReceipt + " VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',NULL,?)")
-    .bind(...receiptValues, receipt, nowMs);
+    .prepare(insertReceipt + " VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',NULL,?,?)")
+    .bind(...receiptValues, receipt, nowMs, nonce);
   const guard = `EXISTS (SELECT 1 FROM command_receipts WHERE owner_id=? AND command_id=?
     AND json_extract(payload_json,'$.nonce')=? AND outcome_code='OK')`;
   const guardArgs = [ownerId, commandId, nonce];
-  const statements = [insertion];
+  const transaction = new SqlTransaction(db);
+  transaction.add('INSERT OR IGNORE INTO owners(owner_id,created_at) VALUES(?,?)', ownerId, nowMs);
+  transaction.addPrepared(insertion);
+  appendCommand(transaction, receiptContext(receiptValues, payload, nonce));
+  const statements = [];
   if (planText !== undefined) {
     statements.push(
       db
@@ -784,7 +802,8 @@ async function createPlanBatch(db, insertReceipt, receiptValues, payload, nowMs)
       )
       .bind(JSON.stringify({ sourceReference }), ...guardArgs),
   );
-  return (await db.batch(statements))[0];
+  for (const statement of statements) transaction.addPrepared(statement);
+  return (await transaction.commit())[1];
 }
 
 async function executeCommand(db, identity, envelope, channel, nowMs) {
@@ -947,10 +966,12 @@ async function executeCommand(db, identity, envelope, channel, nowMs) {
     actorType,
   ];
   const insertReceipt = `INSERT OR IGNORE INTO command_receipts
-    (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,result_json,recorded_at)`;
+    (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,result_json,recorded_at,execution_nonce)`;
   let receiptInserted = false;
   for (let attempt = 1; attempt <= CURRENT_FORECAST_MAX_READ_ATTEMPTS; attempt++) {
     let statement;
+    let commandPayload = payload;
+    const executionNonce = crypto.randomUUID();
     if (firstStart) {
       let current;
       try {
@@ -1006,6 +1027,7 @@ async function executeCommand(db, identity, envelope, channel, nowMs) {
               },
             }
           : payload;
+      commandPayload = contents;
       // A change to the assessment, model or training history requires a new command.
       // A refresh for another unfinished plan can safely trigger a fresh calculation here.
       statement = db
@@ -1018,7 +1040,7 @@ async function executeCommand(db, identity, envelope, channel, nowMs) {
           WHEN NOT EXISTS(SELECT 1 FROM source WHERE source.snapshot_key=?) AND ?='PENDING' THEN ?
           ELSE ? END AS code)
         ${insertReceipt} SELECT ?,?,?,?,?,?,?,?,?,?,code,
-          CASE WHEN code=? THEN ? WHEN code='ASSESSMENT_CONTEXT_CHANGED' THEN ? ELSE NULL END,?
+          CASE WHEN code=? THEN ? WHEN code='ASSESSMENT_CONTEXT_CHANGED' THEN ? ELSE NULL END,?,?
           FROM decision WHERE code IS NOT NULL`,
         )
         .bind(
@@ -1040,20 +1062,21 @@ async function executeCommand(db, identity, envelope, channel, nowMs) {
           readiness?.code ? JSON.stringify({ assessmentReadiness: readiness }) : null,
           JSON.stringify({ invalidPaths: ['assessment'] }),
           nowMs,
+          executionNonce,
         );
     } else if (envelope.commandType !== 'CreatePlan' && !documentUpdate) {
       statement = db
-        .prepare(`${insertReceipt} VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',NULL,?)`)
-        .bind(...receiptValues, JSON.stringify(payload), nowMs);
+        .prepare(`${insertReceipt} VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',NULL,?,?)`)
+        .bind(...receiptValues, JSON.stringify(payload), nowMs, executionNonce);
     }
     try {
       let inserted;
       if (envelope.commandType === 'CreatePlan') {
-        inserted = await createPlanBatch(db, insertReceipt, receiptValues, payload, nowMs);
+        inserted = await createPlanBatch(db, insertReceipt, receiptValues, payload, nowMs, executionNonce);
       } else if (documentUpdate) {
-        inserted = await updatePlanDocumentBatch(db, insertReceipt, receiptValues, envelope, nowMs);
+        inserted = await updatePlanDocumentBatch(db, insertReceipt, receiptValues, envelope, nowMs, executionNonce);
       } else {
-        inserted = await statement.run();
+        inserted = await commitReceiptCommand(db, statement, receiptValues, commandPayload, executionNonce);
       }
       receiptInserted = Number(inserted.meta?.changes) > 0;
     } catch (error) {

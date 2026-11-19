@@ -19,21 +19,17 @@ async function train(c) {
   return { plans, status };
 }
 function beforePredictionWrite(c, effect) {
-  const prepare = c.db.prepare; let used = false;
-  c.db.prepare = function(sql) {
-    const statement = prepare.call(this, sql), bind = statement.bind.bind(statement);
-    statement.bind = (...args) => {
-      const bound = bind(...args);
-      if (!used && sql.startsWith("INSERT OR IGNORE INTO command_receipts") && args[3] === "RecordAssessment"
-        && JSON.parse(args[9]).predictionRequest) {
-        const run = bound.run.bind(bound);
-        bound.run = async () => { used = true; await effect(); return run(); };
-      }
-      return bound;
-    };
-    return statement;
+  const batch = c.db.batch; let used = false;
+  c.db.batch = async function(statements) {
+    if (!used && statements.some(({sql,args}) => sql.includes("INSERT OR IGNORE INTO command_receipts")
+      && args.includes("RecordAssessment") && args.some(value => typeof value === "string"
+        && value.startsWith("{") && JSON.parse(value).predictionRequest))) {
+      used = true;
+      await effect();
+    }
+    return batch.call(this, statements);
   };
-  return () => { c.db.prepare = prepare; };
+  return () => { c.db.batch = batch; assert.equal(used, true, "prediction write race was exercised"); };
 }
 
 test("all ATLM tools share strict discovery/runtime schemas and declare read-only or idempotent mutation", async () => {
@@ -235,7 +231,7 @@ test("a corrupt stored model is a service error, never an unavailable forecast",
   try {
     await plannedAtlm(c);
     c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at,method_version,feature_version) VALUES(?,'corrupt-model',1,'ACTIVE','{}','[]','invalid',?,0,?,'agent-v5-operations','agent-task-v4')").run(OWNER, c.now(), c.now());
-    c.db.sqlite.prepare("INSERT INTO estimation_owner_state(owner_id,active_model_id) VALUES(?,'corrupt-model')").run(OWNER);
+    c.db.sqlite.prepare("INSERT INTO estimation_owner_state(owner_id,active_model_id,schema_version) VALUES(?,'corrupt-model',4)").run(OWNER);
     const args = await argsFor(c), failure = await mcp(c, "EstimatePlanTime", args);
     assert.equal(failure.value.result.isError, true); assert.equal(failure.value.result.structuredContent.code, "SOURCE_UNAVAILABLE");
     assert.equal(failure.value.result.structuredContent.details.reason, "INVALID_ARTIFACT");
@@ -564,17 +560,13 @@ test("first Start freezes fresh forecast, preserves recorded revision and replay
  }finally{c.close();}
 });
 function beforeStartWrite(c,effect){
- const prepare=c.db.prepare;let used=false;
- c.db.prepare=function(sql){
-  const statement=prepare.call(this,sql),bind=statement.bind.bind(statement);
-  statement.bind=(...args)=>{
-   const bound=bind(...args);
-   if(!used&&sql.includes("INSERT OR IGNORE INTO command_receipts")&&args.includes("StartPlan")){
-    const run=bound.run.bind(bound);bound.run=async()=>{used=true;await effect();return run();};
-   }
-   return bound;
-  };return statement;
- };return()=>{c.db.prepare=prepare;};
+ const batch=c.db.batch;let used=false;
+ c.db.batch=async function(statements){
+  if(!used&&statements.some(({sql,args})=>sql.includes("INSERT OR IGNORE INTO command_receipts")&&args.includes("StartPlan"))){
+   used=true;await effect();
+  }
+  return batch.call(this,statements);
+ };return()=>{c.db.batch=batch;assert.equal(used,true,"start write race was exercised");};
 }
 test("first Start rejects changed features durably, with no interval or snapshot; private input is rejected",async()=>{
  const c=context();let restore;try{
@@ -639,7 +631,7 @@ test("a technical model failure is explicit on current read and cannot hide a fr
  const c=context();try{
   await plannedAtlm(c);
   c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at,method_version,feature_version) VALUES(?,'corrupt-model',1,'ACTIVE','{}','[]','invalid',?,0,?,'agent-v5-operations','agent-task-v4')").run(OWNER,c.now(),c.now());
-  c.db.sqlite.prepare("INSERT INTO estimation_owner_state(owner_id,active_model_id) VALUES(?,'corrupt-model')").run(OWNER);
+  c.db.sqlite.prepare("INSERT INTO estimation_owner_state(owner_id,active_model_id,schema_version) VALUES(?,'corrupt-model',4)").run(OWNER);
   const before=rows(c),failure=await mcp(c,"GetSavedEstimate",{planId:PLAN});
   assert.equal(failure.value.result.structuredContent.code,"SOURCE_UNAVAILABLE");assert.deepEqual(rows(c),before);
   await ok(c,"StartPlan",{planId:PLAN},0);

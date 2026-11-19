@@ -1,3 +1,4 @@
+import { AtlmOwnerRepository } from './owner-repository.js';
 import { assessmentReadiness } from './readiness.js';
 import {
   appError,
@@ -656,11 +657,7 @@ async function executeAtlmTool(db, ownerId, name, args, nowMs, clock) {
   if (name === 'GetEstimationModelStatus') return getEstimationModelStatus(db, ownerId, nowMs);
   if (name === 'StartEstimationTraining') {
     await db.batch([
-      db
-        .prepare(
-          'INSERT OR IGNORE INTO estimation_owner_state(owner_id) SELECT owner_id FROM owners WHERE owner_id=?',
-        )
-        .bind(ownerId),
+      new AtlmOwnerRepository(db).ensureStatement(ownerId),
       db
         .prepare(
           'UPDATE estimation_owner_state SET forced_retrain=1, manual_epoch=manual_epoch+1, updated_at=? WHERE owner_id=?',

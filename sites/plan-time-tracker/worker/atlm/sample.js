@@ -1,3 +1,6 @@
+import { SqlTransaction } from '../application/transaction.js';
+import { TransactionalEvents } from '../application/events.js';
+import { AtlmSampleObserver } from './observers.js';
 import {
   AppError,
   UUID,
@@ -17,6 +20,10 @@ import {
   atlmUnavailableInterval,
   normalizeAgentTask,
 } from './model.js';
+
+const sampleEvents = new TransactionalEvents({
+  'sample.persisting': [new AtlmSampleObserver()],
+});
 
 async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
   if (!UUID.test(planId || '') || !Number.isSafeInteger(nowMs) || nowMs < 0)
@@ -228,7 +235,7 @@ async function claimAtlmJob(
     throw appError('VALIDATION_ERROR', 'Invalid ATLM lease.');
   return dbFirst(
     db,
-    `UPDATE estimation_jobs SET status='RUNNING',lease_until=?,updated_at=?,fence=fence+1,executor_epoch=executor_epoch+2,attempts=attempts+CASE WHEN status='QUEUED' AND checkpoint_json IS NOT NULL THEN 0 ELSE 1 END
+    `UPDATE estimation_jobs SET status='RUNNING',lease_until=?,updated_at=?,fence=fence+1,executor_epoch=executor_epoch+3,attempts=attempts+CASE WHEN status='QUEUED' AND checkpoint_json IS NOT NULL THEN 0 ELSE 1 END
     WHERE owner_id=? AND job_key=? AND generation>processed_generation AND next_attempt_at<=?
       AND status<>'FAILED' AND (attempts<4 OR (status='QUEUED' AND checkpoint_json IS NOT NULL AND attempts<=4))
       AND (? OR status<>'RUNNING') AND (status<>'RUNNING' OR lease_until<=?) RETURNING *`,
@@ -245,7 +252,26 @@ async function claimAtlmJob(
 async function persistAtlmSample(db, ownerId, source, nowMs, guard) {
   if (!guard || !Number.isSafeInteger(guard.generation) || !Number.isSafeInteger(guard.fence))
     throw appError('VALIDATION_ERROR', 'ATLM sample requires a leased job guard.');
-  const params = [
+  const insertionGuard = {
+    sql: `EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key=? AND generation=?
+      AND fence=? AND lease_until>? AND generation=? AND status='RUNNING')
+      AND NOT EXISTS(SELECT 1 FROM estimation_samples WHERE sequence=(
+        SELECT MAX(sequence) FROM estimation_samples WHERE owner_id=? AND plan_id=?) AND source_digest=?)`,
+    args: [ownerId, 'refresh:' + source.planId, guard.generation, guard.fence, nowMs,
+      source.sourceGeneration, ownerId, source.planId, source.sourceDigest],
+  };
+  const transaction = new SqlTransaction(db);
+  // Both writes evaluate one immutable predicate before any sample is inserted.
+  // A duplicate, lost lease, or superseded source changes neither the sample nor its counters.
+  sampleEvents.emit(transaction, {
+    type: 'sample.persisting', ownerId, source, nowMs, guard: insertionGuard,
+  });
+  transaction.add(
+    `INSERT INTO estimation_samples(owner_id,plan_id,input_assessment_sequence,source_digest,source_generation,
+      eligibility,reasons_json,features_json,issued_prediction_json,actual_ms,captured_at,source_available_at,observed_at,is_first_eligible)
+    SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ?='ELIGIBLE' AND NOT EXISTS(SELECT 1 FROM estimation_samples
+      WHERE owner_id=? AND plan_id=? AND is_first_eligible=1) THEN 1 ELSE 0 END
+    WHERE ${insertionGuard.sql} RETURNING *`,
     ownerId,
     source.planId,
     source.inputAssessmentSequence,
@@ -262,27 +288,9 @@ async function persistAtlmSample(db, ownerId, source, nowMs, guard) {
     source.eligibility,
     ownerId,
     source.planId,
-    ownerId,
-    'refresh:' + source.planId,
-    guard.generation,
-    guard.fence,
-    nowMs,
-    source.sourceGeneration,
-    ownerId,
-    source.planId,
-    source.sourceDigest,
-  ];
-  const inserted = await dbFirst(
-    db,
-    `INSERT INTO estimation_samples(owner_id,plan_id,input_assessment_sequence,source_digest,source_generation,
-    eligibility,reasons_json,features_json,issued_prediction_json,actual_ms,captured_at,source_available_at,observed_at,is_first_eligible)
-    SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,CASE WHEN ?='ELIGIBLE' AND NOT EXISTS(SELECT 1 FROM estimation_samples WHERE owner_id=? AND plan_id=? AND is_first_eligible=1) THEN 1 ELSE 0 END
-    WHERE EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND lease_until>?
-      AND generation=? AND status='RUNNING')
-      AND NOT EXISTS(SELECT 1 FROM estimation_samples WHERE sequence=(SELECT MAX(sequence) FROM estimation_samples WHERE owner_id=? AND plan_id=?) AND source_digest=?)
-    RETURNING *`,
-    ...params,
+    ...insertionGuard.args,
   );
+  const inserted = (await transaction.commit()).at(-1).results[0];
   return inserted
     ? { inserted: true, sample: atlmSampleView(inserted) }
     : { inserted: false, sample: null };

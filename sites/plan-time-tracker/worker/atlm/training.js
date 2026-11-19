@@ -1,3 +1,7 @@
+import { SqlTransaction } from '../application/transaction.js';
+import { TransactionalEvents } from '../application/events.js';
+import { AtlmCheckpointObserver } from './observers.js';
+import { AtlmOwnerRepository } from './owner-repository.js';
 import {
   appError,
   canonical,
@@ -30,6 +34,10 @@ import {
 import { atlmSampleView, claimAtlmJob, persistAtlmSample, readAtlmSampleSource } from './sample.js';
 
 const ATLM_RETRAIN_EVERY_NEW_PLANS = 2;
+
+const trainingEvents = new TransactionalEvents({
+  'training.checkpoint-discarding': [new AtlmCheckpointObserver()],
+});
 
 const ATLM_TRAINING_LEASE_MS = 60000;
 
@@ -460,37 +468,48 @@ async function getEstimationModelStatus(db, ownerId, nowMs) {
   };
 }
 
-function atlmEnqueueTrainingStatements(db, ownerId, nowMs) {
-  return [
-    db
-      .prepare(
-        `INSERT INTO estimation_jobs(owner_id,job_key,kind,generation,status,created_at,updated_at)
-      SELECT owner_id,'train','TRAIN',training_generation+1,'QUEUED',?,? FROM estimation_owner_state
-      WHERE owner_id=? AND (forced_retrain=1 OR new_sample_count-last_attempted_new_sample_count>=?)
-        AND NOT EXISTS(${ATLM_PENDING_REFRESH_SQL})
-      ON CONFLICT(owner_id,job_key) DO UPDATE SET generation=estimation_jobs.generation+1,
-        processed_generation=estimation_jobs.generation,status='QUEUED',lease_until=NULL,attempts=0,next_attempt_at=0,
-        snapshot_json=NULL,checkpoint_json=NULL,last_error=NULL,updated_at=excluded.updated_at
-      WHERE estimation_jobs.generation=estimation_jobs.processed_generation OR estimation_jobs.status='FAILED'`,
-      )
-      .bind(nowMs, nowMs, ownerId, ATLM_RETRAIN_EVERY_NEW_PLANS),
-    db
-      .prepare(
-        `UPDATE estimation_owner_state SET training_generation=COALESCE((SELECT generation FROM estimation_jobs WHERE owner_id=? AND job_key='train'),training_generation)
-      WHERE owner_id=?`,
-      )
-      .bind(ownerId, ownerId),
-  ];
+function appendAtlmEnqueueTraining(transaction, ownerId, nowMs) {
+  const due = `owner_id=? AND (forced_retrain=1 OR new_sample_count-last_attempted_new_sample_count>=?)
+    AND NOT EXISTS(${ATLM_PENDING_REFRESH_SQL})`;
+  // Clean the old generation before the same predicate advances its job. If the
+  // enqueue cannot apply, its checkpoint is untouched, including a running job.
+  trainingEvents.emit(transaction, {
+    type: 'training.checkpoint-discarding',
+    ownerId,
+    guard: {
+      sql: `EXISTS(SELECT 1 FROM estimation_owner_state WHERE ${due})
+        AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key='train'
+          AND (generation=processed_generation OR status='FAILED'))`,
+      args: [ownerId, ATLM_RETRAIN_EVERY_NEW_PLANS, ownerId],
+    },
+  });
+  transaction.add(
+    `INSERT INTO estimation_jobs(owner_id,job_key,kind,generation,status,created_at,updated_at,fence)
+    SELECT owner_id,'train','TRAIN',training_generation+1,'QUEUED',?,?,COALESCE(data_reset_at,0)
+      FROM estimation_owner_state WHERE ${due}
+    ON CONFLICT(owner_id,job_key) DO UPDATE SET generation=estimation_jobs.generation+1,
+      processed_generation=estimation_jobs.generation,status='QUEUED',lease_until=NULL,attempts=0,next_attempt_at=0,
+      snapshot_json=NULL,checkpoint_json=NULL,last_error=NULL,updated_at=excluded.updated_at
+    WHERE estimation_jobs.generation=estimation_jobs.processed_generation OR estimation_jobs.status='FAILED'`,
+    nowMs, nowMs, ownerId, ATLM_RETRAIN_EVERY_NEW_PLANS,
+  );
+  transaction.add(
+    `UPDATE estimation_owner_state SET training_generation=COALESCE((SELECT generation
+      FROM estimation_jobs WHERE owner_id=? AND job_key='train'),training_generation) WHERE owner_id=?`,
+    ownerId, ownerId,
+  );
 }
 
 async function atlmEnqueueTraining(db, ownerId, nowMs) {
-  await db.batch(atlmEnqueueTrainingStatements(db, ownerId, nowMs));
+  const transaction = new SqlTransaction(db);
+  appendAtlmEnqueueTraining(transaction, ownerId, nowMs);
+  await transaction.commit();
 }
 
 async function atlmReleaseSuperseded(db, ownerId, job, nowMs) {
   await db
     .prepare(
-      `UPDATE estimation_jobs SET status='QUEUED',executor_epoch=executor_epoch+2,lease_until=NULL,attempts=0,next_attempt_at=0,
+      `UPDATE estimation_jobs SET status='QUEUED',executor_epoch=executor_epoch+3,lease_until=NULL,attempts=0,next_attempt_at=0,
     snapshot_json=NULL,checkpoint_json=NULL,last_error=NULL,updated_at=?
     WHERE owner_id=? AND job_key=? AND fence=? AND generation>? AND status='RUNNING' AND lease_until>?`,
     )
@@ -628,7 +647,7 @@ async function atlmCheckpoint(
     values.push(JSON.stringify(snapshot));
   }
   if (release)
-    fields.push("status='QUEUED'", 'executor_epoch=executor_epoch+2', 'lease_until=NULL');
+    fields.push("status='QUEUED'", 'executor_epoch=executor_epoch+3', 'lease_until=NULL');
   const head = db
     .prepare(`UPDATE estimation_jobs SET ${fields.join(',')} WHERE ${guard} RETURNING fence`)
     .bind(...values, ...guardArgs);
@@ -984,32 +1003,33 @@ async function atlmFinalizeTraining(db, ownerId, job, snapshot, checkpoint, resu
         .bind(snapshot.modelId, ownerId, ...completedValues),
     );
   // Pointer now names the candidate on success; use the same fence and immutable model receipt.
-  statements.push(
-    db
-      .prepare(
-        `UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+2,lease_until=NULL,next_attempt_at=0,last_error=?,
-    checkpoint_json=?,updated_at=? WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?
-    AND EXISTS(SELECT 1 FROM estimation_models WHERE owner_id=? AND model_id=? AND status=?)`,
-      )
-      .bind(
-        result.status === 'FAILED' ? result.reason : null,
-        JSON.stringify({
-          phase: 'DONE',
-          completedCases: checkpoint.cases?.length ?? 0,
-          progressRevision: checkpoint.progressRevision + 1,
-        }),
-        nowMs,
-        ownerId,
-        job.generation,
-        job.fence,
-        nowMs,
-        ownerId,
-        snapshot.modelId,
-        result.activate ? 'ACTIVE' : 'REJECTED',
-      ),
+  const completionGuard = {
+    sql: `EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key='train'
+      AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?)
+      AND EXISTS(SELECT 1 FROM estimation_models WHERE owner_id=? AND model_id=? AND status=?)`,
+    args: [ownerId, job.generation, job.fence, nowMs, ownerId, snapshot.modelId,
+      result.activate ? 'ACTIVE' : 'REJECTED'],
+  };
+  const transaction = new SqlTransaction(db);
+  for (const statement of statements) transaction.addPrepared(statement);
+  trainingEvents.emit(transaction, {
+    type: 'training.checkpoint-discarding', ownerId, generation: job.generation,
+    guard: completionGuard,
+  });
+  transaction.add(
+    `UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+3,
+      lease_until=NULL,next_attempt_at=0,last_error=?,checkpoint_json=?,updated_at=?
+    WHERE owner_id=? AND job_key='train' AND ${completionGuard.sql}`,
+    result.status === 'FAILED' ? result.reason : null,
+    JSON.stringify({
+      phase: 'DONE',
+      completedCases: checkpoint.cases?.length ?? 0,
+      progressRevision: checkpoint.progressRevision + 1,
+    }),
+    nowMs, ownerId, ...completionGuard.args,
   );
-  statements.push(...atlmEnqueueTrainingStatements(db, ownerId, nowMs));
-  await db.batch(statements);
+  appendAtlmEnqueueTraining(transaction, ownerId, nowMs);
+  await transaction.commit();
   const receipt = await dbFirst(
     db,
     'SELECT status FROM estimation_models WHERE owner_id=? AND model_id=?',
@@ -1024,7 +1044,8 @@ async function atlmSupersedeSnapshot(db, ownerId, job, snapshot, nowMs) {
     AND fence=? AND status='RUNNING' AND lease_until>?)`;
   const values = [ownerId, job.generation, job.fence, nowMs];
   // Keep the obsolete manifest as an immutable receipt, then allocate another generation.
-  await db.batch([
+  const transaction = new SqlTransaction(db);
+  transaction.addPrepared(
     db
       .prepare(
         `UPDATE estimation_training_attempts SET completed_at=?,dataset_revision=?,manifest_json=?,reason='SNAPSHOT_INVALIDATED',
@@ -1038,6 +1059,8 @@ async function atlmSupersedeSnapshot(db, ownerId, job, snapshot, nowMs) {
         atlmAttemptId(job),
         ...values,
       ),
+  );
+  transaction.addPrepared(
     db
       .prepare(
         `INSERT OR IGNORE INTO estimation_models(owner_id,model_id,model_version,status,manifest_json,dataset_digest,
@@ -1061,13 +1084,21 @@ async function atlmSupersedeSnapshot(db, ownerId, job, snapshot, nowMs) {
         ATLM_FEATURE_VERSION,
         ...values,
       ),
+  );
+  trainingEvents.emit(transaction, {
+    type: 'training.checkpoint-discarding', ownerId, generation: job.generation,
+    guard: { sql: guard, args: values },
+  });
+  transaction.addPrepared(
     db
       .prepare(
-        `UPDATE estimation_jobs SET processed_generation=generation,generation=generation+1,status='QUEUED',executor_epoch=executor_epoch+2,
+        `UPDATE estimation_jobs SET processed_generation=generation,generation=generation+1,status='QUEUED',executor_epoch=executor_epoch+3,
       lease_until=NULL,attempts=0,next_attempt_at=0,snapshot_json=NULL,checkpoint_json=NULL,last_error=NULL,updated_at=?
       WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`,
       )
       .bind(nowMs, ...values),
+  );
+  transaction.addPrepared(
     db
       .prepare(
         `UPDATE estimation_owner_state SET training_generation=(SELECT generation FROM estimation_jobs WHERE owner_id=? AND job_key='train'),
@@ -1075,7 +1106,8 @@ async function atlmSupersedeSnapshot(db, ownerId, job, snapshot, nowMs) {
       WHERE owner_id=? AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key='train' AND generation=? AND fence=?)`,
       )
       .bind(ownerId, nowMs, ownerId, ownerId, job.generation + 1, job.fence),
-  ]);
+  );
+  await transaction.commit();
 }
 
 async function atlmRecordFailure(db, ownerId, job, error, nowMs) {
@@ -1153,7 +1185,7 @@ async function atlmRecordFailure(db, ownerId, job, error, nowMs) {
   statements.push(
     db
       .prepare(
-        `UPDATE estimation_jobs SET status=?,executor_epoch=executor_epoch+2,lease_until=NULL,next_attempt_at=?,last_error=?,updated_at=?
+        `UPDATE estimation_jobs SET status=?,executor_epoch=executor_epoch+3,lease_until=NULL,next_attempt_at=?,last_error=?,updated_at=?
     WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`,
       )
       .bind(
@@ -1184,12 +1216,7 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
   const budget = () => elapsed() < ATLM_TRAINING_BUDGET_MS;
   const canStartWork = () =>
     elapsed() < ATLM_TRAINING_BUDGET_MS - ATLM_TRAINING_CHECKPOINT_RESERVE_MS;
-  await db
-    .prepare(
-      'INSERT OR IGNORE INTO estimation_owner_state(owner_id) SELECT owner_id FROM owners WHERE owner_id=?',
-    )
-    .bind(ownerId)
-    .run();
+  await new AtlmOwnerRepository(db).ensureStatement(ownerId).run();
   // A crashed fourth attempt remains failed until new source data creates another generation.
   const expiredAt = clock();
   await db.batch([
@@ -1224,7 +1251,7 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
       .bind(ownerId, expiredAt, ownerId, ownerId, expiredAt),
     db
       .prepare(
-        `UPDATE estimation_jobs SET status=CASE WHEN attempts>=4 THEN 'FAILED' WHEN attempts=0 THEN 'QUEUED' ELSE 'RETRY_WAIT' END,executor_epoch=executor_epoch+2,
+        `UPDATE estimation_jobs SET status=CASE WHEN attempts>=4 THEN 'FAILED' WHEN attempts=0 THEN 'QUEUED' ELSE 'RETRY_WAIT' END,executor_epoch=executor_epoch+3,
       next_attempt_at=CASE WHEN attempts>=4 OR attempts=0 THEN 0 ELSE lease_until+CASE attempts WHEN 1 THEN 60000 WHEN 2 THEN 300000 ELSE 900000 END END,
       lease_until=NULL,last_error=CASE WHEN attempts=0 THEN NULL ELSE 'LEASE_EXPIRED' END,updated_at=?
       WHERE owner_id=? AND status='RUNNING' AND lease_until<=?`,
@@ -1261,7 +1288,7 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
         });
         await db
           .prepare(
-            `UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+2,lease_until=NULL,next_attempt_at=0,last_error=NULL,updated_at=?
+            `UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+3,lease_until=NULL,next_attempt_at=0,last_error=NULL,updated_at=?
           WHERE owner_id=? AND job_key=? AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`,
           )
           .bind(clock(), ownerId, job.job_key, job.generation, job.fence, clock())

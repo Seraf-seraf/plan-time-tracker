@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { assessForStart, context, ok, call, command, migrations, migration, rows, OWNER, PLAN } from './fixtures/tracker-db.mjs';
 
+import { seedLegacyPlan, seedLegacyCommand, applyRemainingMigrations } from './fixtures/legacy-schema.mjs';
+
 const period = { from: '2027-01-01', to: '2027-12-31', timeZone: 'UTC' };
 const path = (planId = PLAN, filter = period) => '/api/analytics/plans/' + planId + '/steps?' + new URLSearchParams(filter);
 async function create(c, planId = PLAN) {
@@ -76,16 +78,18 @@ test('analytics clips local date boundaries and validates owner, plan and snapsh
 test('upgrading a populated current-state database preserves data without inventing past timing', async () => {
   const boundary = migrations.indexOf('0022_step_time.sql'), c = context(boundary);
   try {
-    const [step] = await create(c);
+    await seedLegacyPlan(c, {planId:PLAN,title:'Recorded stage time',planText:'## Этап 1. Stage\nSynthetic fixture',planCreatedAt:{precision:'dateOnly',on:'2027-01-01',timeZone:'UTC'}});
+    const step=c.db.sqlite.prepare('SELECT step_id FROM plan_steps WHERE plan_id=?').get(PLAN).step_id;
     // Seed the pre-0022 lifecycle through that schema's receipt triggers. The current
     // Worker intentionally requires all current migrations before serving StartPlan.
     c.db.sqlite.prepare("INSERT INTO command_receipts(owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at) VALUES(?,?,?,'StartPlan',?,0,?,?,'agent',?,'PENDING',?)")
       .run(OWNER,crypto.randomUUID(),'legacy-fixture',PLAN,c.now(),OWNER,JSON.stringify({planId:PLAN}),c.now());
     assert.equal(c.db.sqlite.prepare('SELECT status FROM plans WHERE plan_id=?').get(PLAN).status,'RUNNING');
-    await set(c, step, 'RUNNING', 1);c.advance(60000);
+    await seedLegacyCommand(c,'SetStepStatus',{stepId:step,status:'RUNNING'},1);c.advance(60000);
     const before = rows(c);c.db.sqlite.exec(migration('0022_step_time.sql'));
     const after = rows(c);delete after.step_work_intervals;assert.deepEqual(after, before);
     assert.equal((await call(c, path())).value.steps[0].activeMs, null);
+    applyRemainingMigrations(c,'0022_step_time.sql');
     await set(c, step, 'RUNNING', 2);c.advance(100);await set(c, step, 'DONE', 3);
     assert.equal((await call(c, path())).value.steps[0].activeMs, 100);
     assert.deepEqual(c.db.sqlite.prepare('PRAGMA foreign_key_check').all(), []);

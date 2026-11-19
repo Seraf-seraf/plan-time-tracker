@@ -15,6 +15,7 @@ import {
   result,
   rows,
 } from "./fixtures/tracker-db.mjs";
+import { seedLegacyPlan, seedLegacyCommand } from "./fixtures/legacy-schema.mjs";
 export const planText =
   "# Исправить чтение плана\r\n\r\n## Контекст\r\nПлан сохраняется **как есть**.\r\n\r\n## Карта этапов\r\n| Этап | Цель |\r\n| --- | --- |\r\n| 1 | Проверить |\r\n\r\n## Этап 1. Проверить текст\r\n\r\n### Начало\r\nЕсть исходный план.\r\n\r\n### Действия\r\n- Сохранить все разделы.\r\n- Проверить `npm test`.\r\n\r\n```md\r\n## Этап 99. Это пример кода\r\n```\r\n\r\n## Этап 2. Проверить статусы\r\n\r\n**Конец:** статусы видны после обновления.\r\n\r\n## Общая приёмка\r\nТекст совпадает с исходным.\r\n";
 const create = (c) =>
@@ -362,10 +363,11 @@ test("large plans with more than 100 stages survive HTTP and MCP creation, readi
 test("document migration preserves existing source, statuses, requirements and receipts", async () => {
   const c = context(migrations.indexOf("0025_unlimited_plan_documents.sql"));
   try {
-    await create(c);
-    await assessForStart(c,PLAN);await ok(c,"StartPlan",{planId:PLAN},0);
-    const step = (await progress(c)).steps[0];
-    await ok(c,"SetStepStatus",{stepId:step.step_id,status:"DONE"},1);
+    await seedLegacyPlan(c, {planId:PLAN,title:"Чтение плана",planText,
+      planCreatedAt:{precision:"dateOnly",on:"2026-11-11",timeZone:"Asia/Omsk"}});
+    await seedLegacyCommand(c,"StartPlan",{planId:PLAN},0);
+    const step = c.db.sqlite.prepare("SELECT step_id FROM plan_steps ORDER BY ordinal").get();
+    await seedLegacyCommand(c,"SetStepStatus",{stepId:step.step_id,status:"DONE"},1);
     const tables = ["plan_documents","plan_steps","assessment_targets","command_receipts"];
     const before = tables.map(table => c.db.sqlite.prepare("SELECT * FROM "+table).all());
     c.db.sqlite.exec(migration("0025_unlimited_plan_documents.sql"));
