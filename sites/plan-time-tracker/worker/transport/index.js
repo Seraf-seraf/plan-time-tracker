@@ -12,7 +12,7 @@ import {
   dbFirst,
   ensureOwner,
   isPlainRecord,
-  isPlanDocumentCreation,
+  isPlanDocumentCommand,
   json,
   mapDbError,
   messageFor,
@@ -63,6 +63,8 @@ function validatePublicCommand(envelope) {
       'planCreatedAt',
       'reason',
       'confirmDateAnomaly',
+      'planText',
+      'stepEdits',
     ],
     StartPlan: ['planId'],
     PausePlan: ['planId', 'reason'],
@@ -257,7 +259,7 @@ async function apiRoute(request, env, url, channel, now, clock = () => now, ctx)
     });
   }
   if (request.method === 'POST' && url.pathname === '/api/commands') {
-    const envelope = await bodyJson(request, isPlanDocumentCreation);
+    const envelope = await bodyJson(request, isPlanDocumentCommand);
     validatePublicCommand(envelope);
     const result = await executeCommand(env.DB, identity, envelope, channel, now);
     scheduleAtlmTraining(env.DB, identity.ownerId, now, ctx, clock);
@@ -344,7 +346,7 @@ function publicToolReferences(value) {
 
 const MCP_DESCRIPTIONS = Object.freeze({
   GetPlan: 'Прочитать исходный текст, метаданные и текущее состояние плана по planId.',
-  UpdatePlanMetadata: 'Изменить название, описание или критерии плана, проверив текущую версию.',
+  UpdatePlanMetadata: 'Изменить метаданные или документ плана по expectedVersion. До первого запуска можно передать полный planText либо stepEdits. Недоступные правки сразу отклоняются.',
   GetTrackerCapabilities: 'Показать доступные функции трекера и их ограничения.',
   GetPlanExecutionSnapshot: 'Показать текст и текущее состояние плана и этапов.',
   GetCommandReceipt: 'Проверить результат ранее отправленной команды по её идентификатору.',
@@ -530,6 +532,21 @@ function mcpTools() {
         payloadProperties = {
           planId: { type: 'string', format: 'uuid' },
           title: { type: 'string', minLength: 1, maxLength: 200 },
+          planText: {
+            type: 'string', minLength: 1,
+            description: 'Полный Markdown в статусе PLANNED. Отдельно от метаданных и stepEdits.',
+          },
+          stepEdits: {
+            type: 'array', minItems: 1,
+            description: 'Правки существующих этапов в статусе PLANNED. Ответ обновляет и этапы, и общий Markdown.',
+            items: {
+              type: 'object', additionalProperties: false, required: ['stepId', 'markdown'],
+              properties: {
+                stepId: { type: 'string', format: 'uuid' },
+                markdown: { type: 'string', minLength: 1, description: 'Весь этап с заголовком и прежним идентификатором.' },
+              },
+            },
+          },
           description: { type: 'string', maxLength: 20000 },
           acceptanceCriteria: { type: 'string', maxLength: 20000 },
           planCreatedAt: {
@@ -559,9 +576,16 @@ function mcpTools() {
           reason: { type: 'string', maxLength: 1000 },
           confirmDateAnomaly: { type: 'boolean' },
         };
-        payloadAnyOf = ['title', 'description', 'acceptanceCriteria', 'planCreatedAt'].map(
-          (field) => ({ required: [field] }),
-        );
+        const metadata = ['title', 'description', 'acceptanceCriteria', 'planCreatedAt'];
+        const documentFields = ['planText', 'stepEdits'];
+        payloadAnyOf = [
+          ...metadata.map(field => ({ required: [field], not: { anyOf: documentFields.map(key => ({ required: [key] })) } })),
+          ...documentFields.map(field => ({
+            required: [field],
+            not: { anyOf: [...metadata, 'reason', 'confirmDateAnomaly', ...documentFields.filter(key => key !== field)]
+              .map(key => ({ required: [key] })) },
+          })),
+        ];
       } else if (['DeletePlan', 'RestorePlan'].includes(name)) {
         payloadProperties.reason = { type: 'string', maxLength: 1000 };
       } else if (name === 'PausePlan') {
@@ -645,8 +669,10 @@ async function mcpRoute(request, env, now, ctx, clock = () => now) {
     request,
     (body) =>
       body?.method === 'tools/call' &&
-      (MCP_INTERNAL_NAMES[body.params?.name] || body.params?.name) === 'CreatePlan' &&
-      typeof body.params?.arguments?.payload?.planText === 'string',
+      isPlanDocumentCommand({
+        commandType: MCP_INTERNAL_NAMES[body.params?.name] || body.params?.name,
+        payload: body.params?.arguments?.payload,
+      }),
   );
   if (!rpc || rpc.jsonrpc !== '2.0' || typeof rpc.method !== 'string')
     return json(

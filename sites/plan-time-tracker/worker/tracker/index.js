@@ -48,6 +48,9 @@ import {
 } from '../atlm/forecast.js';
 import { ATLM_RETRAIN_EVERY_NEW_PLANS, atlmDiagnostics } from '../atlm/training.js';
 
+import { isDocumentUpdate, parsePlanDocument } from './plan-document.js';
+import { preparePlanAssessmentTargets, updatePlanDocumentBatch } from './plan-document-update.js';
+
 const FORECAST_METRICS = ['PLAN_ACTIVE', 'CALENDAR', 'PAUSED'];
 
 const assessmentPayloadSchema = {
@@ -485,58 +488,6 @@ async function readEstimationHistory(db, ownerId, args, nowMs) {
   };
 }
 
-function parsePlanDocument(text) {
-  if (typeof text !== 'string' || !text.trim())
-    throw appError('VALIDATION_ERROR', 'Вставьте полный текст плана.');
-  const headings = [];
-  let fence = null;
-  for (const line of text.matchAll(/[^\n]*(?:\n|$)/g)) {
-    const value = line[0].replace(/\r?\n$/, '');
-    const code = value.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (code) {
-      if (!fence) fence = { character: code[1][0], length: code[1].length };
-      else if (code[1][0] === fence.character && code[1].length >= fence.length && !code[2].trim())
-        fence = null;
-      continue;
-    }
-    if (fence) continue;
-    const heading = value.match(/^ {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/);
-    if (heading) headings.push({ level: heading[1].length, title: heading[2], offset: line.index });
-  }
-  const stagePattern =
-    /^(?:\*\*)?(?:(?:Этап|Шаг|Stage|Step)[ \t]+([A-ZА-Я]*[0-9]+(?:[-_.][A-ZА-Я0-9]+)*|[A-ZА-Я]+-[0-9]+)|([A-ZА-Я]+[-_]?[0-9]+(?:[-_][A-ZА-Я0-9]+)*))(?=[ \t.:)—–*-]|$)/iu;
-  const stages = headings.filter((h) => stagePattern.test(h.title));
-  if (!stages.length)
-    throw appError(
-      'VALIDATION_ERROR',
-      'В плане нужны заголовки этапов, например «## Этап 1. Название» или «## DATA-001. Название».',
-    );
-  const nextOffsets = new Map(),
-    openHeadings = [];
-  for (const heading of headings) {
-    while (openHeadings.length && openHeadings.at(-1).level >= heading.level)
-      nextOffsets.set(openHeadings.pop(), heading.offset);
-    openHeadings.push(heading);
-  }
-  const ids = new Set();
-  return stages.map((stage, index) => {
-    const match = stage.title.match(stagePattern),
-      id = match[1] || match[2];
-    if (ids.has(id.toUpperCase()) || stage.level !== stages[0].level || stage.title.length > 200)
-      throw appError(
-        'VALIDATION_ERROR',
-        'У этапов должны быть разные номера, один уровень заголовков и названия до 200 символов.',
-      );
-    ids.add(id.toUpperCase());
-    return {
-      stepId: crypto.randomUUID(),
-      ordinal: index + 1,
-      title: stage.title.replace(/^\*\*|\*\*$/g, ''),
-      content: text.slice(stage.offset, nextOffsets.get(stage) ?? text.length),
-    };
-  });
-}
-
 function validateTrackerCommand(envelope) {
   if (envelope?.commandType === 'RecordAssessment') return validateAssessmentCommand(envelope);
   if (
@@ -824,27 +775,7 @@ async function createPlanBatch(db, insertReceipt, receiptValues, payload, nowMs)
   }
   const plan =
     planText === undefined ? { title, description, acceptanceCriteria } : { title, planText };
-  statements.push(
-    db
-      .prepare(
-        `INSERT INTO assessment_targets(owner_id,plan_id,step_id,requirements_json)
-    SELECT ?,?,NULL,json_object('plan',json(?),'steps',json_group_array(json_object(
-      'stepId',step_id,'ordinal',ordinal,'title',title,'content',content))) FROM
-      (SELECT * FROM plan_steps WHERE owner_id=? AND plan_id=? ORDER BY ordinal) HAVING ${guard}`,
-      )
-      .bind(ownerId, planId, JSON.stringify(plan), ownerId, planId, ...guardArgs),
-  );
-  statements.push(
-    db
-      .prepare(
-        `INSERT INTO assessment_targets(owner_id,plan_id,step_id,requirements_json)
-    SELECT s.owner_id,s.plan_id,s.step_id,json_object('plan',json_extract(t.requirements_json,'$.plan'),
-      'step',json_object('stepId',s.step_id,'title',s.title,'content',s.content))
-    FROM plan_steps s JOIN assessment_targets t ON t.owner_id=s.owner_id AND t.plan_id=s.plan_id AND t.step_id IS NULL
-    WHERE s.owner_id=? AND s.plan_id=? AND ${guard}`,
-      )
-      .bind(ownerId, planId, ...guardArgs),
-  );
+  statements.push(...preparePlanAssessmentTargets(db, ownerId, planId, plan, guard, guardArgs));
   statements.push(
     db
       .prepare(
@@ -906,6 +837,7 @@ async function executeCommand(db, identity, envelope, channel, nowMs) {
     assertSafeMetadataText(payload.reason, 'reason');
   }
   let planId = payload.planId || null;
+  const documentUpdate = envelope.commandType === 'UpdatePlanMetadata' && isDocumentUpdate(payload);
   if (envelope.commandType === 'CreatePlan') {
     for (const field of ['documentSteps', 'requirementsTargets'])
       if (Object.hasOwn(payload, field))
@@ -943,12 +875,7 @@ async function executeCommand(db, identity, envelope, channel, nowMs) {
       payload.planText === undefined ? [] : parsePlanDocument(payload.planText);
   } else {
     if (typeof payload.reason === 'string') payload.reason = payload.reason.slice(0, 1000);
-    if (envelope.commandType === 'UpdatePlanMetadata') {
-      if (payload.planText !== undefined)
-        throw appError(
-          'VALIDATION_ERROR',
-          'Исходный текст уже сохранён. Эта команда меняет только название и дату плана.',
-        );
+    if (envelope.commandType === 'UpdatePlanMetadata' && !documentUpdate) {
       const fields = ['title', 'description', 'acceptanceCriteria', 'planCreatedAt'];
       if (
         !fields.some(
@@ -1114,16 +1041,20 @@ async function executeCommand(db, identity, envelope, channel, nowMs) {
           JSON.stringify({ invalidPaths: ['assessment'] }),
           nowMs,
         );
-    } else if (envelope.commandType !== 'CreatePlan') {
+    } else if (envelope.commandType !== 'CreatePlan' && !documentUpdate) {
       statement = db
         .prepare(`${insertReceipt} VALUES(?,?,?,?,?,?,?,?,?,?,'PENDING',NULL,?)`)
         .bind(...receiptValues, JSON.stringify(payload), nowMs);
     }
     try {
-      const inserted =
-        envelope.commandType === 'CreatePlan'
-          ? await createPlanBatch(db, insertReceipt, receiptValues, payload, nowMs)
-          : await statement.run();
+      let inserted;
+      if (envelope.commandType === 'CreatePlan') {
+        inserted = await createPlanBatch(db, insertReceipt, receiptValues, payload, nowMs);
+      } else if (documentUpdate) {
+        inserted = await updatePlanDocumentBatch(db, insertReceipt, receiptValues, envelope, nowMs);
+      } else {
+        inserted = await statement.run();
+      }
       receiptInserted = Number(inserted.meta?.changes) > 0;
     } catch (error) {
       throw mapDbError(error);
@@ -1420,29 +1351,45 @@ async function planSummary(db, ownerId, row, nowMs, intervalRows, summary) {
   };
 }
 
-async function readPlan(db, ownerId, planId, nowMs) {
+async function readPlanSnapshot(db, ownerId, planId, nowMs, includeSteps = false) {
+  const stepsSql = includeSteps
+    ? `(SELECT json_group_array(json_object('step_id',step_id,'ordinal',ordinal,'title',title,
+        'content',content,'status',status,'version',version,'created_at',created_at,'updated_at',updated_at))
+        FROM (SELECT * FROM plan_steps WHERE owner_id=p.owner_id AND plan_id=p.plan_id ORDER BY ordinal,step_id))`
+    : "'[]'";
   const row = await dbFirst(
     db,
-    'SELECT * FROM plans WHERE owner_id=? AND plan_id=?',
+    `SELECT p.*,d.markdown,
+      (SELECT COUNT(*) FROM tracker_incomplete_steps s WHERE s.owner_id=p.owner_id AND s.plan_id=p.plan_id) AS incompleteStepCount,
+      (SELECT COUNT(*) FROM plan_steps s WHERE s.owner_id=p.owner_id AND s.plan_id=p.plan_id) AS enabled,
+      t.requirements_json,a.assessment_json,a.requirements_digest,
+      (SELECT json_group_array(json_object('interval_id',interval_id,'start_ms',start_ms,'end_ms',end_ms,
+        'opened_by',opened_by,'closed_by',closed_by)) FROM (
+        SELECT * FROM work_intervals WHERE owner_id=p.owner_id AND plan_id=p.plan_id ORDER BY start_ms
+      )) AS intervals_json,
+      (SELECT json_group_array(json_object('old_precision',old_precision,'old_at_ms',old_at_ms,'old_on',old_on,
+        'old_timezone',old_timezone,'changed_at',changed_at,'changed_by',changed_by,'reason',reason)) FROM (
+        SELECT * FROM plan_date_history WHERE owner_id=p.owner_id AND plan_id=p.plan_id ORDER BY changed_at
+      )) AS dates_json,
+      ${stepsSql} AS steps_json
+    FROM plans p LEFT JOIN plan_documents d USING(owner_id,plan_id)
+    LEFT JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id
+      AND t.step_id IS NULL AND p.status='PLANNED' AND p.deleted_at IS NULL
+    LEFT JOIN assessment_revisions a ON a.sequence=(SELECT MAX(r.sequence) FROM assessment_revisions r
+      WHERE r.owner_id=t.owner_id AND r.plan_id=t.plan_id AND r.step_id IS NULL)
+    WHERE p.owner_id=? AND p.plan_id=?`,
     ownerId,
     planId,
   );
   if (!row) throw appError('PLAN_NOT_FOUND', messageFor('PLAN_NOT_FOUND'), 404);
-  const plan = await planSummary(db, ownerId, row, nowMs),
-    document = await dbFirst(
-      db,
-      'SELECT markdown FROM plan_documents WHERE owner_id=? AND plan_id=?',
-      ownerId,
-      planId,
-    );
-  if (document) plan.planText = document.markdown;
-  plan.dateHistory = await dbAll(
-    db,
-    'SELECT old_precision,old_at_ms,old_on,old_timezone,changed_at,changed_by,reason FROM plan_date_history WHERE owner_id=? AND plan_id=? ORDER BY changed_at',
-    ownerId,
-    planId,
-  );
-  return plan;
+  const plan = await planSummary(db, ownerId, row, nowMs, JSON.parse(row.intervals_json), row);
+  if (row.markdown !== null) plan.planText = row.markdown;
+  plan.dateHistory = JSON.parse(row.dates_json);
+  return { plan, steps: JSON.parse(row.steps_json) };
+}
+
+async function readPlan(db, ownerId, planId, nowMs) {
+  return (await readPlanSnapshot(db, ownerId, planId, nowMs)).plan;
 }
 
 async function buildStepAnalytics(db, ownerId, planId, filter, nowMs) {
@@ -1567,7 +1514,10 @@ async function readTrackerCapabilities(db, ownerId) {
       stageHeadings: '## Этап 1. Название',
       statusTool: 'SetStepStatus',
       statuses: ['PENDING', 'RUNNING', 'BLOCKED', 'FAILED', 'DONE'],
-      preservesOriginal: true,
+      preservesOriginal: false,
+      updateTool: 'UpdatePlanMetadata',
+      updateStatus: 'PLANNED',
+      updateFields: ['planText', 'stepEdits'],
     },
     steps: {
       model: 'current-state',
@@ -1608,13 +1558,7 @@ async function readTrackerCapabilities(db, ownerId) {
 
 async function readPlanExecutionSnapshot(db, ownerId, planId, nowMs) {
   if (!UUID.test(planId || '')) throw appError('VALIDATION_ERROR', 'planId должен быть UUID.');
-  const plan = await readPlan(db, ownerId, planId, nowMs),
-    steps = await dbAll(
-      db,
-      'SELECT step_id,ordinal,title,content,status,version,created_at,updated_at FROM plan_steps WHERE owner_id=? AND plan_id=? ORDER BY ordinal,step_id',
-      ownerId,
-      planId,
-    );
+  const { plan, steps } = await readPlanSnapshot(db, ownerId, planId, nowMs, true);
   for (const step of steps) {
     step.readyToFinish = step.status === 'DONE';
     step.readinessBlockers = step.readyToFinish ? [] : [{ code: 'STEP_NOT_DONE' }];

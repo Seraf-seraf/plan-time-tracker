@@ -4,7 +4,7 @@
 
 | Инструмент | Назначение |
 | --- | --- |
-| CreatePlan, GetPlan, ListPlans, UpdatePlan | Сохранить исходный план, прочитать или изменить метаданные. |
+| CreatePlan, GetPlan, ListPlans, UpdatePlan | Сохранить и прочитать план, изменить метаданные или обновить документ до первого запуска. |
 | StartPlan, PausePlan, ResumePlan, FinishPlan | Управлять временем конкретного плана. |
 | DeletePlan, RestorePlan | Удалить план или восстановить без запуска таймера. |
 | GetPlanProgress, SetStepStatus | Читать и изменять текущее состояние этапов. |

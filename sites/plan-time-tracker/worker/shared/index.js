@@ -334,8 +334,11 @@ async function bodyJson(request, acceptsLargeBody = null) {
   return body;
 }
 
-function isPlanDocumentCreation(envelope) {
-  return envelope?.commandType === 'CreatePlan' && typeof envelope.payload?.planText === 'string';
+function isPlanDocumentCommand(envelope) {
+  const { commandType, payload } = envelope ?? {};
+  if (commandType === 'CreatePlan') return typeof payload?.planText === 'string';
+  return commandType === 'UpdatePlanMetadata'
+    && (typeof payload?.planText === 'string' || Array.isArray(payload?.stepEdits));
 }
 
 function validateEnvelope(envelope) {
@@ -368,6 +371,7 @@ function messageFor(code) {
       PLAN_DELETED: 'План удалён. Сначала восстановите его в разделе «Удалённые».',
       PLAN_NOT_DELETED: 'План не находится в разделе «Удалённые».',
       STEP_NOT_FOUND: 'Этап не найден.',
+      STEP_HISTORY_EXISTS: 'Нельзя удалить этап с сохранённой оценкой или учтённым временем.',
       CHECKPOINTS_INCOMPLETE: 'Завершите этапы либо укажите причину завершения с исключением.',
       ASSESSMENT_TARGET_CONFLICT: 'Серия оценки уже привязана к другой цели.',
       ASSESSMENT_CONTEXT_CHANGED:
@@ -417,6 +421,7 @@ function resultFromReceipt(row, replayed) {
       'ASSESSMENT_CONTEXT_CHANGED',
       'VERSION_CONFLICT',
       'CHECKPOINTS_INCOMPLETE',
+      'STEP_HISTORY_EXISTS',
       'IDEMPOTENCY_KEY_REUSED',
       'PLAN_DELETED',
       'PLAN_NOT_DELETED',
@@ -529,7 +534,7 @@ export {
   hashCommandInput,
   inclusiveDateRange,
   isPlainRecord,
-  isPlanDocumentCreation,
+  isPlanDocumentCommand,
   isSnapshotDigest,
   json,
   mapDbError,
