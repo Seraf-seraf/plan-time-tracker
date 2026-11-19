@@ -1,4 +1,4 @@
-# Трекер планов 0.8.0
+# Трекер планов
 
 Приватный трекер сохраняет исходный Markdown плана, текущие статусы этапов, серверные интервалы работы и оценки времени ATLM.
 
@@ -15,10 +15,13 @@ ATLM `agent-v5-operations` выбирает точечный прогноз из
 ## Исходники и проверки
 
 - `sites/plan-time-tracker/worker/` — Worker и UI.
-- `sites/plan-time-tracker/drizzle/` — канонические миграции 0001–0027.
+- `sites/plan-time-tracker/drizzle/` — полный набор SQL-миграций.
 - `plugin/plan-time-tracker/` — локальный пакет с инструкциями track-plan и assess-task.
 - [Контракт плана и статусов](docs/plan-documents.md).
+- [Инструменты MCP](docs/mcp-naming-review.md).
 - [Оценки и требования](docs/assessments.md), [ATLM](docs/atlm.md).
+
+В `docs/originals/` сохранены исходные материалы проекта. Актуальный контракт описан в документах по ссылкам выше.
 
 ```sh
 cd sites/plan-time-tracker
@@ -29,4 +32,4 @@ npm run test:ui
 node --test ../../plugin/plan-time-tracker/test/*.test.mjs
 ```
 
-Браузерные проверки используют реальный Worker и изолированную SQLite. Они не создают записи на рабочем сайте. Подробности сборки — в [README приложения](sites/plan-time-tracker/README.md).
+Браузерные проверки используют реальный Worker и изолированную SQLite. Для них нужны Playwright и Chromium. [Подготовка среды и проверки](sites/plan-time-tracker/test/README.md).

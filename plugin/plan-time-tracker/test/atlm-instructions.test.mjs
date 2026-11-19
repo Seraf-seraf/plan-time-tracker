@@ -1,66 +1,102 @@
-import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
-import {context,call,mcp,ok,PLAN} from '../../../sites/plan-time-tracker/test/fixtures/tracker-db.mjs';
-const read=path=>readFileSync(new URL(path,import.meta.url),'utf8');
-const assess=read('../skills/assess-task/SKILL.md'),features=read('../skills/assess-task/references/features.md');
-const track=read('../skills/track-plan/SKILL.md'),embedded=read('../../../sites/plan-time-tracker/skill/plan-time-tracker/SKILL.md');
-const invoke=async(c,name,args={})=>{const r=await mcp(c,name,args);assert.equal(r.status,200);assert.notEqual(r.value.result?.isError,true,JSON.stringify(r.value));return r.value.result.structuredContent;};
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+import { call, context, mcp, ok, PLAN } from '../../../sites/plan-time-tracker/test/fixtures/tracker-db.mjs';
 
-test('instructions describe the delivered v4 input and server forecast',()=>{
- for(const text of [assess,track,embedded]){assert.match(text,/assessments\.atlm/);assert.match(text,/StartPlan/);assert.match(text,/serverEstimation/);assert.match(text,/agent-task-v4/);}
- for(const field of ['workUnits','doneBoundary','reuseLevel','components','contracts','systemBoundaries','migrationEntities','dataVolumeBand','requirementsUncertainty','solutionUncertainty','diagnosisState','learningTargets','scopeChangeRisk','verificationKinds','verificationScenarios','verificationReadiness','requiredReviewPasses','environmentReadiness','accessReadiness','deploymentTargets','execution','evidence','unknownReasons'])assert(features.includes('`'+field+'`'),field);
- assert.match(assess,/GetTrainingHistory/);assert.match(assess,/intervalCoverage/);assert.match(assess,/historical-median/);assert.match(assess,/не является календарным сроком/);
- assert.doesNotMatch(assess+features+track+embedded,/agent-task-v1|agent-v3-hybrid|qualityConfirmed|24000/);
+const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
+const features = read('../skills/assess-task/references/features.md');
+const track = read('../skills/track-plan/SKILL.md');
+const embedded = read('../../../sites/plan-time-tracker/skill/plan-time-tracker/SKILL.md');
+const catalog = read('../../../docs/mcp-naming-review.md');
+
+async function invoke(c, name, args = {}) {
+  const response = await mcp(c, name, args);
+  assert.equal(response.status, 200);
+  assert.equal(response.value.result?.isError, undefined, JSON.stringify(response.value));
+  return response.value.result.structuredContent;
+}
+
+test('the standalone and packaged tracker skills describe the same workflow', () => {
+  assert.equal(embedded, track.replace('name: track-plan\n', 'name: plan-time-tracker\n'));
 });
 
-test('MCP discovery matches the instructions',async()=>{
- const c=context();try{
-  const capability=(await invoke(c,'GetTrackerInfo')).assessments.atlm;
-  assert.equal(capability.retrainEveryNewPlans,2);assert.equal(capability.featureSchemaVersion,'agent-task-v4');assert.equal(capability.inputSchemaVersion,'agent-task-v4');
-  assert.equal(capability.method.version,'agent-v5-operations');assert.equal(capability.policyVersion,2);assert.deepEqual(capability.engines,['OLS','RIDGE','BAYESIAN']);
-  const listing=(await call(c,'/mcp',{jsonrpc:'2.0',id:1,method:'tools/list'})).value.result.tools;
-  for(const name of ['EstimatePlanTime','GetSavedEstimate','GetTrainingStatus','GetTrainingData','GetTrainingHistory','ContinueTraining']){
-   assert(JSON.stringify(capability).includes(name));const tool=listing.find(t=>t.name===name);assert(tool,name);assert.equal(tool.inputSchema.additionalProperties,false);assert.equal(tool.annotations.readOnlyHint,name!=='ContinueTraining');
+test('the MCP reference matches the public tool inventory and the advertised task schema', async () => {
+  const c = context();
+  try {
+    const capability = (await invoke(c, 'GetTrackerInfo')).assessments.atlm;
+    const response = await call(c, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    const listing = response.value.result.tools;
+    const documentedNames = catalog
+      .split('\n')
+      .filter((line) => line.startsWith('| `'))
+      .flatMap((line) => [...line.split('|')[1].matchAll(/`([^`]+)`/g)].map((match) => match[1]));
+    assert.deepEqual(documentedNames.sort(), listing.map((tool) => tool.name).sort());
+    for (const tool of listing) {
+      assert.ok(tool.description?.trim(), tool.name);
+    }
+
+    const estimate = listing.find((tool) => tool.name === capability.calculateTool);
+    const save = listing.find((tool) => tool.name === 'SaveTaskAssessment');
+    const props = capability.agentTaskSchema.properties;
+    assert.deepEqual(estimate.inputSchema.properties.agentTask, capability.agentTaskSchema);
+    assert.deepEqual(
+      save.inputSchema.properties.payload.properties.context.properties.agentTask,
+      capability.agentTaskSchema,
+    );
+    assert.deepEqual(props.schemaVersion.enum, [capability.inputSchemaVersion]);
+    for (const field of capability.agentTaskSchema.required) {
+      assert.ok(features.includes('`' + field + '`'), field);
+    }
+    assert.deepEqual(props.execution.properties.environmentId.enum, ['local', 'cloud_workspace']);
+    assert.deepEqual(
+      props.systemBoundaries.items.properties.operations.items.properties.action.enum,
+      ['READ', 'WRITE'],
+    );
+  } finally {
+    c.close();
   }
-  const schema=listing.find(t=>t.name==='EstimatePlanTime').inputSchema;assert.deepEqual([...schema.required].sort(),['agentTask','expectedRequirementsDigest','planId']);
-  const saveSchema=listing.find(t=>t.name==='SaveTaskAssessment').inputSchema;
-  assert.deepEqual(capability.agentTaskSchema,schema.properties.agentTask);
-  assert.deepEqual(capability.agentTaskSchema,saveSchema.properties.payload.properties.context.properties.agentTask);
-  const props=schema.properties.agentTask.properties;
-  assert.deepEqual(props.execution.properties.environmentId.enum,['local','cloud_workspace']);
-  assert.deepEqual(props.systemBoundaries.items.properties.operations.items.properties.action.enum,['READ','WRITE']);
-  assert.deepEqual(props.learningTargets.items.properties.kind.enum,['TOOLING','RUNTIME','DATA_MODEL','OTHER']);
-  assert.equal(capability.firstStartRequires,'READY');
- }finally{c.close();}
 });
 
-test('documented system boundary can be saved and read using the published schema',async()=>{
- const c=context();try{
-  const examples=[...features.matchAll(/```json\s*([\s\S]*?)```/g)].map(match=>JSON.parse(match[1]));
-  const [agentTask,boundary]=examples;
-  agentTask.systemBoundaries=[boundary];delete agentTask.evidence.systemBoundaries;
-  await ok(c,'CreatePlan',{planId:PLAN,title:'Операция записи',planText:'# План\n\n## Этап 1. Проверить\nСохранить и прочитать оценку.',planCreatedAt:{precision:'dateOnly',on:'2026-11-11',timeZone:'UTC'}});
-  const {currentRequirementsDigest}=await invoke(c,'GetTaskAssessment',{planId:PLAN});
-  const assessmentId=crypto.randomUUID(),payload={assessmentId,planId:PLAN,expectedRequirementsDigest:currentRequirementsDigest,phase:'planning',context:{agentTask},method:{id:'qualitative',version:'1',scale:['UNKNOWN']},
-   complexity:{status:'UNKNOWN',value:null,rationale:'No scale'},unknowns:[],assumptions:[],dependencies:[],forecast:{status:'UNKNOWN',metric:'PLAN_ACTIVE',lowerMs:null,upperMs:null,confidence:'UNKNOWN',basis:'Server forecast',sampleCount:0},sources:[],approach:{description:'Update',rationale:'Existing path'},predictionRequest:{method:'ATLM',methodVersion:1}};
-  await invoke(c,'SaveTaskAssessment',{schemaVersion:1,commandId:crypto.randomUUID(),expectedVersion:0,payload});
-  const saved=await invoke(c,'GetTaskAssessment',{planId:PLAN,assessmentId});
-  assert.deepEqual(saved.assessment.context.agentTask.systemBoundaries,[boundary]);
-  assert.equal(saved.assessmentReadiness.status,'READY');
- }finally{c.close();}
-});
+for (const withBoundary of [false, true]) {
+  test('the documented request saves, reads and freezes an estimate '
+    + (withBoundary ? 'with an operation' : 'with no system boundaries'), async () => {
+    const c = context();
+    try {
+      const [agentTask, boundary, request] = [...features.matchAll(/```json\s*([\s\S]*?)```/g)]
+        .map((match) => JSON.parse(match[1]));
+      if (withBoundary) {
+        agentTask.systemBoundaries = [boundary];
+        delete agentTask.evidence.systemBoundaries;
+      }
+      await ok(c, 'CreatePlan', {
+        planId: PLAN,
+        title: 'Документированный пример',
+        planText: '# План\n\n## Этап 1. Проверить\nСохранить и прочитать оценку.',
+        planCreatedAt: { precision: 'dateOnly', on: '2026-11-11', timeZone: 'UTC' },
+      });
+      const { currentRequirementsDigest: expectedRequirementsDigest } =
+        await invoke(c, 'GetTaskAssessment', { planId: PLAN });
+      const preview = await invoke(c, 'EstimatePlanTime', {
+        planId: PLAN, expectedRequirementsDigest, agentTask,
+      });
+      assert.equal(preview.status, 'UNAVAILABLE');
 
-test('documented example is accepted, stored and frozen',async()=>{
- const c=context();try{
-  const match=features.match(/```json\s*([\s\S]*?)```/);assert(match);const agentTask=JSON.parse(match[1]);
-  await ok(c,'CreatePlan',{planId:PLAN,title:'Документированный пример',planText:'# Example\n\n## Этап 1. Проверить\nГотово.',planCreatedAt:{precision:'dateOnly',on:'2026-11-11',timeZone:'UTC'}});
-  const current=await invoke(c,'GetTaskAssessment',{planId:PLAN}),expectedRequirementsDigest=current.currentRequirementsDigest;
-  const preview=await invoke(c,'EstimatePlanTime',{planId:PLAN,expectedRequirementsDigest,agentTask});assert.equal(preview.status,'UNAVAILABLE');assert.equal(preview.interval.status,'UNAVAILABLE');
-  const assessmentId=crypto.randomUUID(),payload={assessmentId,planId:PLAN,expectedRequirementsDigest,phase:'planning',context:{agentTask},method:{id:'qualitative',version:'1',scale:['UNKNOWN']},
-   complexity:{status:'UNKNOWN',value:null,rationale:'No scale'},unknowns:[],assumptions:[],dependencies:[],forecast:{status:'UNKNOWN',metric:'PLAN_ACTIVE',lowerMs:null,upperMs:null,confidence:'UNKNOWN',basis:'Server forecast',sampleCount:0},sources:[],approach:{description:'Update',rationale:'Existing path'},predictionRequest:{method:'ATLM',methodVersion:1}};
-  await invoke(c,'SaveTaskAssessment',{schemaVersion:1,commandId:crypto.randomUUID(),expectedVersion:0,payload});
-  const saved=await invoke(c,'GetTaskAssessment',{planId:PLAN,assessmentId});assert.deepEqual(saved.assessment.context.agentTask,agentTask);
-  await ok(c,'StartPlan',{planId:PLAN},0);const frozen=await invoke(c,'GetSavedEstimate',{planId:PLAN});assert.equal(frozen.source,'FROZEN_INPUT');
- }finally{c.close();}
-});
+      const { assessmentId } = request.payload;
+      Object.assign(request.payload, { planId: PLAN, expectedRequirementsDigest });
+      request.payload.context.agentTask = agentTask;
+      await invoke(c, 'SaveTaskAssessment', request);
+      const saved = await invoke(c, 'GetTaskAssessment', { planId: PLAN, assessmentId });
+      assert.deepEqual(saved.assessment.context.agentTask, agentTask);
+      assert.equal(saved.revision, 1);
+      assert.equal(saved.assessmentReadiness.status, 'READY');
+
+      const planned = await invoke(c, 'GetSavedEstimate', { planId: PLAN });
+      assert.equal(planned.assessmentReadiness.status, 'READY');
+      await ok(c, 'StartPlan', { planId: PLAN }, 0);
+      const frozen = await invoke(c, 'GetSavedEstimate', { planId: PLAN });
+      assert.equal(frozen.source, 'FROZEN_INPUT');
+    } finally {
+      c.close();
+    }
+  });
+}

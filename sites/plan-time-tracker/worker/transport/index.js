@@ -345,58 +345,40 @@ function publicToolReferences(value) {
 }
 
 const MCP_DESCRIPTIONS = Object.freeze({
-  GetPlan: 'Прочитать исходный текст, метаданные и текущее состояние плана по planId.',
-  UpdatePlanMetadata: 'Изменить метаданные или документ плана по expectedVersion. До первого запуска можно передать полный planText либо stepEdits. Недоступные правки сразу отклоняются.',
-  GetTrackerCapabilities: 'Показать доступные функции трекера и их ограничения.',
-  GetPlanExecutionSnapshot: 'Показать текст и текущее состояние плана и этапов.',
-  GetCommandReceipt: 'Проверить результат ранее отправленной команды по её идентификатору.',
-  SetStepStatus:
-    'Изменить статус этапа исходного плана. Нужна текущая версия этапа; текст плана и таймер не меняются.',
-  CalculateAtlmEstimate:
-    'Получить прогноз до первого запуска: ATLM либо явно обозначенный ранний ориентир historical-median по пригодной истории. Прогноз не сохраняется.',
-  GetPlanEstimate:
-    'Получить актуальный прогноз PLANNED по последним сохранённым признакам и текущим данным без записи и обучения; после первого запуска вернуть зафиксированную оценку.',
-  GetEstimationModelStatus:
-    'Посмотреть количество примеров, состояние обучения и причины исключения данных.',
-  StartEstimationTraining:
-    'По прямой просьбе пользователя запросить новую попытку обучения на доступных данных.',
-  ProcessEstimationTraining:
-    'Продолжить подготовку данных или уже запущенное обучение одним ограниченным проходом.',
-  GetAtlmDataset: 'Посмотреть сохранённые примеры обучения и причины исключения, с пагинацией.',
-  GetEstimationTrainingHistory: 'Прочитать историю попыток обучения с постраничным снимком.',
+  CreatePlan: 'Создать план в статусе PLANNED. Передайте полный Markdown в planText, чтобы получить этапы из его заголовков.',
+  GetPlan: 'Прочитать сохранённый Markdown, метаданные, статус, версию и рабочие интервалы плана.',
+  ListPlans: 'Прочитать планы владельца. Фильтры statuses и deleted ограничивают выборку. Для следующей страницы передайте nextCursor как cursor.',
+  UpdatePlanMetadata: 'Изменить метаданные, весь planText или выбранные этапы через stepEdits. Для каждой команды выберите один режим. Правка документа доступна до первого запуска.',
+  StartPlan: 'Начать учёт времени PLANNED-плана и зафиксировать исходный прогноз. Сначала проверьте, что GetSavedEstimate возвращает assessmentReadiness.status=READY.',
+  PausePlan: 'Закрыть активный интервал RUNNING-плана и перевести его в PAUSED.',
+  ResumePlan: 'Открыть новый активный интервал PAUSED-плана и перевести его в RUNNING.',
+  FinishPlan: 'Завершить план со всеми этапами в DONE. Для явного завершения с незавершёнными этапами передайте allowIncomplete:true и reason.',
+  DeletePlan: 'Переместить план в удалённые по просьбе пользователя. Для RUNNING-плана закрыть активный интервал и перевести выполняемые этапы в BLOCKED.',
+  RestorePlan: 'Восстановить удалённый план с сохранённым статусом. Для продолжения учёта времени используйте отдельную команду.',
+  GetTrackerCapabilities: 'Прочитать возможности и ограничения трекера. Полная схема признаков, включая вложенные поля и допустимые значения, находится в assessments.atlm.agentTaskSchema.',
+  GetPlanExecutionSnapshot: 'Прочитать план, его версию, текущие этапы и их версии, а также готовность к запуску и завершению.',
+  GetCommandReceipt: 'Прочитать сохранённую квитанцию команды по commandId.',
+  SetStepStatus: 'Изменить статус этапа RUNNING-плана по версии этапа. RUNNING открывает интервал этапа, остальные статусы закрывают его.',
+  CalculateAtlmEstimate: 'Предпросмотр прогноза полного активного времени PLANNED-плана по переданным признакам. Возвращает прогноз ATLM, историческую медиану или причину недоступности. Полная схема признаков доступна в GetTrackerInfo.',
+  GetPlanEstimate: 'Прочитать прогноз и assessmentReadiness. Для PLANNED возвращает текущий расчёт по сохранённым признакам, после первого запуска возвращает исходный снимок.',
+  RecordAssessment: 'Сохранить оценку с currentRequirementsDigest из GetTaskAssessment, переданным как expectedRequirementsDigest. Для ATLM передайте context.agentTask по схеме из GetTrackerInfo и predictionRequest. Для новой серии используйте expectedVersion=0, для ревизии передайте тот же assessmentId, текущий номер ревизии и reason.',
+  GetAssessment: 'Прочитать текущие требования и currentRequirementsDigest по planId и необязательному stepId. Для чтения сохранённой ревизии передайте planId и assessmentId, при необходимости укажите revision.',
+  GetEstimationHistory: 'Прочитать оценки и фактическое время в миллисекундах по выбранным планам и этапам. Время в этом ответе относится к родительским планам. Для следующей страницы передайте те же asOf и throughSequence, а nextAfterSequence передайте как afterSequence.',
+  GetTimeReport: 'Прочитать фактическое время за период в миллисекундах. totalActiveMs и activeByDay объединяют пересекающиеся интервалы, sumPlanActiveMs суммирует время по планам.',
+  GetEstimationModelStatus: 'Прочитать состояние модели, количество пригодных примеров и причины исключений.',
+  StartEstimationTraining: 'По просьбе пользователя поставить попытку обучения в очередь. Сервер проверяет пригодность данных и качество модели.',
+  ProcessEstimationTraining: 'Продолжить обработку очереди обучения владельца одним ограниченным проходом.',
+  GetAtlmDataset: 'Прочитать версии примеров обучения и причины исключений. Продолжайте по nextCursor. При DATASET_CHANGED начните чтение заново.',
+  GetEstimationTrainingHistory: 'Прочитать попытки обучения и их результаты. Продолжайте чтение того же снимка по nextCursor.',
 });
 
 function mcpTools() {
   const writeNames = new Set([...WRITE_COMMANDS, ...TRACKER_COMMANDS]);
-  const assessmentDescriptions = {
-    RecordAssessment:
-      'Записать оценку или неизменяемую ревизию. expectedVersion=0 создаёт серию; для новой ревизии передайте текущий номер ревизии в expectedVersion и причину в payload.reason. Метод и шкалу выбирает агент, прогноз отдельно в ms. Обязателен expectedRequirementsDigest из GetAssessment без assessmentId, прочитанный до анализа. Таймер не запускается.',
-    GetAssessment:
-      'Без assessmentId: прочитать текущие requirements/currentRequirementsDigest для анализа до первой оценки или пересмотра; stepId необязателен. С assessmentId: прочитать сохранённую ревизию (revision необязателен) и needsRevision; requirements в этом ответе относятся к сохранённому снимку.',
-    GetEstimationHistory:
-      'Факты и оценки по явным targets. Метрики ms раздельны, общий активный итог — объединение интервалов родителей. При пагинации сохраняйте asOf, throughSequence и nextAfterSequence как afterSequence. Окно дат относится к фактам времени, оценки читаются до asOf. Статистики относятся ко всей выборке фактов; readiness текущая. Время плана рассчитывается по рабочим интервалам.',
-  };
   return TOOL_NAMES.map((name) => {
     let inputSchema = { type: 'object', additionalProperties: false };
     if (Object.hasOwn(ATLM_TOOL_SCHEMAS, name))
       return {
         name,
-        description: {
-          CalculateAtlmEstimate:
-            'Предпросмотр полного PLAN_ACTIVE до первого StartPlan: приоритет активной ATLM, при расчётной недоступности — явный historical-median по реальной истории. Факты agent-task-v4; без обучения и записи.',
-          GetPlanEstimate:
-            'Текущий read-only расчёт PLANNED (source=CURRENT_INPUT); recordedEstimation сохраняет исходную оценку для аудита. После первого запуска — frozen-снимок; legacy без снимка читает исходную assessment. История не переписывается.',
-          GetEstimationModelStatus:
-            'Состояние модели, накопление пригодных планов и очередь обучения владельца. Только чтение.',
-          ProcessEstimationTraining:
-            'Один ограниченный проход долговечной очереди владельца. Идемпотентная мутация без planId, с lease и fence; может потребоваться повторный проход.',
-          StartEstimationTraining:
-            'По явной просьбе пользователя запросить обучение на доступных данных независимо от порога двух планов. Возвращает состояние очереди; качество и достаточность данных проверяются сервером.',
-          GetEstimationTrainingHistory:
-            'История попыток обучения владельца, включая ошибки и отказанные модели; nextCursor фиксирует границу среза.',
-          GetAtlmDataset:
-            'Приватная постраничная выгрузка неизменяемых sample-версий. Сохраняйте nextCursor; DATASET_CHANGED требует начать заново. Используется последняя версия каждого плана, только если она пригодна.',
-        }[name],
         inputSchema: ATLM_TOOL_SCHEMAS[name],
         annotations: {
           readOnlyHint: !['ProcessEstimationTraining', 'StartEstimationTraining'].includes(name),
@@ -498,7 +480,7 @@ function mcpTools() {
             type: 'string',
             minLength: 1,
             description:
-              'Полный исходный Markdown плана. Этапы из заголовков сохраняются автоматически; не пересказывайте их в отдельных полях.',
+              'Полный Markdown плана с заголовками этапов. Сервер создаёт этапы из заголовков.',
           },
           description: { type: 'string', maxLength: 20000 },
           acceptanceCriteria: { type: 'string', maxLength: 20000 },
@@ -534,11 +516,11 @@ function mcpTools() {
           title: { type: 'string', minLength: 1, maxLength: 200 },
           planText: {
             type: 'string', minLength: 1,
-            description: 'Полный Markdown в статусе PLANNED. Отдельно от метаданных и stepEdits.',
+            description: 'Полный Markdown неудалённого PLANNED-плана до первого запуска. Передавайте отдельно от метаданных и stepEdits.',
           },
           stepEdits: {
             type: 'array', minItems: 1,
-            description: 'Правки существующих этапов в статусе PLANNED. Ответ обновляет и этапы, и общий Markdown.',
+            description: 'Правки существующих этапов неудалённого PLANNED-плана до первого запуска. Сервер обновляет этапы и общий Markdown.',
             items: {
               type: 'object', additionalProperties: false, required: ['stepId', 'markdown'],
               properties: {
@@ -618,33 +600,11 @@ function mcpTools() {
         additionalProperties: false,
       };
     }
-    if (assessmentDescriptions[name])
-      return { name, description: assessmentDescriptions[name], inputSchema };
-    return {
-      name: name,
-      description:
-        name === 'DeletePlan'
-          ? 'Переместить план в удалённые: остановить его таймер, сохранить план. Требует явной просьбы пользователя и текущей версии.'
-          : name === 'RestorePlan'
-            ? 'Восстановить удалённый план без запуска таймера. Требует явной просьбы пользователя и текущей версии.'
-            : name === 'ListPlans'
-              ? 'Список планов владельца с фильтрами statuses, deleted (по умолчанию false) и стабильной пагинацией nextCursor; RUNNING возвращает все активные планы. Не выбирает план для исполнителя.'
-              : name === 'GetTimeReport'
-                ? 'Отчёт о фактически затраченном времени за период: totalActiveMs и activeByDay объединяют пересекающиеся интервалы, sumPlanActiveMs суммирует время планов. Это не прогноз. Значения в миллисекундах.'
-                : ['StartPlan', 'ResumePlan', 'PausePlan', 'FinishPlan'].includes(name)
-                  ? name + ': меняет только указанный planId; другие планы продолжаются независимо.'
-                  : name === 'CreatePlan'
-                    ? 'Сохранить готовый план целиком в planText и создать его этапы из заголовков. Таймер не запускается.'
-                    : name + ' через общий командный/API слой Sites.',
-      inputSchema: inputSchema,
-    };
+    return { name, inputSchema };
   }).map((tool) => ({
     ...tool,
     name: MCP_PUBLIC_NAMES[tool.name] || tool.name,
-    description: Object.entries(MCP_PUBLIC_NAMES).reduce(
-      (text, [oldName, newName]) => text.replaceAll(oldName, newName),
-      MCP_DESCRIPTIONS[tool.name] || tool.description,
-    ),
+    description: MCP_DESCRIPTIONS[tool.name],
   }));
 }
 
