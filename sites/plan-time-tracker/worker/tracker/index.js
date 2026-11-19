@@ -1470,6 +1470,7 @@ async function readTrackerCapabilities(db, ownerId) {
         method: { ...ATLM_METHOD },
         inputSchemaVersion: 'agent-task-v4',
         featureSchemaVersion: ATLM_FEATURE_VERSION,
+        agentTaskSchema: AGENT_TASK_SCHEMA,
         metric: 'PLAN_ACTIVE',
         policyVersion: ATLM_POLICY_VERSION,
         engines: ['OLS', 'RIDGE', 'BAYESIAN'],

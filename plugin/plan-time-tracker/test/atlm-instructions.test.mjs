@@ -24,11 +24,30 @@ test('MCP discovery matches the instructions',async()=>{
    assert(JSON.stringify(capability).includes(name));const tool=listing.find(t=>t.name===name);assert(tool,name);assert.equal(tool.inputSchema.additionalProperties,false);assert.equal(tool.annotations.readOnlyHint,name!=='ContinueTraining');
   }
   const schema=listing.find(t=>t.name==='EstimatePlanTime').inputSchema;assert.deepEqual([...schema.required].sort(),['agentTask','expectedRequirementsDigest','planId']);
+  const saveSchema=listing.find(t=>t.name==='SaveTaskAssessment').inputSchema;
+  assert.deepEqual(capability.agentTaskSchema,schema.properties.agentTask);
+  assert.deepEqual(capability.agentTaskSchema,saveSchema.properties.payload.properties.context.properties.agentTask);
   const props=schema.properties.agentTask.properties;
   assert.deepEqual(props.execution.properties.environmentId.enum,['local','cloud_workspace']);
   assert.deepEqual(props.systemBoundaries.items.properties.operations.items.properties.action.enum,['READ','WRITE']);
   assert.deepEqual(props.learningTargets.items.properties.kind.enum,['TOOLING','RUNTIME','DATA_MODEL','OTHER']);
   assert.equal(capability.firstStartRequires,'READY');
+ }finally{c.close();}
+});
+
+test('documented system boundary can be saved and read using the published schema',async()=>{
+ const c=context();try{
+  const examples=[...features.matchAll(/```json\s*([\s\S]*?)```/g)].map(match=>JSON.parse(match[1]));
+  const [agentTask,boundary]=examples;
+  agentTask.systemBoundaries=[boundary];delete agentTask.evidence.systemBoundaries;
+  await ok(c,'CreatePlan',{planId:PLAN,title:'Операция записи',planText:'# План\n\n## Этап 1. Проверить\nСохранить и прочитать оценку.',planCreatedAt:{precision:'dateOnly',on:'2026-11-11',timeZone:'UTC'}});
+  const {currentRequirementsDigest}=await invoke(c,'GetTaskAssessment',{planId:PLAN});
+  const assessmentId=crypto.randomUUID(),payload={assessmentId,planId:PLAN,expectedRequirementsDigest:currentRequirementsDigest,phase:'planning',context:{agentTask},method:{id:'qualitative',version:'1',scale:['UNKNOWN']},
+   complexity:{status:'UNKNOWN',value:null,rationale:'No scale'},unknowns:[],assumptions:[],dependencies:[],forecast:{status:'UNKNOWN',metric:'PLAN_ACTIVE',lowerMs:null,upperMs:null,confidence:'UNKNOWN',basis:'Server forecast',sampleCount:0},sources:[],approach:{description:'Update',rationale:'Existing path'},predictionRequest:{method:'ATLM',methodVersion:1}};
+  await invoke(c,'SaveTaskAssessment',{schemaVersion:1,commandId:crypto.randomUUID(),expectedVersion:0,payload});
+  const saved=await invoke(c,'GetTaskAssessment',{planId:PLAN,assessmentId});
+  assert.deepEqual(saved.assessment.context.agentTask.systemBoundaries,[boundary]);
+  assert.equal(saved.assessmentReadiness.status,'READY');
  }finally{c.close();}
 });
 

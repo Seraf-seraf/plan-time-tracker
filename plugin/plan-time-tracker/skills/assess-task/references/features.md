@@ -1,13 +1,13 @@
 # Исходные признаки ATLM
 
-Перед первым StartPlan заполните все поля `context.agentTask` версии `agent-task-v4` по доступным до запуска требованиям. Допустимые ключи, enum и размеры публикует схема EstimatePlanTime. Оценка ограничена 65 536 байтами UTF-8 и глубиной JSON 12.
+Перед первым StartPlan заполните все поля `context.agentTask` версии `agent-task-v4` по доступным до запуска требованиям. Полная схема доступна в `GetTrackerInfo.assessments.atlm.agentTaskSchema` и совпадает со схемой EstimatePlanTime. Если клиент сокращает вложенные типы до `unknown`, читайте именно поле `agentTaskSchema` в ответе GetTrackerInfo. На сервере без этого поля используйте таблицы и примеры ниже и полную схему из MCP discovery. Оценка ограничена 65 536 байтами UTF-8 и глубиной JSON 12.
 
 ## Границы и операции
 
 1. Выделите независимо управляемые контракты сервисов и хранилищ. Если таких контрактов нет, запишите `systemBoundaries=[]` и источник проверки в evidence. Для нескольких контуров одного провайдера обоснуйте независимость.
 2. Массив `systemBoundaries` обязателен. Каждая граница содержит id, name, contractControl, role, evidence и непустой operations. OWNED означает право проекта изменить контракт. Своя схема PostgreSQL и свои ключи Redis относятся к OWNED и в облаке. Для чужой схемы или чужого API укажите FOREIGN. Основная роль принимает API, SERVICE, DATASTORE, QUEUE, SDK или PLATFORM.
 3. Выделите отдельно проверяемое поведение. Тысяча страниц одного поиска даёт одну READ. Запрос GET с побочным эффектом даёт WRITE. Чтение внутри атомарного изменения входит в WRITE. Отдельное чтение статуса и создание отправления дают две операции.
-4. Каждая операция имеет id, description, evidence, action READ/WRITE и work USE/MODIFY/ADD (использовать, изменить или реализовать поведение). Укажите contractState KNOWN/PARTIAL/UNKNOWN, retryPolicy и recovery NOT_REQUIRED/EXISTING/IMPLEMENT/UNKNOWN. Recovery относится к восстановлению или сверке после частичного отказа. Для idempotency доступны NOT_APPLICABLE/EXISTING/IMPLEMENT/UNKNOWN. Для READ требуется NOT_APPLICABLE. Для WRITE с NOT_APPLICABLE в evidence операции объясните отсутствие риска повторения.
+4. Каждая операция имеет id, description, evidence, action READ/WRITE и work USE/MODIFY/ADD (использовать, изменить или реализовать поведение). Укажите contractState KNOWN/PARTIAL/UNKNOWN, retryPolicy NOT_REQUIRED/EXISTING/IMPLEMENT/UNKNOWN и recovery NOT_REQUIRED/EXISTING/IMPLEMENT/UNKNOWN. Recovery относится к восстановлению или сверке после частичного отказа. Для idempotency доступны NOT_APPLICABLE/EXISTING/IMPLEMENT/UNKNOWN. Для READ требуется NOT_APPLICABLE. Для WRITE с NOT_APPLICABLE в evidence операции объясните отсутствие риска повторения.
 5. Укажите authType NONE/API_KEY/OAUTH2/SERVICE_ACCOUNT/OTHER/UNKNOWN и accessState AVAILABLE/MISSING/UNKNOWN/NOT_REQUIRED. Только NONE сочетается с NOT_REQUIRED. Для OTHER в evidence опишите механизм. В verificationScenarioIds перечислите уникальные ID существующих сценариев проверки. Нужен хотя бы один.
 6. Используйте устойчивые ID границ, операций и целей изучения из строчных ASCII букв, цифр и знаков `._:-`. Первый символ — буква или цифра. Максимальная длина ID 128, имени 160, описания и evidence 400 символов. Точные дубли сворачиваются, конфликт ID и повтор поведения под другим ID отклоняются.
 7. Заполните `learningTargets` объектами {id,kind,evidence} для самостоятельного изучения TOOLING, RUNTIME, DATA_MODEL или OTHER. Исследование неизвестных деталей операции уже учитывает contractState.
@@ -137,3 +137,33 @@
   "learningTargets": []
 }
 ```
+
+Пример системной границы для операции записи. Это элемент `systemBoundaries`; `verificationScenarioIds` ссылается на `id` существующего сценария из `verificationScenarios`. Если массив не пуст, не добавляйте в `evidence` основание для пустого `systemBoundaries`.
+
+```json
+{
+  "id": "tracker-api",
+  "name": "API трекера",
+  "contractControl": "OWNED",
+  "role": "API",
+  "evidence": "Проект контролирует контракт собственного API трекера.",
+  "operations": [
+    {
+      "id": "save",
+      "description": "Сохранить оценку задачи",
+      "evidence": "Приёмка требует сохранения и последующего чтения оценки.",
+      "action": "WRITE",
+      "work": "MODIFY",
+      "contractState": "KNOWN",
+      "retryPolicy": "EXISTING",
+      "idempotency": "EXISTING",
+      "recovery": "EXISTING",
+      "authType": "NONE",
+      "accessState": "NOT_REQUIRED",
+      "verificationScenarioIds": ["check"]
+    }
+  ]
+}
+```
+
+Это иллюстрация формы, а не утверждение о реальной авторизации или механизмах повторов трекера. Для фактической задачи выбирайте значения по её источникам; неизвестные и частично известные поля указывайте с `unknownReasons` по полному пути.
