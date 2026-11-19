@@ -1,5 +1,5 @@
 export const UI_ATLM = String.raw`(()=>{
-  const planRoot=document.querySelector("#planDetail"),settingsRoot=document.querySelector("#view-settings .settings-grid");
+  const planRoot=document.querySelector("#planDetail"),settingsView=document.querySelector("#view-settings"),settingsRoot=settingsView?.querySelector(".settings-grid");
   if(!planRoot||!settingsRoot)return;
   const make=(tag,text,cls)=>{const el=document.createElement(tag);if(text!=null)el.textContent=text;if(cls)el.className=cls;return el;};
   const button=(text,action)=>{const el=make("button",text);el.type="button";el.addEventListener("click",action);return el;};
@@ -28,18 +28,26 @@ export const UI_ATLM = String.raw`(()=>{
   const attemptsBody=make("div","Загружаем историю…");attemptsBody.setAttribute("aria-live","polite");attemptsRegion.append(attemptsBody);
   statusPanel.append(statusHeading, statusOverview, statusDetails, attemptsRegion);
   let attemptsToken=0,attemptsCursor=null,attemptsRows=[];
-  async function loadAttempts(more=false){
-    const token=++attemptsToken;if(!more){attemptsRows=[];attemptsCursor=null;attemptsBody.replaceChildren(make("p","Загружаем историю…","atlm-note"));}
+  async function loadAttempts({more=false,refresh=false}={}){
+    const token=++attemptsToken;
+    const loadedCount=refresh?attemptsRows.length:0;
+    const rows=more?attemptsRows.slice():[];
+    let cursor=more?attemptsCursor:null;
+    if(!more&&!refresh){attemptsRows=[];attemptsCursor=null;attemptsBody.replaceChildren(make("p","Загружаем историю…","atlm-note"));}
     try{
-      const query=attemptsCursor?"?limit=50&cursor="+encodeURIComponent(attemptsCursor):"?limit=50";
-      const page=await api("/api/tracker/estimation-training-history"+query);
-      if(token!==attemptsToken)return;
-      if(!Array.isArray(page.rows))throw new Error("Неполная история обучения.");
-      attemptsRows.push(...page.rows);attemptsCursor=page.nextCursor;attemptsBody.replaceChildren();
+      do{
+        const query=cursor?"?limit=50&cursor="+encodeURIComponent(cursor):"?limit=50";
+        const page=await api("/api/tracker/estimation-training-history"+query);
+        if(token!==attemptsToken)return;
+        if(!Array.isArray(page.rows))throw new Error("Неполная история обучения.");
+        rows.push(...page.rows);cursor=page.nextCursor;
+      }while(cursor&&rows.length<loadedCount);
+      attemptsRows=rows;attemptsCursor=cursor;attemptsBody.replaceChildren();
       if(!attemptsRows.length){attemptsBody.append(make("p","Попыток обучения пока нет.","atlm-note"));return;}
       attemptsBody.append(renderAttempts(attemptsRows));
-      if(attemptsCursor)attemptsBody.append(button("Показать ещё",()=>loadAttempts(true)));
-    }catch(error){if(token!==attemptsToken)return;attemptsBody.replaceChildren(make("p","Не удалось загрузить историю. "+error.message,"error"),button("Повторить загрузку истории",()=>loadAttempts()));}
+      if(attemptsCursor)attemptsBody.append(button("Показать ещё",()=>loadAttempts({more:true})));
+    }catch(error){if(token!==attemptsToken)return;attemptsBody.replaceChildren(make("p","Не удалось загрузить историю. "+error.message,"error"),button("Повторить загрузку истории",()=>loadAttempts({refresh})));}
+    finally{if(token===attemptsToken&&!statusPending&&!startPending&&pollTimer===null)schedulePoll();}
   }
   const trainingColumns = ["Дата", "Результат", "Примеры", "Точка", "Интервал", "Причина"];
   const trainingEngines = {
@@ -175,14 +183,14 @@ export const UI_ATLM = String.raw`(()=>{
   async function requestTraining(){
     if(startPending||processPending||statusPending)return;
     statusBody.querySelectorAll(".atlm-start-feedback,.atlm-process-feedback").forEach(message=>message.remove());lastProcessFailure=null;
-    startPending=true;clearTimeout(pollTimer);statusPanel.setAttribute("aria-busy","true");updateControls();
+    startPending=true;clearPoll();statusPanel.setAttribute("aria-busy","true");updateControls();
     startTraining.textContent="Запускаем обучение…";
     try{
       const data=await api("/api/tracker/estimation-model/start",{method:"POST",body:"{}"});
       lastProcessFailure=null;recoveryAction=null;processed.clear();autoBudget=8;pollsLeft=3;showStatus(data);loadAttempts();
       const pending=data.training.due||["QUEUED","RUNNING","RETRY_WAIT"].includes(data.training.status);
       statusBody.append(make("p",pending?"Запрос принят.":"Попытка обучения завершена.","atlm-note atlm-start-feedback"));
-      schedulePoll();
+      schedulePoll(true);
     }catch(error){
       recoveryAction="status";lastProcessFailure="Не удалось подтвердить запуск обучения. "+error.message+" Обновите состояние перед повторным запуском.";
       statusBody.append(make("p",lastProcessFailure,"error atlm-start-feedback"));
@@ -365,23 +373,44 @@ export const UI_ATLM = String.raw`(()=>{
     updateControls();
   }
   function queueKey(data){const t=data.training;return JSON.stringify([data.datasetRevision,t.generation,t.progressRevision,t.pendingRefreshCount,t.nextAttemptAt]);}
-  function schedulePoll(){clearTimeout(pollTimer);if(pollsLeft>0){pollsLeft--;pollTimer=setTimeout(()=>loadStatus(true),750);}}
+  function canObserveTraining(){return supported&&document.visibilityState==="visible"&&!settingsView.classList.contains("hidden");}
+  function hasPendingAttempts(){return attemptsRows.some(item=>item.completedAt===null);}
+  function historyKey(data){return JSON.stringify([data.training.generation,data.training.status,data.lastAttempt?.completedAt]);}
+  function clearPoll(){clearTimeout(pollTimer);pollTimer=null;}
+  function schedulePoll(allowProcess=false){
+    clearPoll();
+    if(!canObserveTraining())return;
+    const continueProcessing=allowProcess&&pollsLeft>0;
+    if(!continueProcessing&&latestStatus?.training.status!=="RUNNING"&&!hasPendingAttempts())return;
+    if(continueProcessing)pollsLeft--;
+    pollTimer=setTimeout(()=>{
+      pollTimer=null;
+      if(canObserveTraining())loadStatus(continueProcessing);
+    },continueProcessing?750:4000);
+  }
   function loadStatus(allowProcess=true){
     if(!supported||startPending)return Promise.resolve();if(statusPending)return statusPending;
     statusPanel.setAttribute("aria-busy","true");
     statusPending=(async()=>{
       try{
+        const previous=latestStatus;
         const data=await api("/api/tracker/estimation-model");if(recoveryAction==="status"){recoveryAction=null;lastProcessFailure=null;}showStatus(data);
+        const statusChanged=previous&&historyKey(previous)!==historyKey(data);
+        const stalePendingRow=!["RUNNING","QUEUED","RETRY_WAIT"].includes(data.training.status)&&hasPendingAttempts();
+        if(canObserveTraining()&&(statusChanged||stalePendingRow))loadAttempts({refresh:true});
         const key=queueKey(data);
-        if(allowProcess&&data.training.due&&!processPending&&autoBudget>0&&!processed.has(key)){
+        if(allowProcess&&canObserveTraining()&&data.training.due&&!processPending&&autoBudget>0&&!processed.has(key)){
           processed.add(key);autoBudget--;processPending=true;updateControls();
           try{await api("/api/tracker/estimation-model/process",{method:"POST",body:"{}"});lastProcessFailure=null;pollsLeft=Math.max(pollsLeft,3);}
           catch(error){recoveryAction="process";lastProcessFailure="Не удалось продолжить обучение. "+error.message;statusBody.append(make("p",lastProcessFailure,"error atlm-process-feedback"));}
           finally{processPending=false;updateControls();}
-          schedulePoll();
-        }else if(allowProcess&&(data.training.status==="RUNNING"||data.training.due))schedulePoll();
+        }
       }catch(error){recoveryAction="status";statusDetails.hidden=true;statusBody.replaceChildren(make("p","Не удалось загрузить состояние обучения. "+error.message,"error"));}
-      finally{statusPending=null;updateControls();statusPanel.removeAttribute("aria-busy");}
+      finally{
+        statusPending=null;updateControls();statusPanel.removeAttribute("aria-busy");
+        const pendingWork=latestStatus?.training.due||latestStatus?.training.status==="RUNNING";
+        schedulePoll(allowProcess&&pendingWork);
+      }
     })();updateControls();return statusPending;
   }
   async function loadPlan(planId,retry=0){
@@ -495,7 +524,13 @@ export const UI_ATLM = String.raw`(()=>{
   }
   window.addEventListener("plan-time-tracker:plan-will-render",()=>{planToken++;planAbort?.abort();});
   window.addEventListener("plan-time-tracker:plan-rendered",event=>{loadPlan(event.detail?.planId);loadStatus(false);});
-  document.querySelector('[data-view="settings"]')?.addEventListener("click",()=>{clearTimeout(pollTimer);pollsLeft=0;loadStatus(false);loadAttempts();});
-  window.addEventListener("pagehide",()=>{clearTimeout(pollTimer);planAbort?.abort();});
+  document.querySelector('[data-view="settings"]')?.addEventListener("click",()=>{clearPoll();pollsLeft=0;loadStatus(false);loadAttempts();});
+  function refreshVisibleTraining(){
+    if(!canObserveTraining())return;
+    loadStatus(false);loadAttempts({refresh:true});
+  }
+  document.addEventListener("visibilitychange",()=>{clearPoll();pollsLeft=0;refreshVisibleTraining();});
+  window.addEventListener("pageshow",event=>{if(event.persisted)refreshVisibleTraining();});
+  window.addEventListener("pagehide",()=>{clearPoll();pollsLeft=0;planAbort?.abort();});
   discover();
 })();`;

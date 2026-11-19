@@ -32,6 +32,7 @@ page.setDefaultTimeout(10000);await page.clock.install({ time: c.now() });
 const requests = [], errors = [];let controlled = false, statusError = false, estimateError = false, processError = false;
 let status = structuredClone(initial.value), estimate, holdPlan = null, heldStarted, releaseHeld, heldFinished;
 let processCount = 0, statusCount = 0, advancingQueue = false, startCount = 0, startError = false, holdStart = false, releaseStart;
+let historyAttempt = null;
 page.on('pageerror', error => errors.push(error.message));
 const json = (route, value, code = 200) => route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify(value) });
 const estimateFor = id => ({ planId: id, source:'CURRENT_INPUT', isStale: false, serverEstimation: { formatVersion: 1, calculatedAt:c.now(), status: 'AVAILABLE', pointMs: id === PLAN ? 120000 : 420000, metric: 'PLAN_ACTIVE', forecastScope: 'FULL_FROM_FIRST_START', method: { id: 'atlm', version: 'agent-v4-probabilistic' }, sampleCount: 23, accuracy:'HISTORICALLY_EVALUATED', modelVersion: 'agent-v2/model-7', modelId: 'model-7', evaluation: { validationStatus:"HISTORICALLY_EVALUATED", caseCount: 6, pointCaseCount:6, maeMs: 30000 }, interval: {status:'AVAILABLE',lowerMs:60000,upperMs:600000,nominalCoverage:0.8,engine:'BAYESIAN_PREDICTIVE',calibrationSampleCount:0,validationStatus:'EXPERIMENTAL',unavailableReason:null} } });
@@ -42,6 +43,9 @@ await page.route('**/*', async route => {
   if (url.pathname === '/api/tracker/estimation-model') {
     statusCount++;
     if (controlled) return statusError ? json(route, { error: { message: 'Status service unavailable' } }, 503) : json(route, status);
+  }
+  if (url.pathname === '/api/tracker/estimation-training-history' && historyAttempt) {
+    return json(route, { rows: [historyAttempt], nextCursor: null });
   }
   if (url.pathname === '/api/tracker/estimation-model/process' && controlled) {
     assert.equal(request.method(), 'POST');assert.deepEqual(request.postDataJSON(), {});processCount++;
@@ -81,8 +85,8 @@ const open = async id => {
 };
 const refreshPlan = async () => { await forecast().getByRole('button', { name: 'Обновить прогноз', exact: true }).click();await page.waitForFunction(() => !document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy')); };
 const refreshStatus = async () => { await page.locator('[data-view="settings"]').click();await page.waitForFunction(() => !document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy')); };
-const readPoll = async () => {
-  const before = statusCount;await page.clock.runFor(800);
+const readPoll = async (elapsed = 800) => {
+  const before = statusCount;await page.clock.runFor(elapsed);
   // Fetch callbacks run in Node, outside Playwright's controlled browser clock.
   const deadline = Date.now() + 10000;while (statusCount === before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
   assert(statusCount > before, 'the bounded status poll must run');
@@ -253,6 +257,46 @@ try {
   assert.match(await settings().innerText(), /Не удалось загрузить состояние/);assert.equal(await details().isVisible(), false);
   statusError = false;await refreshStatus();assert.match(await overview.innerText(), /Активная модель\s+Проверена на истории/);
   status.eligibleSampleCount = null;await refreshStatus();assert.match(await settings().innerText(), /Не удалось прочитать состояние обучения/);
+
+  // A server-side completion must update the already visible attempt, including after tab suspension.
+  await page.setViewportSize({ width: 390, height: 1100 });
+  for (const mode of ['started here', 'already running', 'hidden tab']) {
+    if (mode === 'started here') {
+      status = modelState('IDLE');
+      await refreshStatus();
+    }
+    status = modelState('RUNNING');
+    historyAttempt = { attemptId: crypto.randomUUID(), startedAt: c.now(), completedAt: null, manifest: [] };
+    if (mode === 'started here') await manual().click();
+    else await refreshStatus();
+    await history.getByText('В работе', { exact: true }).waitFor();
+    const writesBefore = processCount + startCount;
+    if (mode === 'hidden tab') {
+      await page.evaluate(() => {
+        Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      const readsBefore = statusCount;
+      await page.clock.runFor(8000);
+      assert.equal(statusCount, readsBefore, 'hidden tabs suspend status observation');
+    }
+    historyAttempt = { ...historyAttempt, completedAt: c.now() + 2000, reason: 'INSUFFICIENT_DATA' };
+    status = modelState('COLLECTING_DATA');
+    status.lastAttempt = { completedAt: historyAttempt.completedAt };
+    if (mode === 'hidden tab') {
+      await page.evaluate(() => {
+        delete document.visibilityState;
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+    } else {
+      await readPoll(mode === 'started here' ? 800 : 4200);
+    }
+    await history.getByText('Недостаточно данных', { exact: true }).waitFor();
+    assert.equal(await history.getByText('В работе', { exact: true }).count(), 0);
+    assert.equal(processCount + startCount, writesBefore, 'observing the attempt is read-only');
+  }
+  historyAttempt = null;
+  await page.setViewportSize({ width: 1440, height: 1100 });
 
   // Opening settings and refreshing status are read-only, even with queued work.
   status = modelState('QUEUED', true);await page.locator('[data-view="overview"]').click();await page.locator('[data-view="settings"]').click();
