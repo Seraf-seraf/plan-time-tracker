@@ -4,6 +4,7 @@ import { selectHybridHistory, selectHybridEngine, evaluateHybridAtlmChronologica
   fitHybridAtlm, predictHybridAtlm, fitAtlmRidge, normalizeAgentTask } from '../worker/index.js';
 import { evaluate } from '../scripts/evaluate-atlm.mjs';
 import { taskV4 } from './fixtures/tracker-db.mjs';
+import { atlmReplayPolicyCase } from '../worker/atlm/model.js';
 
 const rows = Array.from({length:12},(_,i)=>({sampleId:String(i+1),planId:`p${i}`,capturedAt:i*10000,sourceAvailableAt:i*10000+1000,
   features:normalizeAgentTask({...taskV4(),reuseLevel:i%4}).features,actualMs:60000+i*10000}));
@@ -52,6 +53,57 @@ test('entire hybrid decisions and preprocessing cannot see target outcomes or fu
   assert.equal(same.trainDatasetDigest,target.trainDatasetDigest);
   assert.equal(first.metrics.operational.scoredCount,first.metrics.median.scoredCount);
   assert(first.metrics.atlm.forecastRate<=first.metrics.operational.forecastRate);
+});
+
+test('bounded replay advances historical dependencies and resumes without changing predictions', async () => {
+  const features = normalizeAgentTask(taskV4()).features;
+  const input = Array.from({ length: 33 }, (_, index) => ({
+    sampleId: String(index + 1),
+    planId: 'reverse-' + String(33 - index).padStart(3, '0'),
+    capturedAt: index * 10000,
+    sourceAvailableAt: index * 10000 + 1000,
+    features,
+    actualMs: 1000 + index,
+  }));
+  const historyFor = (target) => input
+    .filter((row) => row.sourceAvailableAt < target.capturedAt)
+    .sort((a, b) => a.planId.localeCompare(b.planId));
+  const target = input.at(-1);
+  const expected = await atlmReplayPolicyCase(target, historyFor, {}, {});
+  const yielded = Symbol('training budget');
+  let baseCases = {}, policyCases = {}, result;
+  for (let pass = 0; pass < input.length && !result; pass++) {
+    let elapsedMs = 0;
+    const previousProgress = Object.keys(baseCases).length + Object.keys(policyCases).length;
+    try {
+      result = await atlmReplayPolicyCase(
+        target,
+        async (row) => {
+          elapsedMs += 2000;
+          return historyFor(row);
+        },
+        baseCases,
+        policyCases,
+        async () => {},
+        async () => {
+          if (elapsedMs >= 9000) throw yielded;
+        },
+      );
+    } catch (error) {
+      assert.equal(error, yielded);
+    }
+    assert.ok(elapsedMs <= 10000, 'historical reads must respect the cooperative pass budget');
+    assert.ok(
+      Object.keys(baseCases).length + Object.keys(policyCases).length > previousProgress,
+      'each pass must advance a dependency rather than repeat an uncheckpointed traversal',
+    );
+    // Resuming must also work after restoring the saved values in another invocation.
+    baseCases = JSON.parse(JSON.stringify(baseCases));
+    policyCases = JSON.parse(JSON.stringify(policyCases));
+  }
+  assert.ok(result, 'bounded passes must eventually complete the target');
+  assert.equal(Object.keys(policyCases).length, input.length);
+  assert.deepEqual(result, expected);
 });
 
 test('hybrid artifact dispatch is immutable and rejects inconsistent nested models', async () => {

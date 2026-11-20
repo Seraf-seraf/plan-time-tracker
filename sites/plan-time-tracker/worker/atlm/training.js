@@ -55,8 +55,10 @@ async function atlmEnsureAttempt(db, ownerId, job, nowMs) {
   await db
     .prepare(
       `INSERT OR IGNORE INTO estimation_training_attempts(owner_id,attempt_id,started_at,method_version,feature_version,dataset_revision,manifest_json)
-    SELECT ?,?,?,?, ?,COALESCE((SELECT dataset_revision FROM estimation_owner_state WHERE owner_id=?),0),'[]'
-    WHERE EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?)`,
+    SELECT ?,?,?,?, ?,COALESCE(json_extract(j.snapshot_json,'$.datasetRevision'),
+      (SELECT dataset_revision FROM estimation_owner_state WHERE owner_id=?),0),
+      COALESCE(json_extract(j.snapshot_json,'$.manifest'),'[]')
+    FROM estimation_jobs j WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?`,
     )
     .bind(
       ownerId,
@@ -108,6 +110,7 @@ function atlmDiagnostics(code, facts = {}) {
     'completedCases',
     'stalledPasses',
     'passElapsedMs',
+    'recoveredAt',
   ])
     if (
       facts[key] !== undefined &&
@@ -193,6 +196,7 @@ function atlmAttemptDiagnostics(result, snapshot, job, nowMs) {
   const candidates = result.details?.candidates;
   return {
     ...atlmDiagnostics(result.reason || 'AVAILABLE', {
+      sampleCount: snapshot?.observedSampleCount,
       ...result.details?.artifact,
       ...result.details,
       status: undefined,
@@ -205,6 +209,9 @@ function atlmAttemptDiagnostics(result, snapshot, job, nowMs) {
         }
       : {}),
     ...(result.details?.selection ? { selection: result.details.selection } : {}),
+    ...(result.evaluation?.incumbentComparison
+      ? { incumbentComparison: result.evaluation.incumbentComparison }
+      : {}),
     methodVersion: ATLM_METHOD.version,
     featureSchemaVersion: ATLM_FEATURE_VERSION,
     datasetRevision: snapshot?.datasetRevision ?? null,
@@ -625,7 +632,10 @@ async function atlmCheckpoint(
   const result = statements.length
     ? (await db.batch([...statements, head])).at(-1).results[0]
     : await head.first();
-  if (result) for (const [key, value] of pending) storage.saved.set(key, value);
+  if (result) {
+    for (const [key, value] of pending) storage.saved.set(key, value);
+    job.checkpoint_json = JSON.stringify(header);
+  }
   return result;
 }
 
@@ -770,24 +780,24 @@ async function atlmSnapshot(db, ownerId, job, clock) {
     policyCases: {},
     progressRevision: 1,
   };
-  const saved = await dbFirst(
-    db,
-    `UPDATE estimation_jobs SET snapshot_json=?,checkpoint_json=?,updated_at=?
+  const snapshotJson = JSON.stringify(snapshot);
+  const checkpointJson = JSON.stringify(checkpoint);
+  const results = await db.batch([
+    db.prepare(`UPDATE estimation_jobs SET snapshot_json=?,checkpoint_json=?,updated_at=?
     WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?
       AND EXISTS(SELECT 1 FROM estimation_owner_state WHERE owner_id=? AND dataset_revision=?)
       AND NOT EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND kind='REFRESH_SAMPLE' AND generation>processed_generation)
-    RETURNING *`,
-    JSON.stringify(snapshot),
-    JSON.stringify(checkpoint),
-    nowMs,
-    ownerId,
-    job.generation,
-    job.fence,
-    nowMs,
-    ownerId,
-    state.dataset_revision,
-    ownerId,
-  );
+    RETURNING *`).bind(snapshotJson, checkpointJson, nowMs, ownerId, job.generation, job.fence,
+      nowMs, ownerId, state.dataset_revision, ownerId),
+    db.prepare(`UPDATE estimation_training_attempts SET dataset_revision=?,manifest_json=?
+      WHERE owner_id=? AND attempt_id=? AND completed_at IS NULL
+        AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key='train'
+          AND generation=? AND fence=? AND status='RUNNING' AND lease_until>? AND snapshot_json=?)`)
+      .bind(snapshot.datasetRevision, JSON.stringify(manifest), ownerId, atlmAttemptId(job),
+        ownerId, job.generation, job.fence, nowMs, snapshotJson),
+  ]);
+  const saved = results[0].results[0];
+  if (saved) job.checkpoint_json = checkpointJson;
   return saved ? { snapshot, checkpoint, rows } : null;
 }
 
@@ -828,12 +838,13 @@ function atlmCompareIncumbent(evaluation, incumbent) {
   const comparison = {
     caseCount: cases.length,
     commonCaseCount: common.length,
+    requiredCaseCount: ATLM_MIN_COMPARISONS,
     candidateCoverage: cases.length ? candidateCount / cases.length : 0,
     incumbentCoverage: cases.length ? incumbentCount / cases.length : 0,
     candidateMaeMs: mae('candidate'),
     incumbentMaeMs: mae('incumbent'),
   };
-  if (common.length < 5)
+  if (common.length < ATLM_MIN_COMPARISONS)
     return { accepted: false, reason: 'INSUFFICIENT_INCUMBENT_CASES', comparison };
   return {
     accepted:
@@ -1068,7 +1079,7 @@ async function atlmSupersedeSnapshot(db, ownerId, job, snapshot, nowMs) {
   ]);
 }
 
-async function atlmRecordFailure(db, ownerId, job, error, nowMs) {
+async function atlmRecordFailure(db, ownerId, job, error, nowMs, details) {
   const code = atlmTrainingErrorCode(error),
     exhausted = job.attempts >= 4;
   const snapshot = atlmTrainingJson(job.snapshot_json);
@@ -1099,14 +1110,17 @@ async function atlmRecordFailure(db, ownerId, job, error, nowMs) {
     statements.push(
       db
         .prepare(
-          `UPDATE estimation_training_attempts SET completed_at=?,reason=?,diagnostics_json=?
+          `UPDATE estimation_training_attempts SET completed_at=?,reason=?,diagnostics_json=?,
+            dataset_revision=COALESCE(?,dataset_revision),manifest_json=COALESCE(?,manifest_json)
     WHERE owner_id=? AND attempt_id=? AND completed_at IS NULL
       AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key='train' AND generation=? AND fence=? AND status='RUNNING' AND lease_until>?)`,
         )
         .bind(
           nowMs,
           code,
-          JSON.stringify(atlmAttemptDiagnostics({ reason: code }, snapshot, job, nowMs)),
+          JSON.stringify(atlmAttemptDiagnostics({ reason: code, details }, snapshot, job, nowMs)),
+          snapshot?.datasetRevision ?? null,
+          snapshot ? JSON.stringify(snapshot.manifest) : null,
           ownerId,
           atlmAttemptId(job),
           ownerId,
@@ -1130,7 +1144,7 @@ async function atlmRecordFailure(db, ownerId, job, error, nowMs) {
           snapshot?.newSampleCount ?? null,
           snapshot?.newSampleSequence ?? null,
           code,
-          JSON.stringify(atlmAttemptDiagnostics({ reason: code }, snapshot, job, nowMs)),
+          JSON.stringify(atlmAttemptDiagnostics({ reason: code, details }, snapshot, job, nowMs)),
           nowMs,
           ownerId,
           ownerId,
@@ -1194,11 +1208,25 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
       .bind(ATLM_METHOD.version, ATLM_FEATURE_VERSION, ownerId, expiredAt),
     db
       .prepare(
-        `UPDATE estimation_training_attempts SET completed_at=?,reason='LEASE_EXPIRED',diagnostics_json=json_object('code','LEASE_EXPIRED')
-      WHERE owner_id=? AND completed_at IS NULL AND attempt_id=(SELECT 'g'||generation||'-a'||attempts FROM estimation_jobs
-        WHERE owner_id=? AND job_key='train' AND status='RUNNING' AND lease_until<=? AND attempts>0)`,
+        `WITH expired AS (
+          SELECT * FROM estimation_jobs WHERE owner_id=? AND job_key='train'
+            AND status='RUNNING' AND lease_until<=? AND attempts>0
+        ) UPDATE estimation_training_attempts SET
+          completed_at=(SELECT lease_until FROM expired),reason='LEASE_EXPIRED',
+          dataset_revision=COALESCE((SELECT json_extract(snapshot_json,'$.datasetRevision') FROM expired),dataset_revision),
+          manifest_json=COALESCE((SELECT json_extract(snapshot_json,'$.manifest') FROM expired),manifest_json),
+          diagnostics_json=(SELECT json_object('code','LEASE_EXPIRED',
+            'message','Попытка обучения не завершилась в отведённое время.',
+            'parameters',json_object('sampleCount',json_extract(snapshot_json,'$.observedSampleCount'),
+              'phase',COALESCE(json_extract(checkpoint_json,'$.phase'),'SNAPSHOT'),
+              'completedCases',COALESCE(json_extract(checkpoint_json,'$.completedCases'),json_array_length(checkpoint_json,'$.cases'),0),
+              'recoveredAt',?),
+            'datasetRevision',json_extract(snapshot_json,'$.datasetRevision'),
+            'generation',generation,'completedAt',lease_until) FROM expired)
+        WHERE owner_id=? AND completed_at IS NULL
+          AND attempt_id=(SELECT 'g'||generation||'-a'||attempts FROM expired)`,
       )
-      .bind(expiredAt, ownerId, ownerId, expiredAt),
+      .bind(ownerId, expiredAt, expiredAt, ownerId),
     db
       .prepare(
         `UPDATE estimation_owner_state SET last_attempted_new_sample_count=MAX(last_attempted_new_sample_count,
@@ -1206,7 +1234,10 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
       last_attempted_new_sample_sequence=MAX(last_attempted_new_sample_sequence,
         COALESCE((SELECT json_extract(snapshot_json,'$.newSampleSequence') FROM estimation_jobs WHERE owner_id=estimation_owner_state.owner_id AND job_key='train'),
           (SELECT MAX(sequence) FROM estimation_samples WHERE owner_id=estimation_owner_state.owner_id),0)),
-      last_training_status='FAILED',last_training_reason='LEASE_EXPIRED',updated_at=?,
+      last_training_status='FAILED',last_training_reason='LEASE_EXPIRED',
+      last_training_diagnostics_json=(SELECT a.diagnostics_json FROM estimation_training_attempts a
+        JOIN estimation_jobs j ON j.owner_id=a.owner_id AND a.attempt_id='g'||j.generation||'-a'||j.attempts
+        WHERE a.owner_id=estimation_owner_state.owner_id AND j.job_key='train'),updated_at=?,
       manual_epoch=manual_epoch+1,forced_retrain=CASE WHEN NOT EXISTS(${ATLM_PENDING_REFRESH_SQL}) THEN 0 ELSE forced_retrain END
       WHERE owner_id=? AND EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND job_key='train'
         AND status='RUNNING' AND lease_until<=? AND attempts>=4)`,
@@ -1615,12 +1646,19 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
         break;
       }
     } catch (error) {
-      await atlmRecordFailure(db, ownerId, job, error, clock());
+      const checkpoint = atlmTrainingJson(job.checkpoint_json, {});
+      const details = {
+        phase: checkpoint.phase ?? 'SNAPSHOT',
+        completedCases: checkpoint.completedCases ?? checkpoint.cases?.length ?? 0,
+        passElapsedMs: elapsed(),
+      };
+      await atlmRecordFailure(db, ownerId, job, error, clock(), details);
       throw appError(
         'SOURCE_UNAVAILABLE',
         'Не удалось завершить фоновое обучение. Задание сохранено для повтора.',
         503,
-        { retryable: true, reason: atlmTrainingErrorCode(error) },
+        { retryable: true, reason: atlmTrainingErrorCode(error), ...details,
+          generation: job.generation, attemptId: atlmAttemptId(job) },
       );
     }
   }
@@ -1657,7 +1695,12 @@ function scheduleAtlmTraining(db, ownerId, nowMs, ctx, clock) {
         console.error(
           JSON.stringify({
             event: 'atlm_training_background_error',
-            reason: atlmTrainingErrorCode(error),
+            reason: error.details?.reason ?? atlmTrainingErrorCode(error),
+            phase: error.details?.phase,
+            completedCases: error.details?.completedCases,
+            passElapsedMs: error.details?.passElapsedMs,
+            generation: error.details?.generation,
+            attemptId: error.details?.attemptId,
           }),
         );
       });

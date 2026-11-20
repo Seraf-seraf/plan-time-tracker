@@ -623,9 +623,17 @@ async function atlmReplayPolicyCase(
   beforeWork = async () => {},
 ) {
   if (policyCache[target.sampleId]) return policyCache[target.sampleId];
+  await beforeWork();
   const history = await historyFor(target),
     prior = [];
-  for (const row of history) {
+  // Finish the earliest dependencies first so a bounded pass can save progress.
+  // Keep their original positions for the model's deterministic input order.
+  const dependencies = history
+    .map((row, index) => ({ row, index }))
+    .sort((a, b) =>
+      a.row.capturedAt - b.row.capturedAt || atlmCompareId(a.row.planId, b.row.planId),
+    );
+  for (const { row, index } of dependencies) {
     const replayed = await atlmReplayPolicyCase(
       row,
       historyFor,
@@ -636,7 +644,7 @@ async function atlmReplayPolicyCase(
     );
     if (replayed.status === 'UNAVAILABLE' && replayed.reason === 'INVALID_EVALUATION')
       return replayed;
-    prior.push(replayed);
+    prior[index] = replayed;
   }
   let base = baseCache[target.sampleId];
   if (!base) {

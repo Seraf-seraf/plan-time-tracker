@@ -595,13 +595,16 @@ async function getEstimationTrainingHistory(db, ownerId, args, nowMs) {
     }
     if (
       !isPlainRecord(cursor) ||
-      Object.keys(cursor).length !== 5 ||
-      cursor.version !== 1 ||
+      Object.keys(cursor).length !== (cursor.version === 1 ? 5 : 6) ||
+      ![1, 2].includes(cursor.version) ||
       cursor.ownerScope !== ownerScope ||
       ![cursor.after, cursor.through, cursor.completed].every(isNonnegativeSafeInteger) ||
-      cursor.after > cursor.through
+      cursor.after > cursor.through ||
+      (cursor.version === 2 && !isSnapshotDigest(cursor.pendingDigest))
     )
       throw appError('VALIDATION_ERROR', 'Invalid training history cursor.');
+    if (cursor.version === 1)
+      throw appError('HISTORY_CHANGED', 'История обучения изменилась; начните просмотр заново.', 409);
   }
   const result = await dbFirst(
     db,
@@ -609,20 +612,27 @@ async function getEstimationTrainingHistory(db, ownerId, args, nowMs) {
       SELECT COALESCE(?,(SELECT COALESCE(MAX(rowid),0) FROM estimation_training_attempts WHERE owner_id=?)) AS high
     ), counts AS (
       SELECT high,(SELECT COUNT(*) FROM estimation_training_attempts WHERE owner_id=? AND rowid<=high AND completed_at IS NOT NULL) AS completed FROM bounds
+    ), pending AS (
+      SELECT rowid AS seq,dataset_revision,manifest_json FROM estimation_training_attempts
+      WHERE owner_id=? AND rowid<=(SELECT high FROM counts) AND completed_at IS NULL ORDER BY rowid
     ), page AS (
       SELECT rowid AS seq,* FROM estimation_training_attempts WHERE owner_id=? AND rowid>? AND rowid<=(SELECT high FROM counts)
       ORDER BY rowid LIMIT ?
-    ) SELECT high,completed,(SELECT json_group_array(json_object('seq',seq,'attemptId',attempt_id,'startedAt',started_at,'completedAt',completed_at,
+    ) SELECT high,completed,
+      (SELECT json_group_array(json_array(seq,dataset_revision,manifest_json)) FROM pending) AS pending_json,
+      (SELECT json_group_array(json_object('seq',seq,'attemptId',attempt_id,'startedAt',started_at,'completedAt',completed_at,
        'methodVersion',method_version,'featureVersion',feature_version,'datasetRevision',dataset_revision,'manifest',manifest_json,
        'diagnostics',diagnostics_json,'cases',case_ids_json,'metrics',metrics_json,'selected',selected_json,'reason',reason)) FROM page) AS rows_json FROM counts`,
     cursor?.through ?? null,
     ownerId,
     ownerId,
     ownerId,
+    ownerId,
     cursor?.after ?? 0,
     limit + 1,
   );
-  if (cursor && result.completed !== cursor.completed)
+  const pendingDigest = 'sha256:' + (await hashCommandInput(JSON.parse(result.pending_json)));
+  if (cursor && (result.completed !== cursor.completed || pendingDigest !== cursor.pendingDigest))
     throw appError('HISTORY_CHANGED', 'История обучения изменилась; начните просмотр заново.', 409);
   const values = JSON.parse(result.rows_json),
     hasMore = values.length > limit;
@@ -637,11 +647,12 @@ async function getEstimationTrainingHistory(db, ownerId, args, nowMs) {
   }));
   const nextCursor = hasMore
     ? JSON.stringify({
-        version: 1,
+        version: 2,
         ownerScope,
         after: values.at(-1).seq,
         through: result.high,
         completed: result.completed,
+        pendingDigest,
       })
     : null;
   return { formatVersion: 1, rows, hasMore, nextCursor, serverNow: nowMs };

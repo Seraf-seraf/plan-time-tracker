@@ -98,6 +98,7 @@ export const UI_ATLM = String.raw`(()=>{
     const seconds = new Intl.NumberFormat("ru-RU", {maximumFractionDigits: 1});
     for (const item of attempts.slice().reverse()) {
       const outcome = attemptOutcome(item);
+      const diagnostic = item.diagnostics?.parameters;
       const row = make("tr");
       row.dataset.outcome = outcome.tone;
       row.setAttribute("role", "row");
@@ -118,11 +119,16 @@ export const UI_ATLM = String.raw`(()=>{
       const time = make("div");
       time.append(date);
       if (Number.isSafeInteger(item.startedAt) && Number.isSafeInteger(item.completedAt) && item.completedAt >= item.startedAt) {
-        time.append(make("span", seconds.format((item.completedAt - item.startedAt) / 1000) + " с", "atlm-attempt-duration"));
+        const duration = make("span", seconds.format((item.completedAt - item.startedAt) / 1000) + " с всего", "atlm-attempt-duration");
+        duration.title = "Календарное время попытки, включая ожидание продолжений.";
+        time.append(duration);
       }
       appendCell(0, time, "atlm-attempt-date");
       appendCell(1, make("strong", outcome.label, "atlm-attempt-outcome"), "atlm-attempt-status");
-      appendCell(2, make("span", Array.isArray(item.manifest) ? String(item.manifest.length) : "Неизвестно"), "atlm-attempt-count");
+      const sampleCount = Number.isSafeInteger(diagnostic?.sampleCount) ? diagnostic.sampleCount
+        : Array.isArray(item.manifest) && (item.manifest.length || (item.completedAt !== null && !trainingFailures.has(item.reason)))
+          ? item.manifest.length : null;
+      appendCell(2, make("span", sampleCount === null ? "Нет сведений" : String(sampleCount)), "atlm-attempt-count");
       const point = item.selected?.point?.selectedEngine;
       const interval = item.selected?.interval?.selectedEngine;
       appendCell(3, make("span", trainingEngines[point] ?? point ?? "Нет"), "atlm-attempt-point");
@@ -135,8 +141,11 @@ export const UI_ATLM = String.raw`(()=>{
           : reasonText(item.reason);
         reason.append(make("span", explanation));
       }
+      const comparison = item.diagnostics?.incumbentComparison;
+      if (Number.isSafeInteger(comparison?.commonCaseCount) && Number.isSafeInteger(comparison?.requiredCaseCount)) {
+        reason.append(make("div", "Независимых сравнений: " + comparison.commonCaseCount + " из " + comparison.requiredCaseCount + ".", "atlm-note"));
+      }
       const candidates = Object.entries(item.diagnostics?.candidates || {});
-      const diagnostic = item.diagnostics?.parameters;
       const phase = trainingPhases[diagnostic?.phase];
       if (phase || candidates.length) {
         const details = make("details", null, "atlm-attempt-details");

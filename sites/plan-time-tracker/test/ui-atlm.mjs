@@ -295,6 +295,39 @@ try {
     assert.equal(await history.getByText('В работе', { exact: true }).count(), 0);
     assert.equal(processCount + startCount, writesBefore, 'observing the attempt is read-only');
   }
+  // Old failures have no saved sample count; an empty manifest must not claim zero samples.
+  status = modelState('FAILED');
+  historyAttempt = { attemptId: crypto.randomUUID(), startedAt: c.now(), completedAt: c.now() + 60000,
+    manifest: [], reason: 'LEASE_EXPIRED', diagnostics: { code: 'LEASE_EXPIRED' } };
+  status.lastAttempt = { completedAt: historyAttempt.completedAt };
+  await refreshStatus();
+  await history.getByText('Прервано', { exact: true }).waitFor();
+  assert.match(await history.locator('.atlm-attempt-count').innerText(), /Нет сведений/);
+  assert.equal(await history.locator('.atlm-attempt-duration').getAttribute('title'), 'Календарное время попытки, включая ожидание продолжений.');
+
+  historyAttempt = { ...historyAttempt, attemptId: crypto.randomUUID(), completedAt: c.now() + 60001,
+    manifest: [1, 2], diagnostics: { code: 'LEASE_EXPIRED', parameters: {
+      sampleCount: 2, phase: 'EVALUATE', completedCases: 1, recoveredAt: c.now() + 12 * 60 * 60 * 1000,
+    } } };
+  status.lastAttempt = { completedAt: historyAttempt.completedAt };
+  await refreshStatus();
+  await history.locator('.atlm-attempt-count').getByText('2', { exact: true }).waitFor();
+  await history.getByText('Подробности', { exact: true }).click();
+  assert.match(await history.innerText(), /Обработано примеров\s+1/);
+
+  status = modelState('COLLECTING_DATA');
+  historyAttempt = { ...historyAttempt, attemptId: crypto.randomUUID(), completedAt: c.now() + 60002,
+    reason: 'INSUFFICIENT_INCUMBENT_CASES', selected: { point: { selectedEngine: 'RIDGE' } },
+    diagnostics: { code: 'INSUFFICIENT_INCUMBENT_CASES', incumbentComparison: { commonCaseCount: 2, requiredCaseCount: 5 } } };
+  status.lastAttempt = { completedAt: historyAttempt.completedAt };
+  await refreshStatus();
+  await history.getByText('Независимых сравнений: 2 из 5.', { exact: true }).waitFor();
+  assert.match(await history.innerText(), /Недостаточно данных/);
+  for (const width of [390, 1440]) {
+    await page.setViewportSize({ width, height: 1100 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({ path: resolve(artifacts, `atlm-history-diagnostics-${width}.png`), fullPage: true });
+  }
   historyAttempt = null;
   await page.setViewportSize({ width: 1440, height: 1100 });
 

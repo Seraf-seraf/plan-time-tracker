@@ -50,7 +50,17 @@ function pauseOnce(c, predicate) {
   const restore = intercept(c, (sql, args) => !selected && predicate(sql, args), async execute => {
     selected = true; const result = await execute(); announce(result); await continued; return result;
   });
-  return { reached, release: () => { restore(); resume(); } };
+  const batch = c.db.batch;
+  c.db.batch = async function(statements) {
+    const index = selected ? -1 : statements.findIndex(statement => predicate(statement.sql, statement.args));
+    if (index < 0) return batch.call(this, statements);
+    selected = true;
+    const result = await batch.call(this, statements);
+    announce(result[index].results[0]);
+    await continued;
+    return result;
+  };
+  return { reached, release: () => { restore(); c.db.batch = batch; resume(); } };
 }
 const snapshotWrite = sql => sql.includes("UPDATE estimation_jobs SET snapshot_json=?");
 
@@ -502,5 +512,9 @@ test('two new observations cannot replace an experimental incumbent without five
   c.advance(1);await experience(c,2);await drain(c);const next=await status(c);
   assert.equal(next.activeModel.modelId,first.activeModel.modelId);
   assert.equal(next.lastReason,'INSUFFICIENT_INCUMBENT_CASES');assert.equal(models(c).at(-1).status,'REJECTED');
+  assert.equal(next.lastAttempt.incumbentComparison.commonCaseCount, 2);
+  assert.equal(next.lastAttempt.incumbentComparison.requiredCaseCount, 5);
+  const history = (await mcp(c, 'GetTrainingHistory')).value.result.structuredContent;
+  assert.deepEqual(history.rows.at(-1).diagnostics.incumbentComparison, next.lastAttempt.incumbentComparison);
  }finally{c.close();}
 });

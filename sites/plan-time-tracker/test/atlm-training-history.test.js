@@ -169,3 +169,78 @@ test('consecutive passes without progress record the stalled phase', async () =>
     c.close();
   }
 });
+
+test('an interrupted attempt retains its snapshot and ends at the expired lease', async () => {
+  const c = context();
+  try {
+    for (const duration of [1000, 1500]) {
+      const plan = await plannedAtlm(c, crypto.randomUUID());
+      await completeAtlm(c, plan, duration);
+      c.advance(1);
+    }
+    let first = true;
+    await processEstimationTraining(c.db, OWNER, c.now(), {
+      clock: c.now,
+      wallClock: () => {
+        if (!first) return 9001;
+        first = false;
+        return 0;
+      },
+    });
+    const saved = c.db.sqlite.prepare("SELECT * FROM estimation_jobs WHERE job_key='train'").get();
+    const snapshot = JSON.parse(saved.snapshot_json);
+    let attempt = c.db.sqlite.prepare('SELECT * FROM estimation_training_attempts').get();
+    assert.deepEqual(JSON.parse(attempt.manifest_json), snapshot.manifest);
+    assert.equal(attempt.dataset_revision, snapshot.datasetRevision);
+
+    const claimed = await claimAtlmJob(c.db, OWNER, 'train', c.now());
+    assert.equal(claimed.attempts, 1, 'a queued continuation keeps the same attempt');
+    c.advance(12 * 60 * 60 * 1000);
+    const recoveredAt = c.now();
+    await processEstimationTraining(c.db, OWNER, c.now(), { clock: c.now, wallClock: () => 0 });
+    const history = (await mcp(c, 'GetTrainingHistory')).value.result.structuredContent;
+    attempt = history.rows.find(row => row.attemptId === 'g1-a1');
+    assert.equal(attempt.reason, 'LEASE_EXPIRED');
+    assert.equal(attempt.completedAt, claimed.lease_until);
+    assert.deepEqual(attempt.manifest, snapshot.manifest);
+    assert.equal(attempt.diagnostics.parameters.sampleCount, 2);
+    assert.equal(attempt.diagnostics.parameters.phase, 'EVALUATE');
+    assert.equal(attempt.diagnostics.parameters.completedCases, 0);
+    assert.equal(attempt.diagnostics.parameters.recoveredAt, recoveredAt);
+    assert.ok(history.rows.some(row => row.attemptId === 'g1-a2' && row.completedAt !== null));
+  } finally {
+    c.close();
+  }
+});
+
+test('a failed checkpoint preserves the attempted dataset and phase', async () => {
+  const c = context();
+  try {
+    for (const duration of [1000, 1500]) {
+      const plan = await plannedAtlm(c, crypto.randomUUID());
+      await completeAtlm(c, plan, duration);
+      c.advance(1);
+    }
+    c.db.sqlite.exec(`CREATE TRIGGER fail_checkpoint BEFORE INSERT ON estimation_checkpoint_parts
+      BEGIN SELECT RAISE(ABORT, 'private fixture failure'); END`);
+    await assert.rejects(processEstimationTraining(c.db, OWNER, c.now(), {
+      clock: c.now, wallClock: () => 0,
+    }), { code: 'SOURCE_UNAVAILABLE' });
+    const history = (await mcp(c, 'GetTrainingHistory')).value.result.structuredContent;
+    const attempt = history.rows[0];
+    assert.equal(attempt.reason, 'TRAINING_EXECUTION_FAILED');
+    assert.equal(attempt.manifest.length, 2);
+    assert.equal(attempt.diagnostics.parameters.sampleCount, 2);
+    assert.equal(attempt.diagnostics.parameters.phase, 'EVALUATE');
+    assert.equal(attempt.diagnostics.parameters.passElapsedMs, 0);
+    assert.equal(JSON.stringify(history).includes('private fixture failure'), false);
+    c.db.sqlite.exec('DROP TRIGGER fail_checkpoint');
+    c.advance(60001);
+    const resumed = await processEstimationTraining(c.db, OWNER, c.now(), {
+      clock: c.now, wallClock: () => 0,
+    });
+    assert.equal(resumed.activeModel.sampleCount, 2);
+  } finally {
+    c.close();
+  }
+});
