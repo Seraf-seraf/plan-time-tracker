@@ -221,7 +221,7 @@ test("new endpoints enforce owner auth and digest conflicts; source failures sta
     const stale = { ...args, expectedRequirementsDigest: "sha256:" + "0".repeat(64) };
     assert.equal((await mcp(c, "EstimatePlanTime", stale)).value.result.structuredContent.code, "ASSESSMENT_CONTEXT_CHANGED");
     const payload = await atlmAssessment(c, PLAN, atlmTask(), { predictionRequest: request });
-    prepare = c.db.prepare; c.db.prepare = function(sql) { if (sql.includes("SELECT m.* FROM estimation_models")) throw new Error("injected DB failure with private detail"); return prepare.call(this, sql); };
+    prepare = c.db.prepare; c.db.prepare = function(sql) { if (sql.includes("SELECT m.* FROM estimation_serving_models")) throw new Error("injected DB failure with private detail"); return prepare.call(this, sql); };
     const failure = await mcp(c, "EstimatePlanTime", args); assert.equal(failure.value.result.isError, true);
     assert.equal(failure.value.result.structuredContent.code, "INTERNAL_ERROR"); assert.equal(failure.value.result.structuredContent.retryable, true);
     assert.ok(failure.value.result.structuredContent.requestId); assert.equal(JSON.stringify(failure.value).includes("private detail"), false);

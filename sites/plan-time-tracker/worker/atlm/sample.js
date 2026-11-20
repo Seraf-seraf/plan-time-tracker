@@ -374,17 +374,20 @@ const ATLM_TOOL_SCHEMAS = Object.freeze({
   },
 });
 
-const ATLM_CURRENT_MODEL_SQL = `SELECT 1 FROM estimation_models m JOIN estimation_owner_state o
-  ON o.owner_id=m.owner_id AND o.active_model_id=m.model_id
-  WHERE m.owner_id=? AND m.model_id=? AND m.status='ACTIVE' AND m.method_version IN ('${ATLM_OLS_METHOD.version}','${ATLM_METHOD.version}') AND m.feature_version='${ATLM_FEATURE_VERSION}'
-    AND NOT EXISTS(SELECT 1 FROM json_each(m.manifest_json) item
+const ATLM_ACTIVE_MODEL_FROM = `FROM estimation_serving_models m JOIN estimation_owner_state o
+  ON o.owner_id=m.owner_id AND o.active_model_id=m.pointer_id AND m.preferred=1
+  WHERE m.owner_id=? AND m.status='ACTIVE' AND m.method_version IN ('${ATLM_OLS_METHOD.version}','${ATLM_METHOD.version}') AND m.feature_version='${ATLM_FEATURE_VERSION}'
+    AND (m.model_revision IS NOT NULL OR NOT EXISTS(SELECT 1 FROM json_each(m.manifest_json) item
       LEFT JOIN estimation_samples s ON s.owner_id=m.owner_id AND s.sequence=CAST(item.value AS INTEGER)
       WHERE s.sequence IS NULL OR s.eligibility<>'ELIGIBLE'
         OR s.sequence<>(SELECT MAX(latest.sequence) FROM estimation_samples latest WHERE latest.owner_id=s.owner_id AND latest.plan_id=s.plan_id)
         OR EXISTS(SELECT 1 FROM estimation_jobs dirty WHERE dirty.owner_id=s.owner_id AND dirty.plan_id=s.plan_id
-          AND dirty.kind='REFRESH_SAMPLE' AND dirty.generation>dirty.processed_generation))`;
+          AND dirty.kind='REFRESH_SAMPLE' AND dirty.generation>dirty.processed_generation)))`;
+
+const ATLM_CURRENT_MODEL_SQL = `SELECT 1 ${ATLM_ACTIVE_MODEL_FROM} AND m.model_id=?`;
 
 export {
+  ATLM_ACTIVE_MODEL_FROM,
   ATLM_CURRENT_MODEL_SQL,
   ATLM_TOOL_SCHEMAS,
   atlmSampleView,

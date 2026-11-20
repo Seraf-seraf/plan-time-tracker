@@ -182,6 +182,7 @@ async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
     pointMs: prediction.pointMs ?? null,
     modelId: prediction.modelId ?? null,
     modelVersion: prediction.modelVersion ?? null,
+    ...(prediction.modelRevision ? { modelRevision: prediction.modelRevision } : {}),
     requirementsDigest: target.requirementsDigest,
     featureDigest: 'sha256:' + (await hashCommandInput(normalized.features)),
     calculatedAt: nowMs,
@@ -212,7 +213,7 @@ const CURRENT_FORECAST_INPUT_SQL = `SELECT input.*,
   sequence,dataset_revision,active_model_id,model_status,last_training_diagnostics_json,training_generation,jobs_json) AS snapshot_key
   FROM (SELECT p.status,p.first_started_at,p.deleted_at,t.requirements_json,
     a.sequence,a.assessment_id,a.revision,a.requirements_digest,a.assessment_json,
-    COALESCE(o.dataset_revision,0) AS dataset_revision,o.active_model_id,m.status AS model_status,
+    COALESCE(o.dataset_revision,0) AS dataset_revision,COALESCE(m.model_id,o.active_model_id) AS active_model_id,m.status AS model_status,
     o.last_training_diagnostics_json,COALESCE(o.training_generation,0) AS training_generation,
     (SELECT json_group_array(json_array(j.job_key,j.generation,j.processed_generation,j.status))
       FROM estimation_jobs j WHERE j.owner_id=p.owner_id AND (j.kind<>'REFRESH_SAMPLE'
@@ -224,7 +225,7 @@ const CURRENT_FORECAST_INPUT_SQL = `SELECT input.*,
     LEFT JOIN assessment_revisions a ON a.sequence=(SELECT MAX(r.sequence) FROM assessment_revisions r
       WHERE r.owner_id=p.owner_id AND r.plan_id=p.plan_id AND r.step_id IS NULL)
     LEFT JOIN estimation_owner_state o ON o.owner_id=p.owner_id
-    LEFT JOIN estimation_models m ON m.owner_id=o.owner_id AND m.model_id=o.active_model_id
+    LEFT JOIN estimation_serving_models m ON m.owner_id=o.owner_id AND m.pointer_id=o.active_model_id AND m.preferred=1
     WHERE p.owner_id=? AND p.plan_id=?) input`;
 
 async function currentForecastInput(db, ownerId, planId) {
@@ -399,12 +400,12 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
       const model = await dbFirst(
         db,
         `SELECT m.status,
-        EXISTS(SELECT 1 FROM json_each(m.manifest_json) item LEFT JOIN estimation_samples s
+        m.model_revision IS NULL AND EXISTS(SELECT 1 FROM json_each(m.manifest_json) item LEFT JOIN estimation_samples s
           ON s.owner_id=m.owner_id AND s.sequence=CAST(item.value AS INTEGER)
           LEFT JOIN estimation_jobs j ON j.owner_id=s.owner_id AND j.job_key='refresh:'||s.plan_id
           WHERE s.sequence IS NULL OR j.generation<>s.source_generation
             OR s.sequence<>(SELECT MAX(latest.sequence) FROM estimation_samples latest WHERE latest.owner_id=s.owner_id AND latest.plan_id=s.plan_id)) AS source_changed
-        FROM estimation_models m WHERE m.owner_id=? AND m.model_id=?`,
+        FROM estimation_serving_models m WHERE m.owner_id=? AND m.model_id=?`,
         ownerId,
         serverEstimation.modelId,
       );

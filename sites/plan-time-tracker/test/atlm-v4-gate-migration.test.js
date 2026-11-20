@@ -31,6 +31,7 @@ test('0027 retains owner data, v3 provenance and receipts, resets training and p
     for(const table of ['plan_estimation_inputs','estimation_samples','estimation_models','estimation_jobs','estimation_training_attempts'])
       assert.equal(db.prepare('SELECT count(*) AS n FROM '+table).get().n,0);
     assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(),[]);
+    db.exec(migration('0030_retrospective_model_releases.sql'));
     assert.equal((await call(c,'/api/commands',old)).value.replayed,true);
     assert.equal((await mcp(c,'GetSavedEstimate',{planId:PLAN})).value.result.structuredContent.assessmentReadiness.status,'OUTDATED');
     assert.equal((await command(c,'StartPlan',{planId:PLAN},0)).value.error.code,'ASSESSMENT_SCHEMA_OUTDATED');

@@ -27,7 +27,7 @@ import {
   selectHybridEngine,
   summarizeHybridAtlmEvaluation,
 } from './model.js';
-import { atlmSampleView, claimAtlmJob, persistAtlmSample, readAtlmSampleSource } from './sample.js';
+import { ATLM_ACTIVE_MODEL_FROM, atlmSampleView, claimAtlmJob, persistAtlmSample, readAtlmSampleSource } from './sample.js';
 
 const ATLM_RETRAIN_EVERY_NEW_PLANS = 2;
 
@@ -265,6 +265,7 @@ function atlmPublicModel(row) {
     ? {
         modelId: row.model_id,
         modelVersion: row.model_version,
+        ...(row.model_revision ? { modelRevision: row.model_revision } : {}),
         trainedAt: row.activated_at ?? row.created_at,
         method: artifact?.method ?? null,
         ...(artifact?.kind === 'HYBRID'
@@ -287,19 +288,7 @@ function atlmPublicModel(row) {
 }
 
 async function atlmReadActiveModel(db, ownerId) {
-  return dbFirst(
-    db,
-    `SELECT m.* FROM estimation_models m JOIN estimation_owner_state o
-    ON o.owner_id=m.owner_id AND o.active_model_id=m.model_id
-    WHERE m.owner_id=? AND m.status='ACTIVE' AND m.method_version IN ('${ATLM_OLS_METHOD.version}','${ATLM_METHOD.version}') AND m.feature_version='${ATLM_FEATURE_VERSION}'
-    AND NOT EXISTS(SELECT 1 FROM json_each(m.manifest_json) item
-      LEFT JOIN estimation_samples s ON s.owner_id=m.owner_id AND s.sequence=CAST(item.value AS INTEGER)
-      WHERE s.sequence IS NULL OR s.eligibility<>'ELIGIBLE'
-        OR s.sequence<>(SELECT MAX(latest.sequence) FROM estimation_samples latest WHERE latest.owner_id=s.owner_id AND latest.plan_id=s.plan_id)
-        OR EXISTS(SELECT 1 FROM estimation_jobs dirty WHERE dirty.owner_id=s.owner_id AND dirty.plan_id=s.plan_id
-          AND dirty.kind='REFRESH_SAMPLE' AND dirty.generation>dirty.processed_generation))`,
-    ownerId,
-  );
+  return dbFirst(db, `SELECT m.* ${ATLM_ACTIVE_MODEL_FROM}`, ownerId);
 }
 
 async function predictWithActiveModel(db, ownerId, features, nowMs) {
@@ -341,6 +330,7 @@ async function predictWithActiveModel(db, ownerId, features, nowMs) {
   const metadata = {
     modelId: model.model_id,
     modelVersion: model.model_version,
+    ...(model.model_revision ? { modelRevision: model.model_revision } : {}),
     sampleCount: model.sample_count,
     evaluation: atlmPublicEvaluation(atlmTrainingJson(model.metrics_json)),
     accuracy:
@@ -701,7 +691,7 @@ async function atlmSnapshot(db, ownerId, job, clock) {
       .bind(ownerId, ATLM_TRAINING_LIMIT + 1),
     db
       .prepare(
-        'SELECT * FROM estimation_models WHERE owner_id=? AND model_id=(SELECT active_model_id FROM estimation_owner_state WHERE owner_id=?)',
+        'SELECT * FROM estimation_serving_models WHERE owner_id=? AND preferred=1 AND pointer_id=(SELECT active_model_id FROM estimation_owner_state WHERE owner_id=?)',
       )
       .bind(ownerId, ownerId),
     db
@@ -1468,9 +1458,9 @@ async function processEstimationTraining(db, ownerId, nowMs, options = {}) {
       const incumbent = snapshot.incumbentId
         ? await dbFirst(
             db,
-            `SELECT m.*,(SELECT MAX(s.source_available_at) FROM estimation_samples s
-        WHERE s.owner_id=m.owner_id AND s.sequence IN (SELECT value FROM json_each(m.manifest_json))) AS latest_source_available_at
-        FROM estimation_models m WHERE m.owner_id=? AND m.model_id=?`,
+            `SELECT m.*,CASE WHEN m.model_revision IS NOT NULL THEN m.activated_at ELSE (SELECT MAX(s.source_available_at) FROM estimation_samples s
+        WHERE s.owner_id=m.owner_id AND s.sequence IN (SELECT value FROM json_each(m.manifest_json))) END AS latest_source_available_at
+        FROM estimation_serving_models m WHERE m.owner_id=? AND m.model_id=?`,
             ownerId,
             snapshot.incumbentId,
           )

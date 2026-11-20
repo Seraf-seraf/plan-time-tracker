@@ -362,6 +362,10 @@ test("large plans with more than 100 stages survive HTTP and MCP creation, readi
 test("document migration preserves existing source, statuses, requirements and receipts", async () => {
   const c = context(migrations.indexOf("0025_unlimited_plan_documents.sql"));
   try {
+    // Seed documents through the current Worker while the document triggers are still at 0024.
+    for (const name of ["0026_atlm_v4_reset.sql", "0027_agent_task_v4_gate.sql", "0030_retrospective_model_releases.sql"]) {
+      c.db.sqlite.exec(migration(name));
+    }
     await create(c);
     await assessForStart(c,PLAN);await ok(c,"StartPlan",{planId:PLAN},0);
     const step = (await progress(c)).steps[0];

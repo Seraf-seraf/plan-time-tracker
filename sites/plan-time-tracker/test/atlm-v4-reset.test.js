@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { payloadHash, claimAtlmJob } from '../worker/index.js';
-import { assessForStart, context, migrations, ok, call, mcp, envelope, command, taskV4, atlmAssessment, PLAN, OWNER } from './fixtures/tracker-db.mjs';
+import { assessForStart, context, migrations, migration, ok, call, mcp, envelope, command, taskV4, atlmAssessment, PLAN, OWNER } from './fixtures/tracker-db.mjs';
 
 const resetUrl = new URL('../drizzle/0026_atlm_v4_reset.sql', import.meta.url);
 const snapshot = (db, table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().map(row => ({ ...row }));
@@ -93,6 +93,7 @@ test('v4 reset removes old estimation data while retaining plans, time and recei
     assert.equal((await call(c, '/api/commands', altered)).value.error.code, 'IDEMPOTENCY_KEY_REUSED');
     assert.equal(snapshot(db, 'assessment_revisions').length, 0);
     db.prepare('UPDATE estimation_owner_state SET data_reset_at=? WHERE owner_id=?').run(c.now() + 1, OWNER);
+    db.exec(migration('0030_retrospective_model_releases.sql'));
     const estimate = (await mcp(c, 'GetSavedEstimate', { planId: PLAN })).value.result.structuredContent;
     assert.equal(estimate.source, 'HISTORY_RESET');
     assert.equal(estimate.serverEstimation, null);
