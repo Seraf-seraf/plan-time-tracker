@@ -1,5 +1,20 @@
-import { ATLM_FEATURE_VERSION, isNonnegativeSafeInteger, normalizeAgentTask } from './model.js';
-import { ESTIMATE_ID, appError, canonical, isPlainRecord } from '../shared/index.js';
+import {
+  ATLM_FEATURE_VERSION,
+  atlmUnavailableInterval,
+  isNonnegativeSafeInteger,
+  normalizeAgentTask,
+  predictAtlm,
+  summarizeAtlmV4Metrics,
+} from './model.js';
+import {
+  ESTIMATE_ID,
+  appError,
+  canonical,
+  hashCommandInput,
+  isPlainRecord,
+  isSnapshotDigest,
+  median,
+} from '../shared/index.js';
 
 const ATLM_DATASET_VERSION = 1;
 const TEACHER_ANNOTATIONS_CONTRACT = 'atlm-teacher-annotations';
@@ -13,9 +28,28 @@ const EXPORT_FIELDS = ['schemaVersion', 'contract', 'datasetRevisionId', 'snapsh
   'parentDatasetRevisionId', 'featureSchemaVersion', 'rows', 'origin', 'provenance'];
 const EXPORTED_ROW_FIELDS = ['rowId', 'planId', 'groupId', 'eligibility', 'reasons',
   'annotation', 'source', 'features', 'record', 'annotationOrigin', 'annotationRecordedAt'];
+const ATLM_TEACHER_TRAINER_VERSION = 1;
+const ATLM_TEACHER_RECIPE_ID = 'atlm-teacher-hybrid-v1';
+const ATLM_TEACHER_CODE_PATHS = Object.freeze([
+  'scripts/train-atlm.mjs',
+  'worker/atlm/model.js',
+  'worker/atlm/teacher-dataset.js',
+  'worker/shared/index.js',
+]);
+const ATLM_TEACHER_MODES = Object.freeze([
+  'ROLLING_GROUPED_ACTUAL',
+  'INTERNAL_HOLDOUT_ACTUAL',
+  'INTERNAL_HOLDOUT_PLANNED',
+  'ISSUED_FORECASTS',
+]);
+const HOLDOUT_FRACTION = 0.2;
+const MIN_HOLDOUT_ROWS = 5;
+const MIN_HOLDOUT_GROUPS = 2;
+const MIN_DEVELOPMENT_ROWS = 2;
+const MIN_DEVELOPMENT_GROUPS = 2;
 
 function datasetError(description, rowId) {
-  return appError('INVALID_TEACHER_DATASET', description, 400, rowId ? { rowId } : undefined);
+  return appError('INVALID_TEACHER_DATASET', description, 400, validId(rowId) ? { rowId } : undefined);
 }
 
 function exactFields(value, fields, description, rowId) {
@@ -25,7 +59,7 @@ function exactFields(value, fields, description, rowId) {
 }
 
 function validId(value) {
-  return typeof value === 'string' && ESTIMATE_ID.test(value);
+  return typeof value === 'string' && ESTIMATE_ID.test(value) && Boolean(value.trim());
 }
 
 function reasonList(reasons, rowId) {
@@ -123,7 +157,14 @@ function buildAtlmTeacherTrainingRows(rows, selectedRowIds) {
     seenRows.add(rowId);
     seenPlans.add(planId);
     const reasons = reasonList(row.reasons, rowId);
-    if (eligibility === 'EXCLUDED' && reasons.length && features === null) continue;
+    if (canonical(reasons) !== canonical(row.reasons) || !isPlainRecord(source)
+      || source.planId !== planId || (groupId !== null && !validId(groupId))) {
+      throw datasetError('Invalid frozen row source, group or reasons.', rowId);
+    }
+    if (eligibility === 'EXCLUDED' && reasons.length && features === null) {
+      if (row.annotation !== null) normalizedAnnotation(row.annotation, rowId);
+      continue;
+    }
     if (eligibility !== 'ELIGIBLE' || reasons.length || !validId(groupId) || !fitSourceValid(source, planId)) {
       throw datasetError('Invalid eligible source or decision.', rowId);
     }
@@ -155,7 +196,343 @@ function readAtlmTeacherDataset(value) {
   return { dataset: value, trainingRows: buildAtlmTeacherTrainingRows(value.rows) };
 }
 
+function exactRecipeFields(value, fields) {
+  return isPlainRecord(value) && Object.keys(value).length === fields.length
+    && fields.every((key) => Object.hasOwn(value, key));
+}
+
+function recipeError(code, message, details) {
+  return appError(code, message, 400, details);
+}
+
+function parseAtlmTeacherRecipe(recipe, datasetRevisionId, datasetDigest) {
+  if (!exactRecipeFields(recipe, [
+    'schemaVersion', 'recipeId', 'datasetRevisionId', 'datasetDigest', 'selection',
+    'holdoutUse', 'holdoutUseNote',
+  ]) || recipe.schemaVersion !== ATLM_DATASET_VERSION || recipe.recipeId !== ATLM_TEACHER_RECIPE_ID
+    || !validId(recipe.datasetRevisionId) || !isSnapshotDigest(recipe.datasetDigest)
+    || !['UNKNOWN', 'FIRST_REPORTED', 'REUSED_AFTER_REVIEW'].includes(recipe.holdoutUse)
+    || typeof recipe.holdoutUseNote !== 'string' || !recipe.holdoutUseNote.trim()) {
+    throw recipeError('INVALID_RECIPE', 'Invalid recipe version, fields, or holdout declaration.');
+  }
+  if (recipe.datasetRevisionId !== datasetRevisionId) {
+    throw recipeError('DATASET_REVISION_MISMATCH', 'Recipe dataset identity differs from the export.');
+  }
+  if (recipe.datasetDigest !== datasetDigest) {
+    throw recipeError('DATASET_DIGEST_MISMATCH', 'Recipe digest differs from the dataset bytes.');
+  }
+  const selection = recipe.selection;
+  if (selection?.mode === 'ALL_ELIGIBLE' && exactRecipeFields(selection, ['mode'])) return recipe;
+  if (selection?.mode !== 'EXPLICIT' || !exactRecipeFields(selection, ['mode', 'rowIds'])
+    || !Array.isArray(selection.rowIds)) {
+    throw recipeError('INVALID_RECIPE', 'Invalid selection mode or fields.');
+  }
+  const seen = new Set();
+  for (const rowId of selection.rowIds) {
+    if (!validId(rowId)) throw recipeError('INVALID_SELECTED_ROW_ID', 'Invalid selected row identity.');
+    if (seen.has(rowId)) {
+      throw recipeError('DUPLICATE_SELECTED_ROW', 'A selected row is repeated.', { rowId });
+    }
+    seen.add(rowId);
+  }
+  return recipe;
+}
+
+function compareId(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function selectedTeacherGroups(dataset, trainingRows, selection) {
+  const eligible = new Set(trainingRows.map((row) => row.sampleId));
+  const selected = selection.mode === 'EXPLICIT' ? new Set(selection.rowIds) : eligible;
+  const allRows = new Map(dataset.rows.map((row) => [row.rowId, row]));
+  for (const rowId of selected) {
+    if (!eligible.has(rowId)) {
+      const code = allRows.has(rowId) ? 'SELECTED_ROW_INELIGIBLE' : 'SELECTED_ROW_UNKNOWN';
+      throw recipeError(code, 'A selected row must belong to the eligible roster.', { rowId });
+    }
+  }
+  const groups = new Map();
+  for (const row of dataset.rows) {
+    if (!eligible.has(row.rowId)) continue;
+    let group = groups.get(row.groupId);
+    if (!group) {
+      group = { groupId: row.groupId, rowIds: [], role: 'FIT',
+        startedAt: row.source.firstStartedAt, readyAt: 0 };
+      groups.set(row.groupId, group);
+    }
+    group.rowIds.push(row.rowId);
+    group.startedAt = Math.min(group.startedAt, row.source.firstStartedAt);
+    group.readyAt = Math.max(group.readyAt, row.source.sourceAvailableAt, row.source.finishedAt);
+  }
+  const chosenGroups = [];
+  for (const group of groups.values()) {
+    if (!group.rowIds.some((rowId) => selected.has(rowId))) continue;
+    const missing = group.rowIds.find((rowId) => !selected.has(rowId));
+    if (missing !== undefined) {
+      throw recipeError('PARTIAL_SELECTED_GROUP', 'Select every eligible row in the group.', {
+        groupId: group.groupId, rowId: missing,
+      });
+    }
+    chosenGroups.push(group);
+  }
+  chosenGroups.sort((a, b) => a.startedAt - b.startedAt || compareId(a.groupId, b.groupId));
+  return { groups: chosenGroups, selected };
+}
+
+function holdoutBoundary(groups, selectedCount) {
+  const minRows = Math.max(MIN_HOLDOUT_ROWS, Math.ceil(HOLDOUT_FRACTION * selectedCount));
+  let index = groups.length, rows = 0;
+  while (index > 0 && (rows < minRows || groups.length - index < MIN_HOLDOUT_GROUPS)) {
+    rows += groups[--index].rowIds.length;
+  }
+  if (rows < minRows || groups.length - index < MIN_HOLDOUT_GROUPS) {
+    return { cutoff: null, reason: 'TOO_FEW_HOLDOUT_GROUPS_OR_ROWS' };
+  }
+  const cutoff = groups[index].startedAt;
+  const development = groups.slice(0, index).filter((group) => group.readyAt < cutoff);
+  const developmentRows = development.reduce((count, group) => count + group.rowIds.length, 0);
+  if (development.length < MIN_DEVELOPMENT_GROUPS || developmentRows < MIN_DEVELOPMENT_ROWS) {
+    return { cutoff: null, reason: 'TOO_FEW_DEVELOPMENT_GROUPS_OR_ROWS' };
+  }
+  for (const [position, group] of groups.entries()) {
+    if (position >= index) group.role = 'HOLDOUT';
+    else if (group.readyAt >= cutoff) group.role = 'PURGED';
+  }
+  return { cutoff, reason: null };
+}
+
+function buildAtlmTeacherSplit(dataset, trainingRows, recipe) {
+  const { groups, selected } = selectedTeacherGroups(dataset, trainingRows, recipe.selection);
+  const boundary = holdoutBoundary(groups, selected.size);
+  const groupById = new Map(groups.map((group) => [group.groupId, group]));
+  const selectedRowIds = [], fitRowIds = [], holdoutRowIds = [], purgedRowIds = [];
+  let trainCutoff = null;
+  const rowDecisions = dataset.rows.map(({ rowId, planId, groupId, eligibility, reasons }) => {
+    let role = 'EXCLUDED';
+    if (eligibility === 'ELIGIBLE') {
+      if (selected.has(rowId)) {
+        role = groupById.get(groupId).role;
+        selectedRowIds.push(rowId);
+        if (role === 'FIT') fitRowIds.push(rowId);
+        if (role === 'HOLDOUT') holdoutRowIds.push(rowId);
+        if (role === 'PURGED') purgedRowIds.push(rowId);
+      } else {
+        role = 'OUTSIDE_SELECTED_SUBSET';
+        reasons = [role];
+      }
+    }
+    return { rowId, planId, groupId, eligibility, role, reasons };
+  });
+  const fitIds = new Set(fitRowIds);
+  for (const row of trainingRows) {
+    if (fitIds.has(row.sampleId)) trainCutoff = Math.max(trainCutoff ?? 0, row.sourceAvailableAt);
+  }
+  const split = {
+    holdoutUse: recipe.holdoutUse,
+    holdoutUseNote: recipe.holdoutUseNote,
+    holdoutStatus: boundary.reason ? 'UNAVAILABLE' : 'AVAILABLE',
+    holdoutReason: boundary.reason,
+    holdoutCutoff: boundary.cutoff,
+    groups,
+  };
+  return { split, rowDecisions, selectedRowIds, fitRowIds, holdoutRowIds, purgedRowIds, trainCutoff };
+}
+
+async function atlmTeacherFitReference(trainingRows) {
+  // Match atlmSortedRows in the serving solver for both the digest and manifest.
+  const rows = trainingRows.slice().sort(
+    (a, b) => compareId(a.planId, b.planId) || compareId(a.sampleId, b.sampleId),
+  );
+  const medianMs = median(rows.map((row) => row.actualMs));
+  return {
+    trainRowCount: rows.length,
+    trainDigest: 'sha256:' + (await hashCommandInput(rows)),
+    medianPointMs: medianMs === null ? null : Math.round(medianMs),
+    manifest: rows.map(({ sampleId, planId }) => ({ sampleId, planId })),
+    trainCutoff: rows.reduce((cutoff, row) => Math.max(cutoff ?? 0, row.sourceAvailableAt), null),
+  };
+}
+
+function atlmTeacherRollingHistory(protocol, trainingRows) {
+  const groups = protocol.split.groups.filter((group) => group.role === 'FIT');
+  const groupByRow = new Map();
+  for (const group of groups) for (const rowId of group.rowIds) groupByRow.set(rowId, group);
+  const chronological = trainingRows.slice().sort(
+    (a, b) => compareId(a.planId, b.planId) || compareId(a.sampleId, b.sampleId),
+  );
+  return (target) => {
+    const targetGroup = groupByRow.get(target.sampleId);
+    if (!targetGroup) return [];
+    return chronological.filter((row) => {
+      const group = groupByRow.get(row.sampleId);
+      return group && group !== targetGroup && group.readyAt < targetGroup.startedAt;
+    });
+  };
+}
+
+function atlmTeacherCase(row, {
+  featureBasis,
+  prediction,
+  trainRowCount = null,
+  trainDigest = null,
+  medianPointMs = null,
+  scoringExclusionReason = null,
+  fallbackReason = prediction?.hybrid?.fallbackReason
+    ?? prediction?.fallback?.atlmUnavailableReason ?? null,
+}) {
+  const actualMs = row.source?.actualMs ?? null;
+  const pointMs = prediction?.status === 'AVAILABLE' && isNonnegativeSafeInteger(prediction.pointMs)
+    ? prediction.pointMs : null;
+  const pointUnavailableReason = pointMs === null
+    ? prediction?.unavailableReason ?? prediction?.reason ?? 'FORECAST_UNAVAILABLE' : null;
+  const recordedInterval = prediction?.interval;
+  let interval = atlmUnavailableInterval(
+    'BAYESIAN_PREDICTIVE', pointUnavailableReason ?? 'INTERVAL_NOT_RECORDED',
+  );
+  if (recordedInterval?.status === 'AVAILABLE' && pointMs !== null
+    && isNonnegativeSafeInteger(recordedInterval.lowerMs)
+    && isNonnegativeSafeInteger(recordedInterval.upperMs)
+    && recordedInterval.lowerMs <= pointMs && pointMs <= recordedInterval.upperMs) {
+    interval = {
+      status: 'AVAILABLE', lowerMs: recordedInterval.lowerMs, upperMs: recordedInterval.upperMs,
+      nominalCoverage: recordedInterval.nominalCoverage ?? interval.nominalCoverage,
+      engine: recordedInterval.engine ?? interval.engine,
+      calibrationSampleCount: recordedInterval.calibrationSampleCount ?? 0,
+      validationStatus: recordedInterval.validationStatus ?? interval.validationStatus,
+      unavailableReason: null,
+    };
+  } else if (recordedInterval?.status === 'UNAVAILABLE'
+    && typeof recordedInterval.unavailableReason === 'string' && recordedInterval.unavailableReason.trim()) {
+    interval = {
+      ...atlmUnavailableInterval(
+        recordedInterval.engine ?? interval.engine, recordedInterval.unavailableReason,
+        recordedInterval.calibrationSampleCount ?? 0,
+      ),
+      nominalCoverage: recordedInterval.nominalCoverage ?? interval.nominalCoverage,
+      validationStatus: recordedInterval.validationStatus ?? interval.validationStatus,
+    };
+  } else if (recordedInterval) {
+    interval.unavailableReason = 'INVALID_ISSUED_INTERVAL';
+  }
+  const scorable = scoringExclusionReason === null && actualMs !== null && pointMs !== null;
+  return {
+    rowId: row.rowId,
+    planId: row.planId,
+    groupId: row.groupId,
+    actualMs,
+    featureBasis,
+    trainRowCount,
+    trainDigest,
+    pointMs,
+    pointEngine: pointMs === null ? null : prediction.pointEngine ?? null,
+    pointStatus: pointMs === null ? 'UNAVAILABLE' : 'AVAILABLE',
+    pointUnavailableReason,
+    fallbackReason,
+    signedErrorMs: scorable ? pointMs - actualMs : null,
+    interval,
+    intervalCovered: scorable && interval.status === 'AVAILABLE'
+      ? interval.lowerMs <= actualMs && actualMs <= interval.upperMs : null,
+    medianPointMs,
+    scoringExclusionReason,
+  };
+}
+
+function scopeExclusion(source) {
+  if (source?.scopeChanged === false) return null;
+  return source?.scopeChanged === true ? 'SCOPE_CHANGED' : 'SCOPE_CHANGE_UNKNOWN';
+}
+
+function atlmTeacherHoldoutCase(row, basis, artifact, fitReference, reason = null) {
+  const planned = basis === 'PLANNED';
+  const source = row.source;
+  const scoringExclusionReason = planned
+    ? scopeExclusion(source) ?? (source.plannedFeatures == null ? 'PLANNED_FEATURES_UNAVAILABLE' : null)
+    : null;
+  const unavailable = scoringExclusionReason ?? reason ?? 'ARTIFACT_UNAVAILABLE';
+  const prediction = artifact && scoringExclusionReason === null
+    ? predictAtlm(artifact, planned ? source.plannedFeatures : row.features)
+    : { status: 'UNAVAILABLE', reason: unavailable };
+  return atlmTeacherCase(row, {
+    featureBasis: basis,
+    prediction,
+    trainRowCount: fitReference.trainRowCount,
+    trainDigest: fitReference.trainDigest,
+    medianPointMs: scoringExclusionReason === null ? fitReference.medianPointMs : null,
+    scoringExclusionReason,
+  });
+}
+
+function atlmTeacherIssuedCase(row) {
+  const source = row.source;
+  const issued = source?.issuedPrediction;
+  const issuedAt = isNonnegativeSafeInteger(issued?.calculatedAt) ? issued.calculatedAt : null;
+  const pointRecorded = issued?.status === 'AVAILABLE' && isNonnegativeSafeInteger(issued.pointMs);
+  const scoringExclusionReason = scopeExclusion(source)
+    ?? (!fitSourceValid(source, row.planId) ? 'ACTUAL_MEASUREMENT_UNVERIFIED' : null)
+    ?? (pointRecorded && (issuedAt === null || issuedAt > source.firstStartedAt)
+      ? 'ISSUED_TIME_UNVERIFIED' : null);
+  const prediction = issued ? {
+    ...issued,
+    pointEngine: issued.pointEngine ?? (issued.method?.id === 'historical-median' ? 'MEDIAN' : null),
+    reason: issued.reason ?? (issued.status === 'AVAILABLE' && !pointRecorded
+      ? 'INVALID_ISSUED_POINT' : null),
+  } : { status: 'UNAVAILABLE', reason: 'ISSUED_FORECAST_NOT_RECORDED' };
+  return {
+    ...atlmTeacherCase(row, { featureBasis: 'ISSUED', prediction, scoringExclusionReason }),
+    issuedModelId: issued?.modelId ?? null,
+    issuedModelRevision: issued?.modelRevisionId ?? issued?.modelRevision ?? null,
+    issuedAt,
+  };
+}
+
+function atlmTeacherMedianMetrics(cases) {
+  return summarizeAtlmV4Metrics(cases.map(({ planId, actualMs, medianPointMs }) => ({
+    planId, actualMs, pointMs: medianPointMs,
+    interval: atlmUnavailableInterval('BAYESIAN_PREDICTIVE', 'MEDIAN_INTERVAL_UNAVAILABLE'),
+  })));
+}
+
+function summarizeAtlmTeacherMode(cases, { reason = null, includeMedian = true } = {}) {
+  const comparable = cases.filter((item) => item.scoringExclusionReason === null);
+  const paired = includeMedian && !reason
+    ? comparable.filter((item) => item.pointMs !== null && item.medianPointMs !== null) : [];
+  const noMetric = reason !== null || comparable.length === 0;
+  const summary = {
+    rowCount: cases.length,
+    groupCount: new Set(cases.map((item) => item.groupId)).size,
+    excludedFromScoringCount: cases.length - comparable.length,
+    forecastAvailability: {
+      numerator: cases.filter((item) => item.pointMs !== null).length,
+      denominator: cases.length,
+    },
+    intervalAvailability: {
+      numerator: cases.filter((item) => item.interval.status === 'AVAILABLE').length,
+      denominator: cases.length,
+    },
+    metrics: noMetric ? null : summarizeAtlmV4Metrics(comparable),
+  };
+  const unavailableReason = reason ?? (comparable.length === 0 ? 'NO_COMPARABLE_ROWS' : null)
+    ?? (summary.metrics?.pointCaseCount === 0 ? 'NO_AVAILABLE_FORECASTS' : null);
+  return {
+    status: unavailableReason === null ? 'AVAILABLE' : 'UNAVAILABLE',
+    reason: unavailableReason,
+    summary,
+    median: includeMedian && !noMetric ? atlmTeacherMedianMetrics(comparable) : null,
+    paired: paired.length ? {
+      rowIds: paired.map((item) => item.rowId),
+      groupCount: new Set(paired.map((item) => item.groupId)).size,
+      candidate: summarizeAtlmV4Metrics(paired),
+      median: atlmTeacherMedianMetrics(paired),
+    } : null,
+    cases,
+  };
+}
+
 export {
   ATLM_DATASET_VERSION, TEACHER_ANNOTATIONS_CONTRACT, TEACHER_DATASET_CONTRACT,
+  ATLM_TEACHER_TRAINER_VERSION, ATLM_TEACHER_RECIPE_ID, ATLM_TEACHER_CODE_PATHS, ATLM_TEACHER_MODES,
   buildAtlmTeacherTrainingRows, mergeAtlmTeacherAnnotations, readAtlmTeacherDataset,
+  parseAtlmTeacherRecipe, buildAtlmTeacherSplit, atlmTeacherFitReference, atlmTeacherRollingHistory,
+  atlmTeacherCase, atlmTeacherHoldoutCase, atlmTeacherIssuedCase, summarizeAtlmTeacherMode,
 };
