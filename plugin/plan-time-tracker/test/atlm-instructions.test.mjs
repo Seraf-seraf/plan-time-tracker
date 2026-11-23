@@ -104,8 +104,8 @@ test('training skill uses the discovered revision tools and keeps assessment ind
   }
 });
 
-test('the documented transfer code forwards a complete part and rejects truncated helper output', async () => {
-  const example = train.match(/```js\n([\s\S]*?)```/u)?.[1];
+test('the documented transfer code forwards complete parts, rejects truncation and accepts final replays', async () => {
+  const example = train.split('## Передача файлов\n')[1]?.match(/```js\n([\s\S]*?)```/u)?.[1];
   assert(example);
   const init = new Function('tools', 'callTool', 'site', example + '\nreturn { receivePart, sendPart };');
   const partSize = 49_152;
@@ -118,6 +118,7 @@ test('the documented transfer code forwards a complete part and rejects truncate
     file: { sha256: file.sha256, byteLength: file.byteLength } };
   const calls = [];
   let complete = true;
+  let uploadReceipt;
   const tools = { async exec_command(input) {
     calls.push(input);
     const part = input.cmd.includes("'read-part'")
@@ -128,7 +129,8 @@ test('the documented transfer code forwards a complete part and rejects truncate
   const callTool = async (name, args) => {
     calls.push({ name, args });
     return { structuredContent: args.view === 'filePart'
-      ? { fileSha256: file.sha256, partIndex: 0, contentBase64 } : { state: 'UPLOADING', partIndex: args.partIndex } };
+      ? { fileSha256: file.sha256, partIndex: 0, contentBase64 }
+      : uploadReceipt ?? { state: 'UPLOADING', partIndex: args.partIndex } };
   };
   const { receivePart, sendPart } = init(tools, callTool, '/checkout/sites/plan-time-tracker');
   assert.deepEqual(await sendPart('RegisterModelRevision', upload, '/private/bundle.json', file, 0),
@@ -144,6 +146,13 @@ test('the documented transfer code forwards a complete part and rejects truncate
     { partIndex: 0, byteLength: partSize });
   assert.equal(calls[3].args.view, 'filePart');
   assert(calls[4].cmd.startsWith("'node' 'scripts/atlm-transfer.mjs' 'write-part'"));
+
+  complete = true;
+  uploadReceipt = { state: 'REGISTERED', modelRevisionId: upload.commandId, replayed: true };
+  assert.deepEqual(await sendPart('RegisterModelRevision', upload, '/private/bundle.json', file, 0), uploadReceipt);
+  const save = { snapshotId: 'snapshot', commandId: 'save-command', file: upload.file };
+  uploadReceipt = { state: 'SAVED', datasetRevisionId: save.commandId, replayed: true };
+  assert.deepEqual(await sendPart('SaveDatasetRevision', save, '/private/annotations.json', file, 0), uploadReceipt);
 });
 
 for (const withBoundary of [false, true]) {

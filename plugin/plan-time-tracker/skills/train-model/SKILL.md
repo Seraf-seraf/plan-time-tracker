@@ -11,28 +11,63 @@ description: Подготовить преподавательский дата�
 
 | Инструмент | Назначение |
 | --- | --- |
-| `CreateTrainingSnapshot` | Создать неизменяемый снимок или прочитать список, сводку, строки и файл снимка. |
-| `SaveDatasetRevision` | Передать разметку всех строк одного снимка и сохранить новую ревизию. |
-| `GetDatasetRevision` | Найти ревизию и прочитать её сводку, строки или исходные байты экспорта. |
-| `RegisterModelRevision` | Передать артефакт, проверку и происхождение данных для сохранения в реестре. |
-| `ListModelRevisions` | Прочитать указатель, список ревизий, детали, файлы или историю активаций. |
-| `ActivateModelRevision` | Назначить конкретную ревизию по ожидаемому указателю и версии активации. |
+| `CreateTrainingSnapshot` | Зафиксировать неизменяемый снимок в `mode:'create'`. В `mode:'read'` использовать `view:'list'` для списка или передать `snapshotId` для остальных видов. |
+| `SaveDatasetRevision` | Передать разметку всех строк одного снимка через `prepare`, `putPart` и `commit` с одним `commandId`. |
+| `GetDatasetRevision` | Найти ревизию через `view:'list'` с необязательным `snapshotId`. Для сводки, строк и выгрузки передать `datasetRevisionId`. |
+| `RegisterModelRevision` | Сохранить пакет локального обучения с артефактом, отчётом и происхождением данных через `prepare`, `putPart` и `commit` с неизменными `datasetRevisionId`, `file` и `commandId`. |
+| `ListModelRevisions` | Прочитать список и указатель через `view:'list'`, одну ревизию через `view:'detail'`, историю через `view:'activations'`. Выгрузка требует `modelRevisionId`. По умолчанию `fileKind:'BUNDLE'`, для одного артефакта используйте `'ARTIFACT'`. |
+| `ActivateModelRevision` | Назначить ревизию по актуальному указателю и версии активации. Для допуска `REQUIRES_EXPERIMENTAL_ACK` требуется явное согласие пользователя. |
+
+Для снимка и датасета `view:'rows'` возвращает компактный перечень. Полные строки, доказательства снимка и исходные байты экспорта доступны через `view:'download'` и `view:'filePart'`. Для следующей страницы списка или строк передавайте полученный `nextCursor` как `cursor` с теми же фильтрами.
 
 ## Снимок и преподавательская разметка
 
-1. Продолжайте с известного `snapshotId` или вызовите `CreateTrainingSnapshot` с `{schemaVersion:1,mode:'create',commandId}`. Сохраните UUID команды. При `SOURCES_PENDING` дождитесь указанного времени и ограниченно повторите ту же команду. Сводка считает отдельно источники со сбоем. Читайте снимок в `mode:'read'`. Используйте `view:'list'` для поиска или `snapshotId` с `view:'download'` для полного замороженного экспорта. Если нужно уточнить состав, обходите `view:'rows'` по `nextCursor`.
-2. Для каждой строки `atlm-training-snapshot` найдите исходные требования, измерение, фактически выполненный объём и доказательства. Разграничьте исходный прогноз и признаки первого старта от признаков фактической работы. Для пригодной строки укажите `groupId`, `eligibility:'ELIGIBLE'`, `reasons:[]` и `annotation:{scope:'ACTUAL',agentTask,fieldEvidence,codeEvidence}`. Заполняйте `agentTask` по [контракту признаков](../assess-task/references/features.md). Изучите относящийся код, укажите доказательства по полям, для ссылок на трекер используйте IDs из источников снимка. Связанные задачи и повторные итерации одной работы объединяйте в одну группу.
-3. Для `EXCLUDED` сохраните конкретные причины. `groupId` и `annotation` могут быть `null`. Учитывайте все строки снимка, включая неудобные примеры, удаления, незавершённые задачи и сбои источника. Изменившийся объём допускает новую разметку только при проверенном факте и достаточных доказательствах. Недостаточное или неподтверждённое измерение оставляйте исключённым. Измеренный `actualMs` и исходные прогнозы читает сервер из замороженных источников. Передавайте в разметке только `rowId,groupId,eligibility,reasons,annotation`.
-4. Запишите UTF-8 JSON `{schemaVersion:1,contract:'atlm-teacher-annotations',snapshotId,parentDatasetRevisionId,rows}`. Укажите `null`, если родителя нет. При переносе разметки подтвердите тот же план и поколение источника. Для изменившихся фактов заново проверьте доказательства и сформулируйте решение. Передайте файл через `SaveDatasetRevision` с `snapshotId` и, если указан, `parentDatasetRevisionId`. На `SAVED` сохраните `datasetRevisionId` и `datasetDigest`.
-5. Выгрузите `GetDatasetRevision` с `datasetRevisionId` и `view:'download'`. Сверьте `datasetDigest` с SHA-256 готового файла. Тренер читает полные оригинальные байты `atlm-teacher-dataset`, включая исключения и зафиксированные источники. При `HISTORICAL_PROVENANCE_INCOMPLETE` создайте новый снимок и проверьте перенос разметки.
+1. Продолжайте с известного `snapshotId` или вызовите `CreateTrainingSnapshot` с `{schemaVersion:1,mode:'create',commandId}`. Сохраните UUID команды. При `SOURCES_PENDING` ограниченно повторяйте ту же команду, выжидая `details.retryAfterMs`, если задано число. Сводка считает отдельно источники со сбоем. Получите полный экспорт в `mode:'read'` по `snapshotId`.
+2. Разметьте каждую строку `atlm-training-snapshot`, включая удаления, незавершённые задачи и сбои источника. Плановые признаки (`PLANNED` в отчёте) используют сведения, известные до первого старта. Для разметки `ACTUAL` после работы проверьте выполненный объём по коду, требованиям, журналу и результатам проверок. Используйте измеренный `actualMs` и исходные прогнозы из снимка. Для ссылок на трекер используйте соответствующие ID из доказательств снимка.
+3. Для `ELIGIBLE` нужны группа, `reasons:[]`, полная разметка `ACTUAL` и проверенный источник. План завершён, доступен, не удалён и имеет подтверждённое активное время, в том числе измеренный ноль. `SCOPE_CHANGED`, `MISSING_FEATURES`, `MISSING_REQUIRED_FEATURES` и `INVALID_FEATURES` допускают пригодную фактическую разметку при проверенном источнике. Другие исходные исключения, включая `RESULT_NOT_VERIFIED`, `INCOMPLETE_MEASUREMENT` и `SOURCE_REFRESH_FAILED`, сохраняют строку вне обучения. Связанные задачи и повторные итерации одной работы объединяйте в одну группу.
+4. Для `EXCLUDED` укажите хотя бы одну конкретную причину. Поля `groupId` и `annotation` могут быть явно `null`. `reasons` — массив строк из печатного ASCII длиной до 128 символов каждая, с хотя бы одним непробельным символом. Если передаёте аннотацию, заполните `agentTask` по [полной схеме признаков](../assess-task/references/features.md), `fieldEvidence` как непустой объект доказательств по полям, а `codeEvidence` как содержательную непустую строку, массив или объект. Вложенные массивы и объекты должны быть непустыми. Все конечные значения доказательств должны быть строками с хотя бы одним непробельным символом.
+5. Запишите UTF-8 JSON `{schemaVersion:1,contract:'atlm-teacher-annotations',snapshotId,parentDatasetRevisionId,rows}`. Укажите `null`, если родителя нет. Перенос прежней аннотации требует того же плана, поколения и digest источника. При изменении источника проверьте доказательства заново и обновите разметку. Передайте файл через `SaveDatasetRevision` с теми же `snapshotId` и `parentDatasetRevisionId`. На `SAVED` сохраните `datasetRevisionId` и `datasetDigest`.
+6. Выгрузите `GetDatasetRevision` с `datasetRevisionId` и `view:'download'`. Сверьте `datasetDigest` с SHA-256 готового файла. Тренер читает полные оригинальные байты `atlm-teacher-dataset`, включая исключения и зафиксированные источники. Импортированная ревизия доступна для аудита. При `HISTORICAL_PROVENANCE_INCOMPLETE` подготовьте новый нативный снимок и проверьте разметку для обучения.
+
+Подставьте ID строк своего снимка. В примере `agentTask` — полный объект из [примера agent-task-v4](../assess-task/references/features.md#пример-исходных-признаков), заполненный по проверенным фактам этой строки. Проверьте её допустимость для обучения отдельно.
+
+```js
+const rows = [
+  {
+    rowId: 'row-completed',
+    groupId: 'date-parser',
+    eligibility: 'ELIGIBLE',
+    reasons: [],
+    annotation: {
+      scope: 'ACTUAL',
+      agentTask,
+      fieldEvidence: { workUnits: 'Изменён разбор даты в parseDate.' },
+      codeEvidence: 'Тест parseDate принимает YYYY-MM-DD и отклоняет неверную дату.',
+    },
+  },
+  {
+    rowId: 'row-unmeasured',
+    groupId: null,
+    eligibility: 'EXCLUDED',
+    reasons: ['INCOMPLETE_MEASUREMENT'],
+    annotation: null,
+  },
+];
+```
 
 ## Передача файлов
 
-- Вызовите `view:'download'` для сохранённого ID. При `MATERIALIZING` повторяйте тот же селектор с учётом `retryAfterMs`, пока `READY` не вернёт `file:{sha256,byteLength,partSize,partCount,mediaType,encoding}`. Для модели укажите `fileKind:'BUNDLE'` или `'ARTIFACT'`. Части читаются через `view:'filePart'`, `partIndex` отсчитывается с нуля, полный кусок содержит 49 152 байта. Сверяйте индекс, digest и длину каждой части. Пишите по позиции в `PATH.partial`. После `verify --file PATH.partial --sha256 VALUE --byte-length N` атомарно переименуйте файл в окончательный путь.
-- Для загрузки получите `manifest --file PATH` и передайте только `file:{sha256,byteLength}` в `phase:'prepare'` с новым `commandId` и ID источника. Лимит upload берите из discovery. `UPLOADING` возвращает `receivedPartRanges` с включёнными `start` и `end`. Читайте недостающие части через `read-part --file PATH --part-index N` и передавайте `phase:'putPart',partIndex,contentBase64` с теми же остальными аргументами. Затем выполните `phase:'commit'`. При `VALIDATING` повторяйте этот commit с учётом `retryAfterMs`. При `UPLOAD_INCOMPLETE` повторите prepare и дополните parts. При `UPLOAD_EXPIRED` возобновите prepare с теми же `commandId` и descriptor, затем повторите отсутствующие части.
-- В локальном checkpoint храните неизменяемый селектор, digest и длину, временный путь, принятые индексы и UUID семантической команды. В случае потерянного ответа сначала проверьте `GetCommandResult`. Повторяйте точную операцию, пока её исход не установлен. Prepare с прежними аргументами возвращает состояние загрузки, commit возвращает тот же ID после успеха. При конфликте `IDEMPOTENCY_KEY_REUSED` сверяйте исходное намерение по квитанции. Для изменившегося запроса используйте новый UUID. Сообщайте пользователю коды, ID и прогресс.
+Чтобы начать выгрузку, вызовите `view:'download'` с ID сохранённого объекта. Для модели передавайте один и тот же `fileKind` (`BUNDLE` или `ARTIFACT`) при подготовке выгрузки и чтении всех частей.
 
-Ниже функции для code-mode. Подставьте `site` с абсолютным путём каталога сайта и `callTool`, который вызывает найденный подключённый инструмент по публичному имени. Выполняйте блок внутри code-mode. Он передаёт один кусок за раз, и вызывающий код сохраняет только подтверждённый индекс.
+Чтобы начать загрузку, получите `manifest --file PATH` и вызовите `phase:'prepare'` с новым `commandId`, ID источника и `file:{sha256,byteLength}`. Лимит берите из discovery. Запишите в локальный checkpoint имя инструмента, ID источника, родительскую ревизию при наличии, `commandId`, digest, длину и путь файла. По мере загрузки сохраняйте подтверждённые индексы.
+
+- **Отправить недостающие части.** При `UPLOADING` пропустите диапазоны `receivedPartRanges` с включёнными `start` и `end`. Читайте остальные части через `read-part --file PATH --part-index N` и передавайте их в `phase:'putPart'` с `partIndex` и `contentBase64`. На всех фазах сохраняйте исходные `commandId`, ID и `file`. Когда все части приняты, вызовите `phase:'commit'`. При `UPLOAD_INCOMPLETE` или `UPLOAD_EXPIRED` повторите `prepare` с исходными аргументами. Отправьте части, отсутствующие в новом `receivedPartRanges`, и повторите `commit`.
+- **Повторить запрос.** При `MATERIALIZING` повторите download с тем же ID и селектором. При `VALIDATING` повторите тот же commit. В обоих случаях выждите `retryAfterMs`. Если ответ на запись потерялся, вызовите `GetCommandResult` с исходным `commandId`. В квитанции `FINAL` читайте `result` или `error`. При `PENDING` или `NOT_FOUND` извлеките из checkpoint исходные аргументы и точно повторите запрос.
+- **Забрать готовый результат.** При выгрузке `READY` содержит `file:{sha256,byteLength,partSize,partCount,mediaType,encoding}`. Прочитайте `view:'filePart'` по `partIndex` с нуля. Полная часть содержит 49 152 байта. Сверьте индекс, digest и длину каждой части и запишите её по позиции в `PATH.partial`. После `verify --file PATH.partial --sha256 VALUE --byte-length N` атомарно переименуйте файл. При загрузке сохраните ID из `SAVED` или `REGISTERED` и завершите обход частей. Финальный ответ может прийти на любой фазе при точном повторе завершённой загрузки с `replayed:true`.
+
+После подтверждённого отклонения содержимого, например `INVALID_TEACHER_DATASET` или `INVALID_ARTIFACT`, для исправленного файла вычислите новый manifest и используйте новый `commandId`. Квитанция отклонённой загрузки может остаться в `PENDING`. При `IDEMPOTENCY_KEY_REUSED` сопоставьте аргументы и намерение с checkpoint. Сообщайте пользователю коды, ID и прогресс.
+
+Подставьте `site` с абсолютным путём каталога сайта и `callTool`, который вызывает найденный подключённый инструмент по публичному имени. Выполняйте функции переноса внутри code-mode по одной части за вызов.
 
 ```js
 const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -89,13 +124,15 @@ async function sendPart(name, preparedArgs, localPath, manifest, partIndex) {
     throw new Error('FILE_PART_READ_MISMATCH');
   const accepted = await structured(name, { ...preparedArgs, phase: 'putPart', partIndex,
     contentBase64: part.contentBase64 });
+  const finalState = name === 'SaveDatasetRevision' ? 'SAVED' : 'REGISTERED';
+  if (accepted.state === finalState && accepted.replayed === true) return accepted;
   if (accepted.state !== 'UPLOADING' || accepted.partIndex !== partIndex)
     throw new Error('FILE_PART_RECEIPT_MISMATCH');
   return { partIndex, byteLength };
 }
 ```
 
-Передавайте `preparedArgs` с неизменяемыми ID, `commandId` и `file:{sha256,byteLength}`. В `manifest` оставьте также `partSize` и `partCount`. Проверяйте полный digest до запуска обучения и перед prepare. Держите base64 и полный набор данных внутри code-mode и локальных файлов. По частям выводите только подтверждённый индекс и длину. Усечённый вывод helper отклоняйте до putPart.
+Передавайте `preparedArgs` с неизменяемыми ID, `commandId` и `file:{sha256,byteLength}`. В `manifest` оставьте также `partSize` и `partCount`. Сохраняйте индекс, только если `sendPart` вернул подтверждение части. Если получен финальный результат, завершите загрузку и сохраните ревизию. Проверяйте полный digest до запуска обучения и перед prepare. Держите base64 и полный набор данных внутри code-mode и локальных файлов. По частям выводите только подтверждённый индекс и длину. Усечённый вывод helper отклоняйте до putPart.
 
 ## Локальный рецепт и проверка
 
@@ -107,10 +144,11 @@ node scripts/train-atlm.mjs --dataset /path/dataset.json --recipe /path/recipe.j
 
 Exit `0` даёт `registration.bundle.json`, `2` даёт отчёт с причиной недоступности кандидата, `1` означает ошибку входа или исполнения. Откройте `run.json`, `manifest.json` и `evaluation.json` в локальном каталоге. Для повтора используйте те же байты входов и каталог. Частичный или чужой результат сохраняется.
 
-Development использует целые группы и факты, готовые строго до старта проверяемой группы. Финальные веса и калибровка используют только development. Holdout проверяет этот артефакт с `ACTUAL` признаками и отдельно с исходными `PLANNED` признаками для сопоставимого объёма. `ISSUED_FORECASTS` показывает фактически выданные прогнозы прежних версий. Рассматривайте их по записанной идентичности, доступности и сопоставимости. Небольшая выборка, участие учителя после завершения работ, повторный просмотр holdout и широкие интервалы ограничивают выводы о будущей точности. Сравнивайте MAE кандидата и медианы на одинаковых парах, смотрите раздельные знаменатели доступности точки, интервала и охвата.
+Development использует целые группы и факты, готовые строго до старта проверяемой группы. Финальные веса и калибровка используют только development. Holdout проверяет этот артефакт с `ACTUAL` признаками и отдельно с исходными `PLANNED` признаками для сопоставимого объёма. `ISSUED_FORECASTS` в отчёте локального обучения показывает зафиксированные при первом старте прогнозы из снимка. В нём возможны выдачи прежних ревизий, историческая медиана и планы без доступного прогноза. Смотрите на записанную идентичность, доступность и сопоставимость. Небольшая выборка, участие учителя после завершения работ, повторный просмотр holdout и широкие интервалы ограничивают выводы о будущей точности. Сравнивайте MAE кандидата и медианы на одинаковых парах, смотрите раздельные знаменатели доступности точки, интервала и охвата.
 
 ## Зарегистрировать и опубликовать
 
 1. Если регистрация входит в поручение и тренер вернул `0`, передайте `registration.bundle.json` в `RegisterModelRevision` с `datasetRevisionId`. `REGISTERED` сохраняет модель и отчёт. Сообщите `modelRevisionId`, причину допуска и сопоставимые метрики. Указатель для новых прогнозов меняется отдельной командой.
-2. При порученной активации прочитайте `ListModelRevisions`. Передайте `modelRevisionId`, новый `commandId`, `expectedActiveModelRevisionId` (включая `null`), `expectedActivationVersion` и причину. Добавьте `acceptExperimental:true` только при явно принятом пользователем экспериментальном результате. Заранее согласованные условия активации применяйте сразу, когда выполнены. При `MODEL_ACTIVATION_CONFLICT` перечитайте указатель и версию перед новым намерением. Изменение источника даёт `MODEL_SOURCES_CHANGED` и требует проверенной ревизии.
-3. Для отката используйте `ActivateModelRevision` с ID прежней пригодной модели и актуальным CAS. Сверьте `activeModelRevisionId`, `servingModelRevisionId` и историю активаций. Прогноз уже начатого плана остаётся зафиксированным. Проспективная проверка новой модели появится по прогнозам, выданным этой ревизией после активации.
+2. При порученной активации вызовите `ListModelRevisions({schemaVersion:1,view:'list'})`. Используйте `activeModelRevisionId` (включая `null`) и `activationVersion` как `expectedActiveModelRevisionId` и `expectedActivationVersion`. В `ActivateModelRevision` укажите `modelRevisionId`, новый `commandId` и причину. При `MODEL_ACTIVATION_CONFLICT` перечитайте актуальные значения CAS. Изменение источника даёт `MODEL_SOURCES_CHANGED` и требует проверенной ревизии.
+3. Передавайте `acceptExperimental:true` при `activationEligibility.status:'REQUIRES_EXPERIMENTAL_ACK'` в результате регистрации или отказе `EXPERIMENTAL_CONFIRMATION_REQUIRED` и только при явном согласии пользователя на такую активацию. Значение `serverEstimation.accuracy:'EXPERIMENTAL'` в `GetSavedEstimate` относится к исторической проверке прогноза и возможно при допуске `ELIGIBLE`. Заранее согласованные условия активации применяйте сразу, когда они выполнены.
+4. Для отката вызовите `ActivateModelRevision` с ID прежней пригодной ревизии и актуальным CAS. Для допуска и подтверждения примените то же правило. После активации или отката сверяйте назначение `activeModelRevisionId`, доступную для прогнозов ревизию `servingModelRevisionId` и историю через `view:'activations'`. Прогноз уже начатого плана остаётся зафиксированным. Проспективная проверка новой модели появится по прогнозам, выданным этой ревизией после активации.

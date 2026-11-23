@@ -387,12 +387,12 @@ const MCP_DESCRIPTIONS = Object.freeze({
   GetAssessment: 'Прочитать текущие требования и currentRequirementsDigest по planId и необязательному stepId. Для чтения сохранённой ревизии передайте planId и assessmentId, при необходимости укажите revision.',
   GetEstimationHistory: 'Прочитать оценки и фактическое время в миллисекундах по выбранным планам и этапам. Время в этом ответе относится к родительским планам. Для следующей страницы передайте те же asOf и throughSequence, а nextAfterSequence передайте как afterSequence.',
   GetTimeReport: 'Прочитать фактическое время за период в миллисекундах. totalActiveMs и activeByDay объединяют пересекающиеся интервалы, sumPlanActiveMs суммирует время по планам.',
-  CreateTrainingSnapshot: 'Зафиксировать источники задач или прочитать неизменяемый снимок. Для выгрузки дождитесь READY и читайте части по partIndex.',
-  SaveDatasetRevision: 'Сохранить разметку всех строк снимка. Выполните prepare, передайте недостающие части через putPart и опубликуйте ревизию через commit с тем же commandId.',
-  GetDatasetRevision: 'Прочитать сводку, строки или файл ревизии набора. Для повторного чтения используйте тот же datasetRevisionId.',
-  RegisterModelRevision: 'Зарегистрировать артефакт локального обучения и его отчёт через prepare, putPart и commit. Для начала использования требуется отдельная активация.',
-  ListModelRevisions: 'Прочитать список ревизий, детали, историю активаций или части файла. Продолжайте чтение по nextCursor.',
-  ActivateModelRevision: 'Назначить сохранённую ревизию для новых прогнозов по ожидаемому указателю и версии активации. Для экспериментальной ревизии передайте явное подтверждение.',
+  CreateTrainingSnapshot: 'Зафиксировать снимок с mode:"create" или прочитать его с mode:"read". view:"list" читает список, остальные виды требуют snapshotId. rows возвращает компактный перечень. Полные строки и доказательства выгружаются через download и filePart. Для следующей страницы передайте nextCursor как cursor.',
+  SaveDatasetRevision: 'Сохранить разметку всех строк snapshotId. Выполните prepare, putPart для недостающих частей и commit с теми же commandId, источником и file. Завершите на SAVED, в том числе при точном повторе после commit.',
+  GetDatasetRevision: 'Найти ревизию с view:"list" и необязательным snapshotId. Остальные виды требуют datasetRevisionId. rows возвращает компактный перечень, полные строки и байты выгружаются через download и filePart. Для следующей страницы передайте nextCursor как cursor.',
+  RegisterModelRevision: 'Сохранить пакет локального обучения с артефактом, отчётом и происхождением данных. На prepare, putPart и commit используйте неизменные datasetRevisionId, file и commandId. Завершите на REGISTERED. Активация выполняется отдельно.',
+  ListModelRevisions: 'Через view:"list" прочитать список, активный указатель и версию активации. view:"detail" читает ревизию, view:"activations" читает историю. Для download и filePart передайте modelRevisionId и один fileKind. По умолчанию BUNDLE, для выгрузки только артефакта укажите ARTIFACT. Для следующей страницы передайте nextCursor как cursor.',
+  ActivateModelRevision: 'Назначить сохранённую ревизию по expectedActiveModelRevisionId и expectedActivationVersion из ListModelRevisions с view:"list". При REQUIRES_EXPERIMENTAL_ACK или EXPERIMENTAL_CONFIRMATION_REQUIRED передайте acceptExperimental:true с явного согласия пользователя. Правило действует и для отката.',
 });
 
 function mcpTools() {

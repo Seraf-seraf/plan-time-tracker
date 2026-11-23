@@ -7,7 +7,7 @@ import test from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { fitAtlm, normalizeAgentTask } from '../worker/atlm/model.js';
 import { teacherAnnotation } from './fixtures/atlm-revisions.mjs';
-import { atlmAssessment, context, mcp, OWNER, taskV4 } from './fixtures/tracker-db.mjs';
+import { atlmAssessment, call, context, mcp, OWNER, taskV4 } from './fixtures/tracker-db.mjs';
 
 const site = fileURLToPath(new URL('..', import.meta.url));
 const workerPath = process.env.SITE_WORKER_MODULE || join(site, 'dist/server/index.js');
@@ -164,6 +164,13 @@ async function commit(c, name, args) {
   assert.fail(name + ' did not settle its validation');
 }
 
+async function assertFinalUploadReplay(c, name, args, path, result) {
+  const expected = { ...result, replayed: true };
+  assert.deepEqual(await revision(c, name, { ...args, phase: 'prepare' }), expected);
+  const { partIndex, contentBase64 } = transfer('read-part', { file: path, 'part-index': 0 });
+  assert.deepEqual(await revision(c, name, { ...args, phase: 'putPart', partIndex, contentBase64 }), expected);
+}
+
 const savedForecast = async (c, planId) => (await tool(c, 'GetSavedEstimate', { planId })).serverEstimation;
 const modelList = c => revision(c, revisionsTool, { view: 'list' });
 
@@ -190,8 +197,8 @@ test('built MCP transfers a frozen dataset through the local CLI, registers, act
 
   const baselineTask = taskV4();
   const incumbentSources = [
-    await completed(c, 'Independent source one', 1000, baselineTask),
-    await completed(c, 'Independent source two', 1200, baselineTask),
+    await completed(c, 'Initial source one', 14_000, baselineTask),
+    await completed(c, 'Initial source two', 14_200, baselineTask),
   ];
   assert.deepEqual((await modelList(c)).rows, []);
   await seedIncumbent(c, incumbentSources);
@@ -201,7 +208,8 @@ test('built MCP transfers a frozen dataset through the local CLI, registers, act
   assert.equal(original.modelRevisionId, incumbentId);
   assert.equal(original.status, 'AVAILABLE');
 
-  const actualByPlan = new Map();
+  const actualByPlan = new Map(incumbentSources.map((recorded, index) => [recorded.planId,
+    { recorded, task: baselineTask, group: 'incumbent-source-' + index }]));
   for (let index = 0; index < completedPlanCount; index++) {
     const task = taskV4();
     task.reuseLevel = index % 4;
@@ -232,6 +240,7 @@ test('built MCP transfers a frozen dataset through the local CLI, registers, act
   assert.equal(saved.isError, undefined, JSON.stringify(saved.structuredContent));
   const { datasetRevisionId, datasetDigest } = saved.structuredContent;
   assert.equal(datasetRevisionId, saveArgs.commandId);
+  await assertFinalUploadReplay(c, 'SaveDatasetRevision', saveArgs, annotationsPath, saved.structuredContent);
   const datasetPath = join(directory, 'dataset.json');
   const datasetFile = await download(c, 'GetDatasetRevision', { datasetRevisionId }, datasetPath);
   assert.equal(datasetFile.sha256, datasetDigest);
@@ -250,6 +259,7 @@ test('built MCP transfers a frozen dataset through the local CLI, registers, act
   assert.equal(unsupported.isError, true);
   assert.equal(unsupported.structuredContent.code, 'INVALID_ARTIFACT');
   assert.equal(unsupported.structuredContent.details.reason, 'INVALID_BUNDLE_ARTIFACT');
+  assert.equal((await tool(c, 'GetCommandResult', { commandId: unsupportedArgs.commandId })).status, 'PENDING');
   const modelArgs = await upload(c, modelTool, { datasetRevisionId }, result.registrationPath);
 
   const interrupted = { ...c, worker: { async fetch(request, env) {
@@ -268,12 +278,32 @@ test('built MCP transfers a frozen dataset through the local CLI, registers, act
   assert.equal(receipt.result.modelRevisionId, modelArgs.commandId);
   const replay = await commit(c, modelTool, modelArgs);
   assert.deepEqual(replay.structuredContent, { ...receipt.result, replayed: true });
+  await assertFinalUploadReplay(c, modelTool, modelArgs, result.registrationPath, receipt.result);
   const modelRevisionId = replay.structuredContent.modelRevisionId;
   const registered = await modelList(c);
   assert.equal(registered.activeModelRevisionId, incumbentId);
   assert.equal(registered.servingModelRevisionId, incumbentId);
   assert.equal(registered.activationVersion, 1);
   assert.equal(registered.rows.filter(row => row.modelRevisionId === modelRevisionId).length, 1);
+  const detail = await revision(c, revisionsTool, { view: 'detail', modelRevisionId });
+  const issuedReport = detail.evidence.find(row => row.kind === 'ISSUED_FORECASTS' && row.source === 'evaluation');
+  const evidenceQuery = new URLSearchParams({ source: 'evaluation', evidenceId: issuedReport.evidenceId });
+  const evidencePage = await call(c, `/api/tracker/model-revisions/${modelRevisionId}/evidence/cases?${evidenceQuery}`);
+  assert.equal(evidencePage.status, 200);
+  assert.equal(evidencePage.value.modelRevisionId, modelRevisionId);
+  const issuedCases = new Map(evidencePage.value.cases.map(row => [row.planId, row]));
+  assert.equal(issuedCases.size, actualByPlan.size);
+  for (const row of source.rows.filter(item => actualByPlan.has(item.planId))) {
+    const forecast = row.source.issuedPrediction;
+    const issuedCase = issuedCases.get(row.planId);
+    assert.equal(issuedCase.modelRevisionId, forecast?.modelRevisionId ?? null);
+    assert.equal(issuedCase.method, forecast?.method?.id ?? null);
+    assert.equal(issuedCase.pointMs, forecast?.pointMs ?? null);
+  }
+  assert.equal(issuedCases.get(incumbentSources[0].planId).pointMs, null);
+  assert.equal(issuedCases.get(incumbentSources[1].planId).method, 'historical-median');
+  assert.equal([...issuedCases.values()].filter(row => row.modelRevisionId === incumbentId).length, completedPlanCount);
+  assert.equal(detail.evidence.find(row => row.source === 'issued').summary.rowCount, 0);
   const registeredPath = join(directory, 'registered.json');
   assert.equal((await download(c, revisionsTool, { modelRevisionId, fileKind: 'BUNDLE' }, registeredPath)).sha256, modelArgs.file.sha256);
 
