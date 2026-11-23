@@ -1,4 +1,4 @@
-const TRACKER_VERSION = '0.8.2';
+const TRACKER_VERSION = '0.9.0';
 
 const BODY_LIMIT = 128 * 1024;
 

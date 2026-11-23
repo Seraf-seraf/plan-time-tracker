@@ -25,8 +25,14 @@ test("portable package has one manifest with the marketplace identity without de
   assert.equal(existsSync(join(pluginRoot, ".app.json")), false);
   assert.ok(existsSync(join(pluginRoot, "skills/track-plan/SKILL.md")));
   assert.ok(existsSync(join(pluginRoot, "skills/assess-task/SKILL.md")));
-  assert.equal(manifest.version, "0.8.2");
-  assert.equal(readJson(join(repositoryRoot, "sites/plan-time-tracker/package.json")).version, manifest.version);
+  assert.ok(existsSync(join(pluginRoot, "skills/train-model/SKILL.md")));
+  assert(extension.interface.capabilities.includes("Локальное обучение ATLM"));
+  assert.equal(manifest.version, "0.9.0");
+  const site = join(repositoryRoot, "sites/plan-time-tracker");
+  const lock = readJson(join(site, "package-lock.json"));
+  assert.equal(readJson(join(site, "package.json")).version, manifest.version);
+  assert.equal(lock.version, manifest.version);
+  assert.equal(lock.packages[""].version, manifest.version);
 });
 
 test("runtime package survives a tar roundtrip with one manifest and its skills", () => {
@@ -46,11 +52,15 @@ test("runtime package survives a tar roundtrip with one manifest and its skills"
     assert.ok(!entries.includes(".app.json"));
     assert.ok(entries.includes("skills/track-plan/SKILL.md"));
     assert.ok(entries.includes("skills/assess-task/SKILL.md"));
+    assert.ok(entries.includes("skills/train-model/SKILL.md"));
     assert.ok(!entries.includes("scripts/source-snapshot.mjs"));
     assert.ok(!entries.includes("scripts/observation-queue.mjs"));
     assert.ok(entries.every(entry => !entry.split("/").includes(".codex-plugin")));
     mkdirSync(unpacked);
     runTar(["-xzf", archive, "-C", unpacked]);
+    const trainingSkill = readFileSync(join(unpacked, "skills/train-model/SKILL.md"), "utf8");
+    assert.match(trainingSkill, /^---\nname: train-model\ndescription: [^\n]+\n---\n/u);
+    assert.match(trainingSkill, /^node scripts\/train-atlm\.mjs --dataset \S+ --recipe \S+ --out \S+$/mu);
     const files = readdirSync(unpacked, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile());
     for (const entry of files) {
       const path = join(entry.parentPath, entry.name);

@@ -5,7 +5,9 @@ import { call, context, mcp, ok, PLAN } from '../../../sites/plan-time-tracker/t
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const features = read('../skills/assess-task/references/features.md');
+const assess = read('../skills/assess-task/SKILL.md');
 const track = read('../skills/track-plan/SKILL.md');
+const train = read('../skills/train-model/SKILL.md');
 const embedded = read('../../../sites/plan-time-tracker/skill/plan-time-tracker/SKILL.md');
 const catalog = read('../../../docs/mcp-naming-review.md');
 
@@ -67,6 +69,78 @@ test('the MCP reference matches the public tool inventory and the advertised tas
   } finally {
     c.close();
   }
+});
+
+test('training skill uses the discovered revision tools and keeps assessment independent', async () => {
+  const c = context();
+  try {
+    const info = await invoke(c, 'GetTrackerInfo');
+    const plugin = JSON.parse(read('../plugin.json'));
+    assert.equal(info.version, plugin.version);
+    const { registry } = info.assessments.atlm;
+    assert.equal(registry.schemaVersion, 1);
+    assert.equal(registry.trainingExecution, 'LOCAL');
+    assert.equal(registry.activation, 'EXPLICIT');
+    const listing = (await call(c, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }))
+      .value.result.tools;
+    const entries = [...train.matchAll(/^\| `([^`]+)` \|/gm)].map(([, name]) => name);
+    assert.equal(entries.length, 6);
+    assert.deepEqual(entries.sort(), Object.keys(registry.tools).sort());
+    for (const name of entries) {
+      assert.deepEqual(listing.find((tool) => tool.name === name)?.inputSchema, registry.tools[name]);
+    }
+    const retired = ['StartTraining', 'ContinueTraining', 'GetTrainingStatus', 'GetTrainingData', 'GetTrainingHistory'];
+    for (const name of retired) {
+      assert.equal(listing.some((tool) => tool.name === name), false);
+      assert.equal(assess.includes(name), false);
+      assert.equal(train.includes(name), false);
+    }
+    assert(assess.includes('../train-model/SKILL.md'));
+  } finally {
+    c.close();
+  }
+});
+
+test('the documented transfer code forwards a complete part and rejects truncated helper output', async () => {
+  const example = train.match(/```js\n([\s\S]*?)```/u)?.[1];
+  assert(example);
+  const init = new Function('tools', 'callTool', 'site', example + '\nreturn { receivePart, sendPart };');
+  const partSize = 49_152;
+  const content = Buffer.alloc(partSize, 8);
+  const contentBase64 = content.toString('base64');
+  const file = {
+    sha256: 'sha256:' + 'a'.repeat(64), byteLength: partSize, partSize, partCount: 1,
+  };
+  const upload = { datasetRevisionId: 'revision', commandId: 'command',
+    file: { sha256: file.sha256, byteLength: file.byteLength } };
+  const calls = [];
+  let complete = true;
+  const tools = { async exec_command(input) {
+    calls.push(input);
+    const part = input.cmd.includes("'read-part'")
+      ? { partIndex: 0, byteLength: partSize, contentBase64: complete ? contentBase64 : contentBase64.slice(0, -4) }
+      : { partIndex: 0, byteLength: partSize };
+    return { exit_code: 0, output: JSON.stringify(part) };
+  } };
+  const callTool = async (name, args) => {
+    calls.push({ name, args });
+    return { structuredContent: args.view === 'filePart'
+      ? { fileSha256: file.sha256, partIndex: 0, contentBase64 } : { state: 'UPLOADING', partIndex: args.partIndex } };
+  };
+  const { receivePart, sendPart } = init(tools, callTool, '/checkout/sites/plan-time-tracker');
+  assert.deepEqual(await sendPart('RegisterModelRevision', upload, '/private/bundle.json', file, 0),
+    { partIndex: 0, byteLength: partSize });
+  assert.equal(calls[0].max_output_tokens, 80000);
+  assert.deepEqual(calls[1], {
+    name: 'RegisterModelRevision', args: { schemaVersion: 1, ...upload, phase: 'putPart', partIndex: 0, contentBase64 },
+  });
+  complete = false;
+  await assert.rejects(sendPart('RegisterModelRevision', upload, '/private/bundle.json', file, 0), /INVALID_FILE_PART/u);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(await receivePart('GetDatasetRevision', { datasetRevisionId: 'revision' }, file, 0, '/private/data.partial'),
+    { partIndex: 0, byteLength: partSize });
+  assert.equal(calls[3].args.view, 'filePart');
+  assert(calls[4].cmd.startsWith("'node' 'scripts/atlm-transfer.mjs' 'write-part'"));
 });
 
 for (const withBoundary of [false, true]) {

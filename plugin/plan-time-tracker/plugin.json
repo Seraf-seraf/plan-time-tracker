@@ -1,20 +1,20 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "plan-time-tracker",
-  "version": "0.8.2",
-  "description": "Сохраняет планы и статусы этапов, считает время работы и прогнозирует длительность задач по ATLM.",
+  "version": "0.9.0",
+  "description": "Сохраняет планы, считает активное время, прогнозирует длительность задач и помогает локально обучать ATLM.",
   "author": {
     "name": "App developer"
   },
   "extensions": {
     "com.openai": {
       "interface": {
-        "capabilities": [],
+        "capabilities": ["Локальное обучение ATLM"],
         "category": "Other",
         "defaultPrompt": null,
         "developerName": "App developer",
         "displayName": "Трекер планов",
-        "longDescription": "Сохраняет планы и статусы этапов, считает время работы и прогнозирует длительность задач по ATLM.",
+        "longDescription": "Сохраняет планы и статусы этапов, считает активное время, прогнозирует длительность задач и помогает локально обучать ATLM.",
         "shortDescription": "Планы, статусы этапов и время работы"
       }
     }
