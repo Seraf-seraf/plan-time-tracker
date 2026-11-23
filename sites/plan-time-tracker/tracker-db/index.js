@@ -101,12 +101,17 @@ export function configuredDatabase(env) {
   return {
     prepare(sql) { return new RemoteStatement(this, sql); },
     batch(statements) { return this.execute(statements, "batch"); },
-    async execute(statements, mode) {
+    async firstInline(sql, ...args) {
+      const [result] = await this.execute([this.prepare(sql).bind(...args)], "first", false);
+      return result.results[0] ?? null;
+    },
+    async execute(statements, mode, allowParts = true) {
       if (statements.some(s => s.database !== this)) throw new Error("Mixed database batch");
       const signal = AbortSignal.timeout(timeout);
       const headers = { authorization: "Bearer " + env.DB_TOKEN, "content-type": "application/json" };
       const response = await fetch(endpoint, {
-        method: "POST", redirect: "manual", signal, headers: { ...headers, "X-Result-Parts": "1" },
+        method: "POST", redirect: "manual", signal,
+        headers: allowParts ? { ...headers, "X-Result-Parts": "1" } : headers,
         body: JSON.stringify({ mode, statements: statements.map(({ sql, args }) => ({ sql, args })) }),
       });
       if (!response.ok) throw new Error("SQLite service unavailable: HTTP " + response.status);

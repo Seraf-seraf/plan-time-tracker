@@ -1,4 +1,4 @@
-import { appError, dbAll, dbFirst } from '../shared/index.js';
+import { appError, dbAll, dbFirst, dbFirstInline } from '../shared/index.js';
 
 export const ATLM_PART_BYTES = 49_152;
 export const ATLM_MAX_UPLOAD_BYTES = 16 * 1024 * 1024;
@@ -147,7 +147,7 @@ function makeManifest(sha256, byteLength) {
 }
 
 const initialUpload = JSON.stringify({ words: SHA_INITIAL_WORDS });
-const initialExport = { chunkIndex: 0, chunkOffset: 0, tail: '', words: SHA_INITIAL_WORDS };
+const initialExport = JSON.stringify({ chunkIndex: 0, chunkOffset: 0, tail: '', words: SHA_INITIAL_WORDS });
 const uploadStates = "state IN ('UPLOADING','VALIDATING')";
 const fileKeyWhere = 'owner_id=? AND storage_id=? AND file_kind=?';
 
@@ -352,6 +352,14 @@ function readyView(row) {
   return { state: 'READY', file: makeManifest(row.sha256, row.byte_length) };
 }
 
+function readExportDraft(db, key, publishedStorageId) {
+  if (publishedStorageId === undefined) return readDraftStatement(db, key).first();
+  const [ownerId, storageId, fileKind] = key;
+  return dbFirstInline(db, `SELECT * FROM estimation_revision_files
+    WHERE owner_id=? AND file_kind=? AND (storage_id=? OR (storage_id=? AND state='READY'))
+    ORDER BY (storage_id=?) DESC LIMIT 1`, ownerId, fileKind, storageId, publishedStorageId, publishedStorageId);
+}
+
 export function sliceAtlmExportText(text, offset, limit) {
   if (text === null) return null;
   const bytes = encodeUtf8.encode(text);
@@ -360,7 +368,7 @@ export function sliceAtlmExportText(text, offset, limit) {
 
 async function exportPass(checkpoint, byteLength, readSlice) {
   let { chunkIndex, chunkOffset } = checkpoint;
-  const { tail, words, format } = checkpoint;
+  const { tail, words } = checkpoint;
   const hash = new ResumableSha256(words);
   const buffer = new Uint8Array(ATLM_PART_BYTES);
   const tailBytes = tail ? Uint8Array.from(atob(tail), character => character.charCodeAt(0)) : new Uint8Array(0);
@@ -379,7 +387,8 @@ async function exportPass(checkpoint, byteLength, readSlice) {
       fill = 0;
       break;
     }
-    const { bytes, done } = chunk;
+    const { bytes, done, nextOffset = chunkOffset + bytes.length } = chunk;
+    if (!done && bytes.length === 0) break;
     for (let offset = 0; offset < bytes.length;) {
       const length = Math.min(ATLM_PART_BYTES - fill, bytes.length - offset);
       buffer.set(bytes.subarray(offset, offset + length), fill);
@@ -395,55 +404,86 @@ async function exportPass(checkpoint, byteLength, readSlice) {
     if (done) {
       chunkIndex++;
       chunkOffset = 0;
-    } else chunkOffset += bytes.length;
+    } else chunkOffset = nextOffset;
   }
   const state = JSON.stringify({
-    chunkIndex, chunkOffset, tail: encodePart(buffer.subarray(0, fill)), words: Array.from(hash.words), format,
+    chunkIndex, chunkOffset, tail: encodePart(buffer.subarray(0, fill)), words: Array.from(hash.words),
   });
   return { parts, byteLength, sha256, state };
 }
 
-export async function materializeAtlmRevisionFile(db, ownerId, { storageId, fileKind, readChunk, readSlice, format }, nowMs) {
+function publishStagedExport(db, key, publishedKey, next, checkedParts, nowMs) {
+  const staged = `EXISTS(SELECT 1 FROM estimation_revision_files WHERE ${fileKeyWhere}
+    AND state='MATERIALIZING' AND sha256=? AND part_count=?)`;
+  const stagedArgs = [...key, next.sha256, checkedParts];
+  const mutable = `EXISTS(SELECT 1 FROM estimation_revision_files WHERE ${fileKeyWhere} AND state='MATERIALIZING')`;
+  // The earlier Worker only knows the public key. Publish there in one
+  // transaction so either writer's first complete manifest stays authoritative.
+  return [
+    db.prepare(`INSERT OR IGNORE INTO estimation_revision_files(owner_id,storage_id,file_kind,state,descriptor_json,updated_at)
+      SELECT ?,?,?,'MATERIALIZING',?,? WHERE ${staged}`)
+      .bind(...publishedKey, initialExport, nowMs, ...stagedArgs),
+    db.prepare(`DELETE FROM estimation_revision_file_parts WHERE ${fileKeyWhere} AND ${mutable} AND ${staged}`)
+      .bind(...publishedKey, ...publishedKey, ...stagedArgs),
+    db.prepare(`INSERT INTO estimation_revision_file_parts(owner_id,storage_id,file_kind,part_index,byte_length,content_base64)
+      SELECT ?,?,?,part_index,byte_length,content_base64 FROM estimation_revision_file_parts
+      WHERE ${fileKeyWhere} AND ${mutable} AND ${staged}`)
+      .bind(...publishedKey, ...key, ...publishedKey, ...stagedArgs),
+    db.prepare(`UPDATE estimation_revision_files SET state='READY',descriptor_json='{}',checked_parts=?,checked_bytes=?,
+      sha256=?,byte_length=?,part_count=?,updated_at=? WHERE ${fileKeyWhere} AND state='MATERIALIZING' AND ${staged}`)
+      .bind(checkedParts, next.byteLength, next.sha256, next.byteLength, checkedParts, nowMs, ...publishedKey, ...stagedArgs),
+    discardPublishedDraft(db, key, publishedKey),
+  ];
+}
+
+function discardPublishedDraft(db, key, publishedKey) {
+  return db.prepare(`DELETE FROM estimation_revision_files WHERE ${fileKeyWhere} AND state='MATERIALIZING'
+    AND EXISTS(SELECT 1 FROM estimation_revision_files WHERE ${fileKeyWhere} AND state='READY')`)
+    .bind(...key, ...publishedKey);
+}
+
+export async function materializeAtlmRevisionFile(db, ownerId, { storageId, publishedStorageId, fileKind, readChunk, readSlice }, nowMs) {
   if (!EXPORT_KINDS.has(fileKind)) throw appError('VALIDATION_ERROR', 'Неизвестный вид файла ревизии.');
   const key = [ownerId, storageId, fileKind];
-  const initial = { ...initialExport, format };
-  await db.prepare(`INSERT OR IGNORE INTO estimation_revision_files(owner_id,storage_id,file_kind,state,descriptor_json,
-    updated_at) VALUES(?,?,?,'MATERIALIZING',?,?)`).bind(...key, JSON.stringify(initial), nowMs).run();
-  const row = await readDraftStatement(db, key).first();
+  const staged = publishedStorageId !== undefined;
+  const publishedKey = [ownerId, publishedStorageId ?? storageId, fileKind];
+  const publishedGuard = staged ? `WHERE NOT EXISTS(
+    SELECT 1 FROM estimation_revision_files WHERE ${fileKeyWhere} AND state='READY')` : '';
+  const start = db.prepare(`INSERT OR IGNORE INTO estimation_revision_files(owner_id,storage_id,file_kind,state,descriptor_json,
+    updated_at) SELECT ?,?,?,'MATERIALIZING',?,? ${publishedGuard}`)
+    .bind(...key, initialExport, nowMs, ...(staged ? publishedKey : []));
+  if (staged) await db.batch([discardPublishedDraft(db, key, publishedKey), start]);
+  else await start.run();
+  const row = await readExportDraft(db, key, publishedStorageId);
   if (row.state === 'READY') return readyView(row);
   if (row.state !== 'MATERIALIZING') return exportPending();
   const checkpoint = JSON.parse(row.descriptor_json);
-  const restart = checkpoint.format !== format;
-  const firstPart = restart ? 0 : row.checked_parts;
-  const next = await exportPass(restart ? initial : checkpoint, restart ? 0 : row.checked_bytes,
+  const next = await exportPass(checkpoint, row.checked_bytes,
     readSlice ?? (async (index, offset, limit) => sliceAtlmExportText(await readChunk(index), offset, limit)));
-  const checkedParts = firstPart + next.parts.length;
+  const checkedParts = row.checked_parts + next.parts.length;
   const guard = `${fileKeyWhere} AND state='MATERIALIZING' AND checked_parts=? AND descriptor_json=?`;
   const expected = [...key, row.checked_parts, row.descriptor_json];
   const writes = next.parts.map((part, index) => db.prepare(`INSERT INTO estimation_revision_file_parts(owner_id,
     storage_id,file_kind,part_index,byte_length,content_base64)
     SELECT ?,?,?,?,?,? FROM estimation_revision_files WHERE ${guard}`)
-    .bind(...key, firstPart + index, part.byteLength, part.contentBase64, ...expected));
-  // Unfinished parts and the byte cursor must use the same serialization.
-  if (restart && row.checked_parts > 0) writes.unshift(db.prepare(`DELETE FROM estimation_revision_file_parts
-    WHERE ${fileKeyWhere} AND EXISTS(SELECT 1 FROM estimation_revision_files WHERE ${guard})`)
-    .bind(...key, ...expected));
+    .bind(...key, row.checked_parts + index, part.byteLength, part.contentBase64, ...expected));
   const checkParts = next.sha256 ? `AND (SELECT count(*)=? AND coalesce(sum(byte_length),0)=?
     FROM estimation_revision_file_parts WHERE ${fileKeyWhere})` : '';
   writes.push(db.prepare(`UPDATE estimation_revision_files SET state=?,descriptor_json=?,checked_parts=?,checked_bytes=?,
     sha256=?,byte_length=?,part_count=?,updated_at=? WHERE ${guard} ${checkParts}`)
-    .bind(next.sha256 ? 'READY' : 'MATERIALIZING', next.sha256 ? '{}' : next.state, checkedParts, next.byteLength,
+    .bind(next.sha256 && !staged ? 'READY' : 'MATERIALIZING', next.sha256 ? '{}' : next.state, checkedParts, next.byteLength,
       next.sha256, next.sha256 ? next.byteLength : null, next.sha256 ? checkedParts : null, nowMs, ...expected,
       ...(next.sha256 ? [checkedParts, next.byteLength, ...key] : [])));
+  if (next.sha256 && staged) writes.push(...publishStagedExport(db, key, publishedKey, next, checkedParts, nowMs));
   await db.batch(writes);
-  const saved = await readDraftStatement(db, key).first();
-  return saved.state === 'READY' ? readyView(saved) : exportPending();
+  const saved = await dbFirst(db, `SELECT state,sha256,byte_length FROM estimation_revision_files WHERE ${fileKeyWhere}`, ...publishedKey);
+  return saved?.state === 'READY' ? readyView(saved) : exportPending();
 }
 
 export async function readAtlmRevisionFilePart(db, ownerId, { storageId, fileKind, partIndex }) {
   if (!EXPORT_KINDS.has(fileKind)) throw appError('VALIDATION_ERROR', 'Неизвестный вид файла ревизии.');
   checkPartIndex(partIndex);
-  const row = await dbFirst(db, `SELECT f.sha256,f.part_count,p.content_base64 FROM estimation_revision_files f
+  const row = await dbFirstInline(db, `SELECT f.sha256,f.part_count,p.content_base64 FROM estimation_revision_files f
     LEFT JOIN estimation_revision_file_parts p ON p.owner_id=f.owner_id AND p.storage_id=f.storage_id
       AND p.file_kind=f.file_kind AND p.part_index=?
     WHERE f.owner_id=? AND f.storage_id=? AND f.file_kind=? AND f.state='READY'`, partIndex, ownerId, storageId, fileKind);

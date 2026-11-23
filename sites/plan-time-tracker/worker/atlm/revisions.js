@@ -1,5 +1,5 @@
 import {
-  appError, canonical, dbAll, dbFirst, ensureOwner, hashCommandInput, isPlainRecord,
+  appError, canonical, dbAll, dbFirst, dbFirstInline, ensureOwner, hashCommandInput, isPlainRecord,
   isSnapshotDigest, messageFor, parseColumn,
 } from '../shared/index.js';
 import {
@@ -30,8 +30,10 @@ const VALIDATION_BATCH_ROWS = 32;
 const MIN_ROLLING_REGRESSION_ROWS = 2;
 const DOCUMENT_MAX_DEPTH = 32;
 const SNAPSHOT_CONTRACT = 'atlm-training-snapshot';
-const SNAPSHOT_EXPORT_FORMAT = 'snapshot-json-slices-v1';
 const SNAPSHOT_READ_BYTES = 2 * ATLM_PART_BYTES;
+const UTF8_BYTES_PER_CODE_POINT = 4;
+const JSON_ASCII_BYTES_PER_CODE_POINT = 12;
+const SNAPSHOT_READ_CHARACTERS = Math.floor(2 * SNAPSHOT_READ_BYTES / JSON_ASCII_BYTES_PER_CODE_POINT);
 const HEX_DIGITS = '0123456789ABCDEF';
 
 const id = { type: 'string', minLength: 1, maxLength: 128, pattern: '^[!-~]+$' };
@@ -223,7 +225,8 @@ function snapshotHeader(row) {
 
 async function readSnapshot(db, ownerId, snapshotId) {
   const row = await dbFirst(db,
-    'SELECT * FROM estimation_training_snapshots WHERE owner_id=? AND snapshot_id=?', ownerId, snapshotId);
+    `SELECT *,length(CAST('A' AS BLOB))=1 AS utf8_storage
+     FROM estimation_training_snapshots WHERE owner_id=? AND snapshot_id=?`, ownerId, snapshotId);
   if (!row) throw error('SNAPSHOT_NOT_FOUND', 404, { snapshotId });
   return row;
 }
@@ -461,28 +464,44 @@ function datasetExportReader(db, ownerId, datasetRevisionId, header, rowCount) {
   };
 }
 
-function snapshotExportReader(db, ownerId, snapshotId, header, rowCount) {
+const SNAPSHOT_ROW_JSON = `(CASE WHEN ordinal=0 THEN '' ELSE ',' END) ||
+  '{"rowId":' || json_quote(row_id) || ',"planId":' || json_quote(plan_id) ||
+  ',"rawEligibility":' || json_quote(raw_eligibility) || ',"rawReasons":' || raw_reasons_json ||
+  ',"source":' || source_json || ',"evidence":' || evidence_json || '}'`;
+
+async function readSnapshotSlice(db, key, offset, available, utf8Storage) {
+  // SQLite BLOB offsets use its database encoding. On UTF-16 databases use
+  // character offsets and encode each complete slice as UTF-8 in the Worker.
+  const limit = utf8Storage ? Math.min(available, SNAPSHOT_READ_BYTES)
+    : Math.min(Math.floor(available / UTF8_BYTES_PER_CODE_POINT), SNAPSHOT_READ_CHARACTERS);
+  if (limit === 0) return { bytes: new Uint8Array(0), done: false };
+  const slice = utf8Storage ? `hex(substr(CAST(${SNAPSHOT_ROW_JSON} AS BLOB), ?, ?))`
+    : `substr(${SNAPSHOT_ROW_JSON}, ?, ?)`;
+  const row = await dbFirstInline(db, `SELECT ${slice} AS chunk FROM estimation_training_snapshot_rows
+    WHERE owner_id=? AND snapshot_id=? AND ordinal=?`, offset + 1, limit + 1, ...key);
+  if (!row) throw error('SOURCE_UNAVAILABLE', 503, { reason: 'EXPORT_ROW_MISSING' });
+  if (!utf8Storage) {
+    const characters = Array.from(row.chunk);
+    const done = characters.length <= limit;
+    if (!done) characters.pop();
+    const { bytes } = sliceAtlmExportText(characters.join(''), 0, available);
+    return { bytes, done, nextOffset: offset + characters.length };
+  }
+  // Hex keeps a UTF-8 byte slice intact even across a character boundary.
+  const length = row.chunk.length / 2;
+  const bytes = new Uint8Array(Math.min(length, limit));
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = HEX_DIGITS.indexOf(row.chunk[2 * i]) * 16 + HEX_DIGITS.indexOf(row.chunk[2 * i + 1]);
+  }
+  return { bytes, done: length <= limit };
+}
+
+function snapshotExportReader(db, ownerId, snapshotId, header, rowCount, utf8Storage) {
   return async (index, offset, available) => {
     if (index === 0) return sliceAtlmExportText(JSON.stringify(header).slice(0, -1) + ',"rows":[', offset, available);
     if (index === rowCount + 1) return sliceAtlmExportText(']}', offset, available);
     if (index > rowCount + 1) return null;
-    const limit = Math.min(available, SNAPSHOT_READ_BYTES);
-    // The frozen JSON columns are valid JSON. Slice their UTF-8 bytes in SQLite
-    // and use hex so a split inside a character survives transport intact.
-    const row = await dbFirst(db, `SELECT hex(substr(CAST(
-      (CASE WHEN ordinal=0 THEN '' ELSE ',' END) ||
-      '{"rowId":' || json_quote(row_id) || ',"planId":' || json_quote(plan_id) ||
-      ',"rawEligibility":' || json_quote(raw_eligibility) || ',"rawReasons":' || raw_reasons_json ||
-      ',"source":' || source_json || ',"evidence":' || evidence_json || '}' AS BLOB), ?, ?)) AS chunk_hex
-      FROM estimation_training_snapshot_rows WHERE owner_id=? AND snapshot_id=? AND ordinal=?`,
-    offset + 1, limit + 1, ownerId, snapshotId, index - 1);
-    if (!row) throw error('SOURCE_UNAVAILABLE', 503, { reason: 'EXPORT_ROW_MISSING' });
-    const length = row.chunk_hex.length / 2;
-    const bytes = new Uint8Array(Math.min(length, limit));
-    for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = HEX_DIGITS.indexOf(row.chunk_hex[2 * i]) * 16 + HEX_DIGITS.indexOf(row.chunk_hex[2 * i + 1]);
-    }
-    return { bytes, done: length <= limit };
+    return readSnapshotSlice(db, [ownerId, snapshotId, index - 1], offset, available, utf8Storage);
   };
 }
 
@@ -508,7 +527,9 @@ async function readRevisionEntity(db, ownerId, kind, args, nowMs) {
     featureSchemaVersion: header.featureSchemaVersion,
   } : datasetExportHeader(row);
   const source = snapshot ? {
-    readSlice: snapshotExportReader(db, ownerId, entityId, exportHeader, row.row_count), format: SNAPSHOT_EXPORT_FORMAT,
+    // Separate the byte cursor from the older Worker, and share the ready file.
+    storageId: 'snapshot-slices-v1:' + entityId, publishedStorageId: entityId,
+    readSlice: snapshotExportReader(db, ownerId, entityId, exportHeader, row.row_count, row.utf8_storage === 1),
   } : {
     readChunk: datasetExportReader(db, ownerId, entityId, exportHeader, row.row_count),
   };

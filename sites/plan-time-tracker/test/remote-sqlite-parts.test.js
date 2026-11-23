@@ -63,6 +63,8 @@ test('remote SQLite reads immutable parts after a lost response and executes a w
   const parts = [...attempts];
   assert.equal((await db.prepare('SELECT 1 AS n').first()).n, 1);
   assert.deepEqual([...attempts], parts);
+  assert.equal((await db.firstInline('SELECT body FROM data')).body, written.body);
+  assert.deepEqual([...attempts], parts);
   corrupt = true;
   await assert.rejects(db.prepare('SELECT body FROM data').first(), /checksum/);
   assert.equal((await realFetch('http://127.0.0.1:' + port + '/_tracker-db/parts', {method:'POST'})).status, 403);

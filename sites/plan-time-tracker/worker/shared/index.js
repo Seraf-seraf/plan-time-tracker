@@ -1,4 +1,4 @@
-const TRACKER_VERSION = '0.9.2';
+const TRACKER_VERSION = '0.9.3';
 
 const BODY_LIMIT = 128 * 1024;
 
@@ -258,6 +258,11 @@ function dbFirst(db, sql, ...args) {
     .prepare(sql)
     .bind(...args)
     .first();
+}
+
+// Callers of this path must bound the response size in the query.
+function dbFirstInline(db, sql, ...args) {
+  return db.firstInline ? db.firstInline(sql, ...args) : dbFirst(db, sql, ...args);
 }
 
 async function dbAll(db, sql, ...args) {
@@ -550,6 +555,7 @@ export {
   checkTimeZone,
   dbAll,
   dbFirst,
+  dbFirstInline,
   ensureOwner,
   hashCommandInput,
   inclusiveDateRange,

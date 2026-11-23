@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { materializeAtlmRevisionFile } from '../worker/atlm/revision-files.js';
@@ -264,8 +265,16 @@ test('snapshot retries pending refresh, preserves failed rows, and remains froze
   await expectError(c, SNAPSHOT, { ...create, ownerId: OTHER }, 'VALIDATION_ERROR');
 });
 
-test('snapshot downloads large evidence under a database response limit and resumes unfinished exports', async (t) => {
-  const c = setup(t);
+async function verifySnapshotWithLargeEvidence(t, sqliteEncoding, legacyFinishesFirst) {
+  const directory = mkdtempSync(path.join(os.tmpdir(), 'snapshot-export-'));
+  const databasePath = path.join(directory, 'tracker.sqlite3');
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const empty = new DatabaseSync(databasePath);
+  empty.exec(`PRAGMA encoding='${sqliteEncoding}'; CREATE TABLE encoding_fixture(value TEXT)`);
+  empty.close();
+  const c = context(undefined, { databasePath });
+  t.after(() => c.close());
+  assert.equal(c.db.sqlite.prepare('PRAGMA encoding').get().encoding, sqliteEncoding);
   const plan = await completed(c, 60_000);
   await completed(c, 30_000);
   const detail = '🙂я'.repeat(100_000);
@@ -285,9 +294,10 @@ test('snapshot downloads large evidence under a database response limit and resu
   }));
   const chunks = [JSON.stringify(header).slice(0, -1) + ',"rows":[',
     ...rows.map((row, index) => (index ? ',' : '') + JSON.stringify(row)), ']}'];
-  const draft = await materializeAtlmRevisionFile(c.db, OWNER, {
+  const legacyDownload = () => materializeAtlmRevisionFile(c.db, OWNER, {
     storageId: snapshotId, fileKind: 'SNAPSHOT', readChunk: index => chunks[index] ?? null,
   }, c.now());
+  const draft = await legacyDownload();
   assert.equal(draft.state, 'MATERIALIZING');
   assert.ok(c.db.sqlite.prepare('SELECT checked_parts FROM estimation_revision_files WHERE storage_id=?')
     .get(snapshotId).checked_parts > 0);
@@ -317,12 +327,40 @@ test('snapshot downloads large evidence under a database response limit and resu
 
   const downloads = await Promise.all([0, 1].map(() => tool(c, SNAPSHOT, snapshotRead(snapshotId, 'download'))));
   assert.ok(downloads.every(result => result.state === 'MATERIALIZING'));
+  if (legacyFinishesFirst) {
+    const legacy = await legacyDownload();
+    assert.equal(legacy.state, 'READY');
+    const part = await tool(c, SNAPSHOT, snapshotRead(snapshotId, 'filePart', { partIndex: 0 }));
+    assert.equal(part.fileSha256, legacy.file.sha256);
+  }
   const { value, file } = await download(c, SNAPSHOT, { mode: 'read', snapshotId });
   assert.deepEqual(value, { ...header, rows });
+  assert.deepEqual((await legacyDownload()).file, file);
+  assert.deepEqual(c.db.sqlite.prepare('SELECT storage_id FROM estimation_revision_files WHERE file_kind=?')
+    .all('SNAPSHOT').map(row => row.storage_id), [snapshotId]);
   assert.ok(sourceReads > 1);
   const completedReads = sourceReads;
   assert.deepEqual((await tool(c, SNAPSHOT, snapshotRead(snapshotId, 'download'))).file, file);
   assert.equal(sourceReads, completedReads);
+}
+
+for (const encoding of ['UTF-8', 'UTF-16le']) {
+  test('snapshot downloads large ' + encoding + ' evidence independently of the legacy writer',
+    t => verifySnapshotWithLargeEvidence(t, encoding, encoding === 'UTF-8'));
+}
+
+test('snapshot serves the already published legacy manifest and bytes', async (t) => {
+  const c = setup(t);
+  const { snapshotId, capturedAt, sourceDataVersion, featureSchemaVersion } = await tool(c, SNAPSHOT, snapshotArgs());
+  const document = { schemaVersion: 1, contract: 'atlm-training-snapshot',
+    snapshotId, capturedAt, sourceDataVersion, featureSchemaVersion, rows: [] };
+  const text = JSON.stringify(document, null, 2);
+  const legacy = await materializeAtlmRevisionFile(c.db, OWNER, {
+    storageId: snapshotId, fileKind: 'SNAPSHOT', readChunk: index => index === 0 ? text : null,
+  }, c.now());
+  const { file, bytes } = await download(c, SNAPSHOT, { mode: 'read', snapshotId });
+  assert.deepEqual(file, legacy.file);
+  assert.equal(bytes.toString(), text);
 });
 
 test('snapshot checks its refresh boundary in the final batch and retains source and sample generations', async (t) => {
