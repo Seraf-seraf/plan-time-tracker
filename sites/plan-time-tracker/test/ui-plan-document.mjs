@@ -11,6 +11,10 @@ const { chromium } = await import(
 );
 const c = context();
 c.advance(Date.now() - c.now());
+if (process.env.SITE_WORKER_MODULE) {
+  const { createWorker } = await import(pathToFileURL(process.env.SITE_WORKER_MODULE).href);
+  c.worker = createWorker(c.now);
+}
 const artifactDir = resolve(
   process.env.UI_ACCEPTANCE_ARTIFACT_DIR || "/tmp/tracker-ui",
   "document",
@@ -105,6 +109,12 @@ try {
   await page.locator("#plans .plan-open").first().click();
   await page.locator(".step-status-form").first().waitFor();
   const first = page.locator(".document-step").first();
+  assert.deepEqual(
+    await first.getByLabel("Статус этапа").locator("option").evaluateAll(
+      (options) => options.map((option) => option.value),
+    ),
+    ["PENDING", "RUNNING", "BLOCKED", "DONE"],
+  );
   await first
     .getByLabel("Статус этапа", { exact: true })
     .selectOption("RUNNING");
@@ -127,13 +137,27 @@ try {
     statusPosts[1],
     "lost response retries the exact command",
   );
+  const second = page.locator(".document-step").nth(1);
+  const secondId = await second.getAttribute("data-step-id");
+  await ok(c, "SetStepStatus", { stepId: secondId, status: "FAILED" }, 1);
+  const refreshSteps = page.getByRole("button", { name: "Обновить этапы", exact: true });
+  await refreshSteps.click();
+  await second.getByText("Не выполнен", { exact: true }).waitFor();
+  const secondStatus = second.getByLabel("Статус этапа", { exact: true });
+  const saveSecond = second.getByRole("button", { name: "Сохранить статус", exact: true });
+  assert.equal(await secondStatus.inputValue(), "");
+  assert.equal(await secondStatus.locator('option[value="FAILED"]').count(), 0);
+  await saveSecond.click();
+  assert.equal(await secondStatus.evaluate((select) => select.validity.valueMissing), true);
+  assert.equal(posts.filter((post) => post.payload?.stepId === secondId).length, 0);
+  await secondStatus.selectOption("PENDING");
+  await saveSecond.click();
+  await second.locator(".tracker-card-status").filter({ hasText: "Ожидает" }).waitFor();
   // Draft belongs to this step and survives a server refresh.
   await first
     .getByLabel("Статус этапа", { exact: true })
     .selectOption("BLOCKED");
-  await page
-    .getByRole("button", { name: "Обновить этапы", exact: true })
-    .click();
+  await refreshSteps.click();
   await first.getByLabel("Статус этапа", { exact: true }).waitFor();
   assert.equal(
     await first.getByLabel("Статус этапа", { exact: true }).inputValue(),

@@ -380,7 +380,7 @@ const MCP_DESCRIPTIONS = Object.freeze({
   GetTrackerCapabilities: 'Прочитать возможности и ограничения трекера. Полная схема признаков, включая вложенные поля и допустимые значения, находится в assessments.atlm.agentTaskSchema.',
   GetPlanExecutionSnapshot: 'Прочитать план, его версию, текущие этапы и их версии, а также готовность к запуску и завершению.',
   GetCommandReceipt: 'Прочитать сохранённую квитанцию команды по commandId.',
-  SetStepStatus: 'Изменить статус этапа RUNNING-плана по версии этапа. RUNNING открывает интервал этапа, остальные статусы закрывают его.',
+  SetStepStatus: 'Изменить статус этапа RUNNING-плана по версии этапа. Выбирайте PENDING, RUNNING, BLOCKED или DONE. FAILED поддерживается для совместимости. RUNNING открывает интервал этапа, остальные статусы закрывают его.',
   CalculateAtlmEstimate: 'Предпросмотр прогноза полного активного времени PLANNED-плана по переданным признакам. Возвращает прогноз ATLM, историческую медиану или причину недоступности. Полная схема признаков доступна в GetTrackerInfo.',
   GetPlanEstimate: 'Прочитать прогноз и assessmentReadiness. Для PLANNED возвращает текущий расчёт по сохранённым признакам, после первого запуска возвращает исходный снимок.',
   RecordAssessment: 'Сохранить оценку с currentRequirementsDigest из GetTaskAssessment, переданным как expectedRequirementsDigest. Для ATLM передайте context.agentTask по схеме из GetTrackerInfo и predictionRequest. Для новой серии используйте expectedVersion=0, для ревизии передайте тот же assessmentId, текущий номер ревизии и reason.',

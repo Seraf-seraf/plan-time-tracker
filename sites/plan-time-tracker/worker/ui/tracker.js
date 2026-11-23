@@ -17,7 +17,29 @@ export const UI_TRACKER = String.raw`(()=> {
   async function command(type,payload,expectedVersion){const key=type+":"+(payload.planId||payload.stepId||payload.attemptId||"new"),scope=payload.stepId||payload.planId||null,retryVersion=expectedVersion!==undefined?retryVersions.get(key):undefined,effectiveVersion=Number.isSafeInteger(retryVersion)?Math.max(expectedVersion,retryVersion):expectedVersion,identity={payload,expectedVersion:effectiveVersion};let envelope=pendingCommands.get(key);if(envelope&&!rejectedCommands.has(key)&&!rejectedVersions.has(key)&&!terminalRejectedCommands.has(key)&&JSON.stringify(envelope.payload)===JSON.stringify(payload))identity.expectedVersion=envelope.expectedVersion;if(envelope&&terminalRejectedCommands.has(key)){envelope=null;pendingCommands.delete(key);terminalRejectedCommands.delete(key)}if(envelope&&rejectedCommands.has(key)&&JSON.stringify({payload:envelope.payload,expectedVersion:envelope.expectedVersion})!==JSON.stringify(identity)){envelope=null;pendingCommands.delete(key);rejectedCommands.delete(key)}if(envelope&&rejectedVersions.has(key)){envelope=null;pendingCommands.delete(key);rejectedVersions.delete(key)}if(envelope&&!rejectedCommands.has(key)&&JSON.stringify({payload:envelope.payload,expectedVersion:envelope.expectedVersion})!==JSON.stringify(identity)){const error=new Error("Исход предыдущей команды неизвестен. Сначала повторите её без изменения данных.");error.code="COMMAND_OUTCOME_UNKNOWN";throw error}if(!envelope){envelope={schemaVersion:1,commandId:uuid(),commandType:type,payload};if(identity.expectedVersion!==undefined)envelope.expectedVersion=identity.expectedVersion;pendingCommands.set(key,envelope)}try{const response=await api("/api/commands",{method:"POST",body:JSON.stringify(envelope)});if(response?.commandId!==envelope.commandId||response.outcome!=="OK"||typeof response.applied!=="boolean"||typeof response.replayed!=="boolean"||response.applied===response.replayed||!response.result||typeof response.result!=="object"||Array.isArray(response.result)||response.error){const error=new Error("Ответ команды не подтверждает её результат. Повторите запрос без изменения данных.");error.code="COMMAND_OUTCOME_UNKNOWN";throw error}pendingCommands.delete(key);rejectedCommands.delete(key);terminalRejectedCommands.delete(key);rejectedVersions.delete(key);retryVersions.delete(key);return response.result}catch(error){if(error.code==="VALIDATION_ERROR")rejectedCommands.add(key);else if(await hasMatchingFinalDomainRejection(envelope,error))terminalRejectedCommands.add(key);if(error.code==="VERSION_CONFLICT"&&scope){try{const currentVersion=await readCurrentVersion(payload);if(Number.isSafeInteger(currentVersion)){rejectedVersions.set(key,currentVersion);retryVersions.set(key,currentVersion);}}catch{}}throw error;}}
   function refreshAcceptedPlan(planId,successMessage){return new Promise((resolve,reject)=>window.dispatchEvent(new CustomEvent("plan-time-tracker:refresh-plan",{detail:{planId,successMessage,resolve,reject}})));}
   function inputField(labelText,options){const wrap=make("div",null,"field"),label=make("label",labelText),control=make(options&&options.tag||"input");control.type=options&&options.type||"text";if(options&&options.maxLength)control.maxLength=options.maxLength;if(options&&options.required)control.required=true;if(options&&options.placeholder)control.placeholder=options.placeholder;if(options&&options.value!==undefined)control.value=options.value;if(options&&options.rows)control.rows=options.rows;control.dataset.draftField=options&&options.key||labelText;const id="tracker-"+uuid();control.id=id;label.htmlFor=id;wrap.append(label,control);return {wrap,control};}
-  function selectField(labelText,values,selected){const wrap=make("div",null,"field"),label=make("label",labelText),control=make("select"),id="tracker-"+uuid();control.dataset.draftField=labelText;control.id=id;label.htmlFor=id;values.forEach((value)=>{const option=make("option",statusNames[value]||value);option.value=value;option.selected=value===selected;control.append(option);});wrap.append(label,control);return {wrap,control};}
+  function selectField(labelText,values,selected){
+    const wrap=make("div",null,"field"),label=make("label",labelText),control=make("select"),id="tracker-"+uuid();
+    control.dataset.draftField=labelText;
+    control.id=id;
+    control.required=true;
+    label.htmlFor=id;
+    if(!values.includes(selected)){
+      const placeholder=make("option","Выберите статус");
+      placeholder.value="";
+      placeholder.disabled=true;
+      placeholder.hidden=true;
+      placeholder.selected=true;
+      control.append(placeholder);
+    }
+    for(const value of values){
+      const option=make("option",statusNames[value]);
+      option.value=value;
+      option.selected=value===selected;
+      control.append(option);
+    }
+    wrap.append(label,control);
+    return {wrap,control};
+  }
   const viewState=new Map();
   function stateFor(planId){if(!viewState.has(planId))viewState.set(planId,{drafts:new Map(),cards:new Map(),details:new Map(),errors:new Map(),sequence:0});return viewState.get(planId);}
   function fieldKey(control){return control.dataset.draftField||control.getAttribute("aria-label")||control.name;}
@@ -80,7 +102,29 @@ export const UI_TRACKER = String.raw`(()=> {
     card.dataset.stepId=step.step_id;body.id="tracker-card-"+step.step_id;toggle.type="button";toggle.dataset.checkpointToggle=step.step_id;toggle.setAttribute("aria-controls",body.id);indicator.setAttribute("aria-hidden","true");toggle.append(title,statusLabel,indicator);heading.append(toggle);card.append(heading,body);
     const state=stateFor(planId),setExpanded=expanded=>{state.cards.set(step.step_id,expanded);toggle.setAttribute("aria-expanded",String(expanded));body.hidden=!expanded;indicator.textContent=expanded?"▾":"▸";};toggle.setExpanded=setExpanded;setExpanded(state.cards.get(step.step_id)??true);toggle.addEventListener("click",()=>setExpanded(toggle.getAttribute("aria-expanded")!=="true"));
     if(plan.deletedAt==null&&plan.status==="RUNNING"){
-      const form=draftForm(make("form",null,"tracker-form step-status-form"),"status:"+step.step_id),field=selectField("Статус этапа",["PENDING","RUNNING","BLOCKED","FAILED","DONE"],step.status),save=make("button","Сохранить статус"),errorText=make("p",null,"form-error");for(const option of field.control.options)option.textContent=statusNames[option.value];save.type="submit";errorText.setAttribute("role","alert");form.append(field.wrap,save,errorText);form.addEventListener("submit",async event=>{event.preventDefault();const submission=snapshotDraft(form,planId);save.disabled=true;try{await command("SetStepStatus",{stepId:step.step_id,status:field.control.value},step.version);clearDraft(submission);pendingSuccessFeedback="Статус этапа сохранён.";pendingSuccessPlanId=planId;await reload();}catch(error){setMessage(errorText,(error.code||"ERROR")+": "+error.message,true);}finally{save.disabled=false;}});body.append(form);
+      const form=draftForm(make("form",null,"tracker-form step-status-form"),"status:"+step.step_id);
+      const field=selectField("Статус этапа",["PENDING","RUNNING","BLOCKED","DONE"],step.status);
+      const save=make("button","Сохранить статус"),errorText=make("p",null,"form-error");
+      save.type="submit";
+      errorText.setAttribute("role","alert");
+      form.append(field.wrap,save,errorText);
+      form.addEventListener("submit",async event=>{
+        event.preventDefault();
+        const submission=snapshotDraft(form,planId);
+        save.disabled=true;
+        try{
+          await command("SetStepStatus",{stepId:step.step_id,status:field.control.value},step.version);
+          clearDraft(submission);
+          pendingSuccessFeedback="Статус этапа сохранён.";
+          pendingSuccessPlanId=planId;
+          await reload();
+        }catch(error){
+          setMessage(errorText,(error.code||"ERROR")+": "+error.message,true);
+        }finally{
+          save.disabled=false;
+        }
+      });
+      body.append(form);
     }
     // Skip the original stage heading because the disclosure already carries it.
     body.append(markdown(typeof plan.planText==="string"?step.content.replace(/^.*(?:\r?\n|$)/,""):step.content));restoreDrafts(card);return card;

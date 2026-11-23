@@ -22,16 +22,19 @@ test('the standalone and packaged tracker skills describe the same workflow', ()
   assert.equal(embedded, track.replace('name: track-plan\n', 'name: plan-time-tracker\n'));
 });
 
-test('the tracker skill pauses only after it confirms its own BLOCKED command', () => {
+test('the tracker skill pauses when its confirmed BLOCKED command stops the whole plan', () => {
   const section = track.match(/^### Пауза после BLOCKED\n\n([\s\S]*?)(?=^## )/m)?.[1];
   assert.ok(section, 'the BLOCKED workflow must have explicit instructions');
   assert.match(section, /SetStepStatus[^\n]+BLOCKED[^\n]+верси[а-я]+ этапа/u);
-  assert.match(section, /Если ответ потерялся, вызовите `GetCommandResult` с тем же `commandId` или повторите исходный запрос без изменений/u);
-  assert.match(section, /`PausePlan` только после подтверждения, что `SetStepStatus` записал `BLOCKED`/u);
-  assert.match(section, /GetPlanProgress[^\n]+того же плана[^\n]+PAUSED[^\n]+RUNNING[^\n]+PausePlan[^\n]+новым UUID/u);
-  assert.match(section, /VERSION_CONFLICT[^\n]+BLOCKED[^\n]+RUNNING/u);
-  assert.match(section, /PausePlan` не удался[^\n]+фактические статусы/u);
-  assert.match(section, /правило не применяется[^\n]+FAILED[^\n]+DONE[^\n]+PENDING/u);
+  assert.match(section, /`GetCommandResult` с тем же `commandId` или повторите исходный запрос без изменений/u);
+  assert.match(section, /`result` квитанции со статусом `FINAL`[^\n]+`planId`, `stepId` и `status:'BLOCKED'`/u);
+  assert.match(section, /После подтверждения вызовите `GetPlanProgress` для того же плана/u);
+  assert.match(section, /есть работа, которую можно продолжить, оставьте `RUNNING`/u);
+  assert.match(section, /ваша блокировка остановила весь план[^\n]+BLOCKED[^\n]+на подтверждённой версии[^\n]+RUNNING[^\n]+PausePlan[^\n]+новым UUID[^\n]+payload:\{planId,reason\}/u);
+  assert.match(section, /VERSION_CONFLICT[^\n]+заново проверьте условия шага 3[^\n]+новым UUID/u);
+  assert.match(section, /При отказе сообщите фактические статусы и причину/u);
+  assert.deepEqual([...track.matchAll(/^- (PENDING|RUNNING|BLOCKED|FAILED|DONE) —/gmu)].map((match) => match[1]),
+    ['PENDING', 'RUNNING', 'BLOCKED', 'DONE']);
 });
 
 test('the MCP reference matches the public tool inventory and the advertised task schema', async () => {
