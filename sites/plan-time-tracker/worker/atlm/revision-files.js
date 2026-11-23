@@ -1,4 +1,4 @@
-import { appError, dbAll, dbFirst, dbFirstInline } from '../shared/index.js';
+import { appError, dbAll, dbFirst } from '../shared/index.js';
 
 export const ATLM_PART_BYTES = 49_152;
 export const ATLM_MAX_UPLOAD_BYTES = 16 * 1024 * 1024;
@@ -355,7 +355,7 @@ function readyView(row) {
 function readExportDraft(db, key, publishedStorageId) {
   if (publishedStorageId === undefined) return readDraftStatement(db, key).first();
   const [ownerId, storageId, fileKind] = key;
-  return dbFirstInline(db, `SELECT * FROM estimation_revision_files
+  return dbFirst(db, `SELECT * FROM estimation_revision_files
     WHERE owner_id=? AND file_kind=? AND (storage_id=? OR (storage_id=? AND state='READY'))
     ORDER BY (storage_id=?) DESC LIMIT 1`, ownerId, fileKind, storageId, publishedStorageId, publishedStorageId);
 }
@@ -486,7 +486,7 @@ export async function materializeAtlmRevisionFile(db, ownerId, { storageId, publ
 export async function readAtlmRevisionFilePart(db, ownerId, { storageId, fileKind, partIndex }) {
   if (!EXPORT_KINDS.has(fileKind)) throw appError('VALIDATION_ERROR', 'Неизвестный вид файла ревизии.');
   checkPartIndex(partIndex);
-  const row = await dbFirstInline(db, `SELECT f.sha256,f.part_count,p.content_base64 FROM estimation_revision_files f
+  const row = await dbFirst(db, `SELECT f.sha256,f.part_count,p.content_base64 FROM estimation_revision_files f
     LEFT JOIN estimation_revision_file_parts p ON p.owner_id=f.owner_id AND p.storage_id=f.storage_id
       AND p.file_kind=f.file_kind AND p.part_index=?
     WHERE f.owner_id=? AND f.storage_id=? AND f.file_kind=? AND f.state='READY'`, partIndex, ownerId, storageId, fileKind);

@@ -5,6 +5,7 @@ const PART_BYTES = 16 * 1024;
 const MAX_TRANSFER_BYTES = 32 * 1024 * 1024;
 const PARALLEL_PARTS = 4;
 const PART_TIMEOUT_MS = 6000;
+const PART_RELEASE_TIMEOUT_MS = 1500;
 
 async function readPart(endpoint, headers, signal, id, index, length) {
   for (let attempt = 0; ; attempt++) {
@@ -75,6 +76,18 @@ async function readTransfer(transfer, endpoint, headers, signal) {
   const stream = new Blob([packed]).stream().pipeThrough(new DecompressionStream("gzip"));
   const result = await new Response(stream).json();
   signal.throwIfAborted();
+  if (transfer.releasable === true) {
+    // Delivery has already been verified. A failed acknowledgement expires
+    // naturally and must not turn a completed SQL statement into a failure.
+    try {
+      const acknowledged = await fetch(partsEndpoint, {
+        method: "POST", redirect: "manual", headers,
+        signal: AbortSignal.any([signal, AbortSignal.timeout(PART_RELEASE_TIMEOUT_MS)]),
+        body: JSON.stringify({ id, release: true }),
+      });
+      await acknowledged.body?.cancel();
+    } catch { /* The bridge will expire this result. */ }
+  }
   return result;
 }
 
@@ -101,17 +114,12 @@ export function configuredDatabase(env) {
   return {
     prepare(sql) { return new RemoteStatement(this, sql); },
     batch(statements) { return this.execute(statements, "batch"); },
-    async firstInline(sql, ...args) {
-      const [result] = await this.execute([this.prepare(sql).bind(...args)], "first", false);
-      return result.results[0] ?? null;
-    },
-    async execute(statements, mode, allowParts = true) {
+    async execute(statements, mode) {
       if (statements.some(s => s.database !== this)) throw new Error("Mixed database batch");
       const signal = AbortSignal.timeout(timeout);
       const headers = { authorization: "Bearer " + env.DB_TOKEN, "content-type": "application/json" };
       const response = await fetch(endpoint, {
-        method: "POST", redirect: "manual", signal,
-        headers: allowParts ? { ...headers, "X-Result-Parts": "1" } : headers,
+        method: "POST", redirect: "manual", signal, headers: { ...headers, "X-Result-Parts": "1" },
         body: JSON.stringify({ mode, statements: statements.map(({ sql, args }) => ({ sql, args })) }),
       });
       if (!response.ok) throw new Error("SQLite service unavailable: HTTP " + response.status);

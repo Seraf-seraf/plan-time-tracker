@@ -89,6 +89,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(413)
             request = json.loads(self.rfile.read(length))
             if is_part:
+                if isinstance(request, dict) and request.get("release") is True:
+                    PARTS.release(request["id"])
+                    return self.respond(204, b"")
                 index = request["index"]
                 try:
                     body = PARTS.part(request["id"], index)

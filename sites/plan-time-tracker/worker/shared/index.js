@@ -260,11 +260,6 @@ function dbFirst(db, sql, ...args) {
     .first();
 }
 
-// Callers of this path must bound the response size in the query.
-function dbFirstInline(db, sql, ...args) {
-  return db.firstInline ? db.firstInline(sql, ...args) : dbFirst(db, sql, ...args);
-}
-
 async function dbAll(db, sql, ...args) {
   const result = await db
     .prepare(sql)
@@ -555,7 +550,6 @@ export {
   checkTimeZone,
   dbAll,
   dbFirst,
-  dbFirstInline,
   ensureOwner,
   hashCommandInput,
   inclusiveDateRange,

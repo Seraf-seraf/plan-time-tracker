@@ -13,7 +13,8 @@ test('remote SQLite reads immutable parts after a lost response and executes a w
   const dir = await mkdtemp(join(tmpdir(), 'tracker-parts-'));
   const token = 'integration-test-only'.repeat(2);
   const proc = spawn('python3', ['-B', '-u', '-c', [
-    'import server, sqlite3',
+    'import result_parts, server, sqlite3',
+    'result_parts.MAX_RESULTS = 1',
     'db = sqlite3.connect(server.DATABASE)',
     'db.execute("CREATE TABLE data(body TEXT)")',
     'db.close()',
@@ -36,6 +37,7 @@ test('remote SQLite reads immutable parts after a lost response and executes a w
   const attempts = new Map();
   let statements = 0;
   let corrupt = false;
+  let released = 0;
   t.mock.method(globalThis, 'fetch', async (url, options) => {
     const path = new URL(url).pathname;
     const local = 'http://127.0.0.1:' + port + path;
@@ -43,7 +45,15 @@ test('remote SQLite reads immutable parts after a lost response and executes a w
       statements++;
       return realFetch(local, options);
     }
-    const {index} = JSON.parse(options.body);
+    const {id, index, release} = JSON.parse(options.body);
+    if (release) {
+      const response = await realFetch(local, options);
+      assert.equal(response.status, 204);
+      const consumed = await realFetch(local, { ...options, body: JSON.stringify({ id, index: 0 }) });
+      assert.equal(consumed.status, 410);
+      released++;
+      return response;
+    }
     attempts.set(index, (attempts.get(index) ?? 0) + 1);
     const response = await realFetch(local, options);
     const bytes = new Uint8Array(await response.arrayBuffer());
@@ -57,15 +67,16 @@ test('remote SQLite reads immutable parts after a lost response and executes a w
   assert.equal(written.body.length, 262144);
   assert.equal(statements, 1);
   assert.equal(attempts.get(2), 2);
+  assert.equal(released, 1);
   const row = await db.prepare('SELECT count(*) AS n, body FROM data').first();
   assert.equal(row.n, 1);
   assert.equal(row.body, written.body);
+  assert.equal(released, 2);
   const parts = [...attempts];
   assert.equal((await db.prepare('SELECT 1 AS n').first()).n, 1);
   assert.deepEqual([...attempts], parts);
-  assert.equal((await db.firstInline('SELECT body FROM data')).body, written.body);
-  assert.deepEqual([...attempts], parts);
   corrupt = true;
   await assert.rejects(db.prepare('SELECT body FROM data').first(), /checksum/);
+  assert.equal(released, 2);
   assert.equal((await realFetch('http://127.0.0.1:' + port + '/_tracker-db/parts', {method:'POST'})).status, 403);
 });

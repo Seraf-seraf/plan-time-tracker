@@ -1,5 +1,5 @@
 import {
-  appError, canonical, dbAll, dbFirst, dbFirstInline, ensureOwner, hashCommandInput, isPlainRecord,
+  appError, canonical, dbAll, dbFirst, ensureOwner, hashCommandInput, isPlainRecord,
   isSnapshotDigest, messageFor, parseColumn,
 } from '../shared/index.js';
 import {
@@ -477,7 +477,7 @@ async function readSnapshotSlice(db, key, offset, available, utf8Storage) {
   if (limit === 0) return { bytes: new Uint8Array(0), done: false };
   const slice = utf8Storage ? `hex(substr(CAST(${SNAPSHOT_ROW_JSON} AS BLOB), ?, ?))`
     : `substr(${SNAPSHOT_ROW_JSON}, ?, ?)`;
-  const row = await dbFirstInline(db, `SELECT ${slice} AS chunk FROM estimation_training_snapshot_rows
+  const row = await dbFirst(db, `SELECT ${slice} AS chunk FROM estimation_training_snapshot_rows
     WHERE owner_id=? AND snapshot_id=? AND ordinal=?`, offset + 1, limit + 1, ...key);
   if (!row) throw error('SOURCE_UNAVAILABLE', 503, { reason: 'EXPORT_ROW_MISSING' });
   if (!utf8Storage) {

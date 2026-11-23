@@ -46,7 +46,15 @@ class ResultParts:
                 raise CacheFull
             self.entries[key] = (self.clock() + TTL_SECONDS, packed)
             self.used += len(packed)
-        return {"transfer": {"id": key, "bytes": len(packed), "sha256": digest}}
+        return {"transfer": {"id": key, "bytes": len(packed), "sha256": digest, "releasable": True}}
+
+    def release(self, key):
+        if not isinstance(key, str):
+            raise ValueError("Invalid result id")
+        with self.lock:
+            entry = self.entries.pop(key, None)
+            if entry is not None:
+                self.used -= len(entry[1])
 
     def part(self, key, index):
         if not isinstance(key, str) or type(index) is not int or index < 0:
