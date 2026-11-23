@@ -21,6 +21,8 @@ import {
 } from '../shared/index.js';
 import { ATLM_TOOL_SCHEMAS } from '../atlm/sample.js';
 import { executeAtlmTool } from '../atlm/forecast.js';
+import { readAtlmIssuedHistory, readAtlmModelEvidenceCases, readAtlmModelRevisions } from '../atlm/model-evidence.js';
+import { ATLM_REVISION_LIMITS, ATLM_REVISION_TOOL_SCHEMAS, executeAtlmRevisionTool } from '../atlm/revisions.js';
 import { scheduleAtlmSampleRefresh } from '../atlm/sample-refresh.js';
 import {
   MAX_PLAN_PAGE_SIZE,
@@ -106,6 +108,32 @@ function publicView(value) {
   return result;
 }
 
+function atlmQuery(url, allowed, required = []) {
+  const args = {};
+  for (const [key, value] of url.searchParams) {
+    if (!allowed.includes(key) || Object.hasOwn(args, key) || !value || value.length > 512)
+      throw appError('VALIDATION_ERROR', 'Недопустимые параметры запроса к реестру моделей.');
+    if (key === 'limit' && !/^[1-9][0-9]?$/.test(value))
+      throw appError('VALIDATION_ERROR', 'Размер страницы должен быть от 1 до 50.');
+    args[key] = key === 'limit' ? Number(value) : value;
+  }
+  if (required.some(key => !Object.hasOwn(args, key)))
+    throw appError('VALIDATION_ERROR', 'Укажите обязательные параметры запроса к реестру моделей.');
+  return args;
+}
+
+function modelRevisionIdFromPath(raw) {
+  let id;
+  try {
+    id = decodeURIComponent(raw);
+  } catch {
+    throw appError('VALIDATION_ERROR', 'Недопустимый идентификатор ревизии.');
+  }
+  if (!/^[!-~]{1,128}$/.test(id))
+    throw appError('VALIDATION_ERROR', 'Недопустимый идентификатор ревизии.');
+  return id;
+}
+
 async function apiRoute(request, env, url, channel, now, clock = () => now, ctx) {
   validateOrigin(request);
   const identity = requireOwner(request);
@@ -151,6 +179,32 @@ async function apiRoute(request, env, url, channel, now, clock = () => now, ctx)
 
   if (request.method === 'GET' && url.pathname === '/api/tracker/capabilities')
     return json(publicToolReferences(await readTrackerCapabilities(env.DB, identity.ownerId)));
+  if (request.method === 'GET' && url.pathname === '/api/tracker/model-revisions') {
+    const view = url.searchParams.get('view');
+    if (view === 'issued-history') {
+      const args = atlmQuery(url, ['view', 'from', 'to', 'timeZone', 'cursor', 'limit'], ['from', 'to', 'timeZone']);
+      return json(await readAtlmIssuedHistory(env.DB, identity.ownerId, args, now));
+    }
+    if (view === 'detail') {
+      const args = atlmQuery(url, ['view', 'modelRevisionId'], ['modelRevisionId']);
+      if (!/^[!-~]{1,128}$/.test(args.modelRevisionId))
+        throw appError('VALIDATION_ERROR', 'Недопустимый идентификатор ревизии.');
+      return json(await readAtlmModelRevisions(env.DB, identity.ownerId, args, now));
+    }
+    if (view === 'list' || view === 'activations') {
+      const args = atlmQuery(url, ['view', 'cursor', 'limit']);
+      return json(await readAtlmModelRevisions(env.DB, identity.ownerId, args, now));
+    }
+    throw appError('VALIDATION_ERROR', 'Неизвестное представление реестра моделей.');
+  }
+  const evidenceMatch = url.pathname.match(/^\/api\/tracker\/model-revisions\/([^/]+)\/evidence\/cases$/);
+  if (request.method === 'GET' && evidenceMatch) {
+    const args = atlmQuery(url, ['source', 'evidenceId', 'cursor', 'limit'], ['source', 'evidenceId']);
+    if (!['issued', 'evaluation'].includes(args.source))
+      throw appError('VALIDATION_ERROR', 'Неизвестный источник отчёта.');
+    const id = modelRevisionIdFromPath(evidenceMatch[1]);
+    return json(await readAtlmModelEvidenceCases(env.DB, identity.ownerId, id, args, now));
+  }
   if (request.method === 'POST' && url.pathname === '/api/tracker/assessment')
     return json(await readAssessment(env.DB, identity.ownerId, await bodyJson(request), now));
   if (request.method === 'POST' && url.pathname === '/api/tracker/atlm-estimate')
@@ -281,6 +335,7 @@ const TOOL_NAMES = [
   'GetTimeReport',
   ...TRACKER_READ_TOOLS,
   ...TRACKER_COMMANDS,
+  ...Object.keys(ATLM_REVISION_TOOL_SCHEMAS),
 ];
 
 const MCP_PUBLIC_NAMES = Object.freeze({
@@ -332,12 +387,29 @@ const MCP_DESCRIPTIONS = Object.freeze({
   GetAssessment: 'Прочитать текущие требования и currentRequirementsDigest по planId и необязательному stepId. Для чтения сохранённой ревизии передайте planId и assessmentId, при необходимости укажите revision.',
   GetEstimationHistory: 'Прочитать оценки и фактическое время в миллисекундах по выбранным планам и этапам. Время в этом ответе относится к родительским планам. Для следующей страницы передайте те же asOf и throughSequence, а nextAfterSequence передайте как afterSequence.',
   GetTimeReport: 'Прочитать фактическое время за период в миллисекундах. totalActiveMs и activeByDay объединяют пересекающиеся интервалы, sumPlanActiveMs суммирует время по планам.',
+  CreateTrainingSnapshot: 'Зафиксировать источники задач или прочитать неизменяемый снимок. Для выгрузки дождитесь READY и читайте части по partIndex.',
+  SaveDatasetRevision: 'Сохранить разметку всех строк снимка. Выполните prepare, передайте недостающие части через putPart и опубликуйте ревизию через commit с тем же commandId.',
+  GetDatasetRevision: 'Прочитать сводку, строки или файл ревизии набора. Для повторного чтения используйте тот же datasetRevisionId.',
+  RegisterModelRevision: 'Зарегистрировать артефакт локального обучения и его отчёт через prepare, putPart и commit. Для начала использования требуется отдельная активация.',
+  ListModelRevisions: 'Прочитать список ревизий, детали, историю активаций или части файла. Продолжайте чтение по nextCursor.',
+  ActivateModelRevision: 'Назначить сохранённую ревизию для новых прогнозов по ожидаемому указателю и версии активации. Для экспериментальной ревизии передайте явное подтверждение.',
 });
 
 function mcpTools() {
   const writeNames = new Set([...WRITE_COMMANDS, ...TRACKER_COMMANDS]);
   return TOOL_NAMES.map((name) => {
     let inputSchema = { type: 'object', additionalProperties: false };
+    if (Object.hasOwn(ATLM_REVISION_TOOL_SCHEMAS, name))
+      return {
+        name,
+        inputSchema: ATLM_REVISION_TOOL_SCHEMAS[name],
+        annotations: {
+          readOnlyHint: ['GetDatasetRevision', 'ListModelRevisions'].includes(name),
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+      };
     if (Object.hasOwn(ATLM_TOOL_SCHEMAS, name))
       return {
         name,
@@ -632,6 +704,7 @@ async function mcpRoute(request, env, now, ctx, clock = () => now) {
   const publicName = rpc.params && rpc.params.name;
   const name = MCP_INTERNAL_NAMES[publicName] || publicName;
   const args = (rpc.params && rpc.params.arguments) || {};
+  const isRevisionTool = Object.hasOwn(ATLM_REVISION_TOOL_SCHEMAS, name);
   try {
     if (!TOOL_NAMES.includes(name))
       throw appError('FEATURE_REMOVED', 'Инструмент недоступен в текущем контракте.', 410);
@@ -642,7 +715,9 @@ async function mcpRoute(request, env, now, ctx, clock = () => now) {
       await ensureOwner(env.DB, identity, now);
     }
     let result;
-    if (Object.hasOwn(ATLM_TOOL_SCHEMAS, name))
+    if (isRevisionTool)
+      result = await executeAtlmRevisionTool(env.DB, identity, name, rpc.params?.arguments, now, clock);
+    else if (Object.hasOwn(ATLM_TOOL_SCHEMAS, name))
       result = await executeAtlmTool(
         env.DB,
         identity.ownerId,
@@ -672,12 +747,21 @@ async function mcpRoute(request, env, now, ctx, clock = () => now) {
       if (result.applied && (WRITE_COMMANDS.has(name) || name === 'SetStepStatus'))
         scheduleAtlmSampleRefresh(env.DB, identity.ownerId, now, ctx, clock);
     } else throw appError('VALIDATION_ERROR', 'Неизвестный MCP tool.');
+    const structuredContent = isRevisionTool ? result : publicView(result);
+    let text;
+    if (isRevisionTool && args.view === 'filePart') {
+      text = 'Часть файла прочитана.';
+    } else {
+      text = JSON.stringify(structuredContent);
+      if (isRevisionTool && new TextEncoder().encode(text).length > ATLM_REVISION_LIMITS.maxCompactResponseBytes)
+        throw appError('SOURCE_UNAVAILABLE', 'Ответ реестра превысил допустимый размер.', 503, { retryable: false });
+    }
     return json({
       jsonrpc: '2.0',
       id: id,
       result: {
-        content: [{ type: 'text', text: JSON.stringify(publicView(result)) }],
-        structuredContent: publicView(result),
+        content: [{ type: 'text', text }],
+        structuredContent,
       },
     });
   } catch (error) {

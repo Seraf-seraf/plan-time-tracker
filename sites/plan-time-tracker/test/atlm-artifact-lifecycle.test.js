@@ -1,137 +1,171 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import { pathToFileURL } from "node:url";
-import { resolve } from "node:path";
-import { context, call, ok, mcp, plannedAtlm, completeAtlm, atlmAssessment, taskV4, PLAN } from "./fixtures/tracker-db.mjs";
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { pathToFileURL } from 'node:url';
+import { resolve } from 'node:path';
+import { fitAtlm, normalizeAgentTask } from '../worker/atlm/model.js';
+import { context, call, ok, mcp, plannedAtlm, completeAtlm, atlmAssessment, taskV4, OWNER, PLAN } from './fixtures/tracker-db.mjs';
 
-const workerPath = process.env.SITE_WORKER_MODULE || new URL("../dist/server/index.js", import.meta.url).pathname;
+const workerPath = process.env.SITE_WORKER_MODULE || new URL('../dist/server/index.js', import.meta.url).pathname;
 
-// This is a public-protocol acceptance test: no synthetic models, samples or jobs
-// are inserted into SQL. The only training inputs are completed tracker plans.
-test("packaged Worker learns automatically from completed plans and freezes the issued forecast", async () => {
+async function useBuiltWorker(c, selector) {
+  const built = await import(pathToFileURL(resolve(workerPath)).href + '?' + selector);
+  const runtime = built.createWorker(c.now);
+  const tasks = [];
+  let scheduled = 0;
+  c.worker = { async fetch(request, env) {
+    const response = await runtime.fetch(request, env, { waitUntil(promise) {
+      scheduled++;
+      tasks.push(Promise.resolve(promise));
+    } });
+    for (let pass = 0; tasks.length; pass++) {
+      assert.ok(pass < 50, 'background work finishes within bounded passes');
+      await Promise.all(tasks.splice(0));
+    }
+    return response;
+  } };
+  return { scheduled: () => scheduled };
+}
+
+async function tool(c, name, args) {
+  const response = await mcp(c, name, args);
+  assert.equal(response.status, 200, JSON.stringify(response.value));
+  assert.equal(response.value.result?.isError, undefined, JSON.stringify(response.value));
+  assert.ok(response.value.result?.structuredContent);
+  return response.value.result.structuredContent;
+}
+
+async function completeTrainingExample(c, planId, task, duration) {
+  const plan = await plannedAtlm(c, planId, task);
+  const start = c.now();
+  await completeAtlm(c, plan, duration);
+  const sample = c.db.sqlite.prepare('SELECT max(sequence) AS sequence FROM estimation_samples WHERE owner_id=? AND plan_id=?')
+    .get(OWNER, planId);
+  const example = { planId, sampleId: String(sample.sequence), capturedAt: start, sourceAvailableAt: c.now(),
+    features: normalizeAgentTask(task).features, actualMs: duration };
+  c.advance(1);
+  return example;
+}
+
+async function registerFixtureAndActivate(c, { modelRevisionId, modelVersion, examples, expectedActiveModelRevisionId = null,
+  expectedActivationVersion = 0 }) {
+  const fitted = await fitAtlm(examples);
+  assert.equal(fitted.status, 'AVAILABLE', JSON.stringify(fitted));
+  const artifact = fitted.artifact;
+  const db = c.db.sqlite;
+  db.prepare(`INSERT INTO estimation_model_revisions(owner_id,model_revision_id,model_version,origin,
+    method_version,feature_version,registered_at,imported_at,artifact_json,manifest_json,dataset_digest,provenance_json,
+    fit_count,source_count,train_cutoff,supported) VALUES(?,?,?,'IMPORTED',?,?,?,?,?,?,?,'{}',?,?,?,1)`)
+    .run(OWNER, modelRevisionId, modelVersion, artifact.method.version, artifact.featureSchemaVersion, c.now(),
+      c.now(), JSON.stringify(artifact), JSON.stringify(artifact.manifest), artifact.datasetDigest, artifact.n, examples.length,
+      artifact.trainCutoff);
+  const source = db.prepare(`INSERT INTO estimation_model_revision_sources(owner_id,model_revision_id,plan_id,source_generation,ordinal)
+    SELECT owner_id,?,plan_id,generation,? FROM estimation_jobs WHERE owner_id=? AND plan_id=?`);
+  for (const [index, example] of examples.entries()) source.run(modelRevisionId, index, OWNER, example.planId);
+  const activation = await tool(c, 'ActivateModelRevision', { schemaVersion: 1, commandId: crypto.randomUUID(),
+    modelRevisionId, expectedActiveModelRevisionId, expectedActivationVersion, reason: 'Synthetic packaged Worker fixture',
+    acceptExperimental: true });
+  assert.equal(activation.activeModelRevisionId, modelRevisionId);
+  assert.equal(activation.activationVersion, expectedActivationVersion + 1);
+  return artifact;
+}
+
+const registry = c => tool(c, 'ListModelRevisions', { schemaVersion: 1, view: 'list' });
+const estimate = (c, planId) => tool(c, 'GetSavedEstimate', { planId });
+
+test('packaged Worker accumulates samples, requires explicit activation and preserves the first-start forecast', async () => {
   const c = context();
   try {
-    const built = await import(pathToFileURL(resolve(workerPath)).href + "?atlm-public-lifecycle");
-    const runtime = built.createWorker(c.now);
-    const background = [];
-    let scheduled = 0;
-    c.worker = { async fetch(request, env) {
-      const response = await runtime.fetch(request, env, { waitUntil(promise) {
-        scheduled++;
-        background.push(Promise.resolve(promise));
-      } });
-      // Deterministically flush actual waitUntil work, without sleeps or calling
-      // the training implementation directly from this test.
-      for (let pass = 0; background.length; pass++) {
-        assert.ok(pass < 50, "background work must finish in bounded passes");
-        await Promise.all(background.splice(0));
-      }
-      return response;
-    } };
+    const background = await useBuiltWorker(c, 'atlm-public-lifecycle');
+    const before = await registry(c);
+    assert.equal(before.activeRevision, null);
+    assert.equal(before.dataSummary.currentEligibleCount, 0);
 
-    const readTool = async (name, args = {}) => {
-      const response = await mcp(c, name, args);
-      assert.equal(response.status, 200, JSON.stringify(response.value));
-      assert.equal(response.value.result?.isError, undefined, JSON.stringify(response.value));
-      assert.ok(response.value.result?.structuredContent, name + " returns structured data");
-      return response.value.result.structuredContent;
-    };
-    const before = await readTool("GetEstimationModelStatus");
-    assert.equal(before.activeModel, null);
-    assert.equal(before.eligibleSampleCount, 0);
+    const examples = [];
+    for (let i = 0; i < 10; i++)
+      examples.push(await completeTrainingExample(c, i === 0 ? PLAN : crypto.randomUUID(), taskV4(), 1000));
+    const accumulated = await registry(c);
+    assert.equal(accumulated.dataSummary.currentEligibleCount, 10);
+    assert.equal(accumulated.activeRevision, null);
+    assert.deepEqual(accumulated.rows, []);
+    assert.equal(c.db.sqlite.prepare("SELECT count(*) AS n FROM estimation_jobs WHERE kind='TRAIN'").get().n, 0);
+    assert.equal(c.db.sqlite.prepare('SELECT count(*) AS n FROM estimation_model_activations').get().n, 0);
+    const scheduled = background.scheduled();
+    assert.ok(scheduled > 0);
+    const historical = await estimate(c, PLAN);
+    assert.equal(historical.serverEstimation.status, 'UNAVAILABLE');
+    assert.equal(background.scheduled(), scheduled);
 
-    let firstId;
-    for (let i = 0; i < 10; i++) {
-      const planId = i === 0 ? PLAN : crypto.randomUUID();
-      firstId ??= planId;
-      const planned = await plannedAtlm(c, planId);
-      await ok(c, "RecordAssessment", await atlmAssessment(c, planId, undefined, {
-        predictionRequest: { method: "ATLM", methodVersion: 1 },
-      }), 0);
-      await completeAtlm(c, planned, 1000);
-      c.advance(1); // Every new assessment follows the prior known outcome.
-      if (i === 0 || i === 1) {
-        const status = await readTool("GetEstimationModelStatus");
-        assert.equal(status.eligibleSampleCount, i + 1);
-        if(i===0)assert.equal(status.activeModel,null);
-        else {assert.equal(status.activeModel.sampleCount,2);assert.equal(status.activeModel.accuracy,"EXPERIMENTAL");}
-      }
-    }
-
-    const learned = await readTool("GetEstimationModelStatus");
-    assert.equal(learned.eligibleSampleCount, 10);
-    assert.ok(learned.activeModel, JSON.stringify(learned));
-    assert.ok(learned.activeModel.sampleCount>=2 && learned.activeModel.sampleCount<=10, "only observed plans enter the active model");
-    assert.equal(learned.lastAttempt.parameters.sampleCount, 10, "the new attempt still fits all accumulated history");
-    assert.equal(learned.lastReason, 'INSUFFICIENT_INCUMBENT_CASES');
-    assert.ok(scheduled > 0, "normal tracker commands actually schedule background processing");
-
-    const historical = await readTool("GetPlanEstimate", { planId: firstId });
-    assert.equal(historical.serverEstimation.status, "UNAVAILABLE", "a completed plan is not retrospectively predicted");
-    assert.equal(historical.serverEstimation.pointMs, null);
-
-    const targetId = crypto.randomUUID();
-    const target = await plannedAtlm(c, targetId);
-    const assessment = await atlmAssessment(c, targetId, undefined, {
-      predictionRequest: { method: "ATLM", methodVersion: 1 },
-    });
-    await ok(c, "RecordAssessment", assessment, 0);
-    const issued = await readTool("GetPlanEstimate", { planId: targetId });
-    assert.equal(issued.serverEstimation.status, "AVAILABLE");
+    const firstId = 'atlm-packaged-r1';
+    const secondId = 'atlm-packaged-r2';
+    await registerFixtureAndActivate(c, { modelRevisionId: firstId, modelVersion: 1, examples });
+    const target = await plannedAtlm(c, crypto.randomUUID());
+    const issued = await estimate(c, target.planId);
+    assert.equal(issued.serverEstimation.modelRevisionId, firstId);
     assert.equal(issued.serverEstimation.pointMs, 1000);
-    assert.equal(issued.serverEstimation.modelId, learned.activeModel.modelId);
-    assert.equal(issued.serverEstimation.interval.status, "AVAILABLE");
-    assert.ok(issued.serverEstimation.interval.lowerMs<=issued.serverEstimation.pointMs && issued.serverEstimation.interval.upperMs>=issued.serverEstimation.pointMs);
-    const saved = await readTool("GetAssessment", { planId: targetId, assessmentId: assessment.assessmentId });
-    assert.equal(saved.assessment.forecast.status, "UNKNOWN");
-    assert.equal(saved.assessment.forecast.lowerMs, null);
-    assert.equal(saved.assessment.forecast.upperMs, null);
-
+    assert.equal(issued.serverEstimation.interval.status, 'AVAILABLE');
     await completeAtlm(c, target, 2000);
-    const after = await readTool("GetPlanEstimate", { planId: targetId });
-    assert.deepEqual(after.serverEstimation, issued.serverEstimation, "execution retains the pre-start prediction exactly");
-    const status = await readTool("GetEstimationModelStatus");
-    assert.equal(status.eligibleSampleCount, 11);
-    assert.equal(status.newPlansSinceTraining, 1);
+    const firstForecast = (await estimate(c, target.planId)).serverEstimation;
+    assert.deepEqual(firstForecast, issued.serverEstimation);
 
-    const http = await call(c, "/api/tracker/plans/" + targetId + "/estimate");
+    await registerFixtureAndActivate(c, { modelRevisionId: secondId, modelVersion: 2, examples,
+      expectedActiveModelRevisionId: firstId, expectedActivationVersion: 1 });
+    const next = await plannedAtlm(c, crypto.randomUUID());
+    assert.equal((await estimate(c, next.planId)).serverEstimation.modelRevisionId, secondId);
+    const frozen = await estimate(c, target.planId);
+    assert.deepEqual(frozen.serverEstimation, firstForecast);
+    const status = await registry(c);
+    assert.equal(status.dataSummary.currentEligibleCount, 11);
+    assert.equal(status.dataSummary.newEligibleCount, 1);
+    assert.equal(status.activationVersion, 2);
+    const http = await call(c, '/api/tracker/plans/' + target.planId + '/estimate');
     assert.equal(http.status, 200);
-    assert.deepEqual(http.value, after, "HTTP and MCP return the same saved forecast");
-    assert.deepEqual(c.db.sqlite.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.deepEqual(http.value, frozen);
+    assert.deepEqual(c.db.sqlite.prepare('PRAGMA foreign_key_check').all(), []);
   } finally { c.close(); }
 });
 
-test("packaged public workflow learns runtime effects and accepts explicit unknowns",async()=>{
-  const c=context();try{
-    const built=await import(pathToFileURL(resolve(workerPath)).href+'?runtime-workflow');c.worker=built.createWorker(c.now);
-    const taskFor=(modelId,reasoningEffort,plannedParallelAgents)=>{
-      const task=taskV4();Object.assign(task.execution,{modelId,reasoningEffort,plannedParallelAgents});
-      for(const [field,value] of Object.entries({modelId,reasoningEffort,plannedParallelAgents})){
-        const path='execution.'+field;if(value===null){delete task.evidence[path];task.unknownReasons[path]={reason:'Metadata not disclosed',checkedSource:'Runner metadata'};}
-        else {task.evidence[path]='Fixture';delete task.unknownReasons[path];}
-      }
-      return task;
-    };
-    for(const model of ['a','b'])for(const effort of ['low','high'])for(const count of [1,2]){
-      const p=await plannedAtlm(c,crypto.randomUUID(),taskFor(model,effort,count));
-      await completeAtlm(c,p,60000*(10+(model==='b'?10:0)+(effort==='high'?6:0)+2*count));c.advance(1);
+function runtimeTask(modelId, reasoningEffort, plannedParallelAgents) {
+  const task = taskV4();
+  const fields = { modelId, reasoningEffort, plannedParallelAgents };
+  Object.assign(task.execution, fields);
+  for (const [field, value] of Object.entries(fields)) {
+    const path = 'execution.' + field;
+    if (value === null) {
+      delete task.evidence[path];
+      task.unknownReasons[path] = { reason: 'Metadata not disclosed', checkedSource: 'Runner metadata' };
+    } else {
+      task.evidence[path] = 'Fixture';
+      delete task.unknownReasons[path];
     }
-    const trained=await mcp(c,'StartTraining');assert.equal(trained.value.result.isError,undefined,JSON.stringify(trained.value));
-    const target=await plannedAtlm(c,crypto.randomUUID(),taskFor('b','high',2));
-    const digest=(await mcp(c,'GetAssessment',{planId:target.planId})).value.result.structuredContent.currentRequirementsDigest;
-    const known=await mcp(c,'EstimatePlanTime',{planId:target.planId,expectedRequirementsDigest:digest,agentTask:taskFor('b','high',2)});
-    assert.equal(known.value.result.isError,undefined,JSON.stringify(known.value));
-    assert.equal(known.value.result.structuredContent.hybrid.usedEngine,'RIDGE');
-    assert.ok(known.value.result.structuredContent.pointMs>0);
-    const missing=taskFor(null,null,1);
-    const unknown=await mcp(c,'EstimatePlanTime',{planId:target.planId,expectedRequirementsDigest:digest,agentTask:missing});
-    assert.equal(unknown.value.result.isError,undefined,JSON.stringify(unknown.value));assert.ok(unknown.value.result.structuredContent.pointMs>0);
-    const saved=await atlmAssessment(c,target.planId,missing,{predictionRequest:{method:'ATLM',methodVersion:1}});
-    await ok(c,'RecordAssessment',saved,0);
-    const estimate=(await mcp(c,'GetSavedEstimate',{planId:target.planId})).value.result.structuredContent;
-    assert.equal(estimate.serverEstimation.pointMs,unknown.value.result.structuredContent.pointMs);
-    const artifact=JSON.parse(c.db.sqlite.prepare("SELECT artifact_json FROM estimation_models WHERE status='ACTIVE'").get().artifact_json);
-    const selected=artifact.candidates[artifact.selectedEngine.toLowerCase()].artifact;
-    assert(selected.preprocessor.columns.some(col=>col.field==='modelId'));assert(selected.preprocessor.columns.some(col=>col.field==='reasoningEffort'));assert(selected.preprocessor.columns.some(col=>col.field==='plannedParallelAgents'));
-  }finally{c.close();}
+  }
+  return task;
+}
+
+test('packaged forecast uses registered runtime features and accepts explicit unknowns', async () => {
+  const c = context();
+  try {
+    await useBuiltWorker(c, 'atlm-runtime-features');
+    const examples = [];
+    for (const model of ['a', 'b']) for (const effort of ['low', 'high']) for (const count of [1, 2]) {
+      const duration = 60_000 * (10 + (model === 'b' ? 10 : 0) + (effort === 'high' ? 6 : 0) + 2 * count);
+      examples.push(await completeTrainingExample(c, crypto.randomUUID(), runtimeTask(model, effort, count), duration));
+    }
+    const artifact = await registerFixtureAndActivate(c, { modelRevisionId: 'atlm-runtime-fixture', modelVersion: 1, examples });
+    const knownTask = runtimeTask('b', 'high', 2);
+    const target = await plannedAtlm(c, crypto.randomUUID(), knownTask);
+    const { currentRequirementsDigest } = await tool(c, 'GetTaskAssessment', { planId: target.planId });
+    const args = { planId: target.planId, expectedRequirementsDigest: currentRequirementsDigest };
+    const known = await tool(c, 'EstimatePlanTime', { ...args, agentTask: knownTask });
+    assert.equal(known.hybrid.usedEngine, 'RIDGE');
+    assert.ok(known.pointMs > 0);
+    const unknownTask = runtimeTask(null, null, 1);
+    const unknown = await tool(c, 'EstimatePlanTime', { ...args, agentTask: unknownTask });
+    assert.ok(unknown.pointMs > 0);
+    const saved = await atlmAssessment(c, target.planId, unknownTask, { predictionRequest: { method: 'ATLM', methodVersion: 1 } });
+    await ok(c, 'RecordAssessment', saved, 0);
+    assert.equal((await estimate(c, target.planId)).serverEstimation.pointMs, unknown.pointMs);
+    const selected = artifact.candidates[artifact.selectedEngine.toLowerCase()].artifact;
+    for (const field of ['modelId', 'reasoningEffort', 'plannedParallelAgents'])
+      assert.ok(selected.preprocessor.columns.some(column => column.field === field), field);
+  } finally { c.close(); }
 });

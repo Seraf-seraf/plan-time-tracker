@@ -1,4 +1,5 @@
 import { assessmentReadiness, planStartReadiness, readinessFromRow } from '../atlm/readiness.js';
+import { ATLM_REVISION_LIMITS, ATLM_REVISION_TOOL_SCHEMAS } from '../atlm/revisions.js';
 import {
   AppError,
   ENVIRONMENT_IDS,
@@ -1482,6 +1483,13 @@ async function readTrackerCapabilities(db, ownerId) {
         calculateTool: 'CalculateAtlmEstimate',
         planEstimateTool: 'GetPlanEstimate',
         predictionRequest: { method: 'ATLM', methodVersion: 1 },
+        registry: {
+          schemaVersion: 1,
+          tools: ATLM_REVISION_TOOL_SCHEMAS,
+          limits: ATLM_REVISION_LIMITS,
+          trainingExecution: 'LOCAL',
+          activation: 'EXPLICIT',
+        },
       },
     },
 

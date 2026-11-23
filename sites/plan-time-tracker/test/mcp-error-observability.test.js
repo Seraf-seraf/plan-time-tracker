@@ -1,12 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { context, mcp, PLAN, DIGEST_A } from "./fixtures/tracker-db.mjs";
+import { context, mcp } from "./fixtures/tracker-db.mjs";
 
-const args = {
-  methodVersion: 1, metric: "PLAN_ACTIVE", referenceCutoffMs: 0,
-  target: { planId: PLAN, expectedRequirementsDigest: DIGEST_A,
-    profile: { workKind: "VERIFY_EXISTING", reuseState: "READY", doneBoundary: "ANALYSIS" } }, candidates: [],
-};
+const args = { schemaVersion: 1, view: "list" };
 
 test("MCP failures retain the public contract and one safe diagnostic correlated by requestId", async () => {
   const c = context(), originalError = console.error, entries = [];
@@ -15,7 +11,7 @@ test("MCP failures retain the public contract and one safe diagnostic correlated
     const prepare = c.db.prepare.bind(c.db);
     let fault;
     c.db.prepare = sql => {
-      if (sql.startsWith("SELECT * FROM estimation_owner_state WHERE owner_id=")) throw fault;
+      if (sql.includes("FROM estimation_active_revisions a LEFT JOIN estimation_serving_models m")) throw fault;
       return prepare(sql);
     };
     const secret = "sk-sensitive-test-credential-do-not-log";
@@ -25,21 +21,24 @@ test("MCP failures retain the public contract and one safe diagnostic correlated
       [new Error(`Unexpected sensitive input ${secret}`), "UNEXPECTED_ERROR"],
     ]) {
       fault = error;
-      const before = entries.length, response = (await mcp(c, "GetTrainingStatus", {})).value.result;
+      const before = entries.length, response = (await mcp(c, "ListModelRevisions", args)).value.result;
       assert.equal(response.isError, true);
       const value = response.structuredContent;
       assert.deepEqual({ ...value, requestId: null }, { code: "INTERNAL_ERROR", message: "Внутренняя ошибка.",
         details: null, requestId: null, retryable: true, retryAfter: null });
       assert.equal(entries.length, before + 1);
-      assert.deepEqual(entries.at(-1), { event: "mcp_unexpected_error", tool: "GetEstimationModelStatus", requestId: value.requestId, reason });
+      assert.deepEqual(entries.at(-1), { event: "mcp_unexpected_error", tool: "ListModelRevisions", requestId: value.requestId, reason });
       assert.equal(JSON.stringify(response).includes(secret), false);
       assert.equal(JSON.stringify(entries).includes(secret), false);
     }
     c.db.prepare = prepare;
     const count = entries.length;
-    const missing = (await mcp(c, "GetTrainingStatus", {})).value.result;
-    assert.equal(missing.isError, undefined);
-    assert.equal((await mcp(c, "GetTrackerCapabilities")).value.result.isError, undefined);
+    const empty = (await mcp(c, "ListModelRevisions", args)).value.result;
+    assert.equal(empty.isError, undefined);
+    assert.deepEqual(empty.structuredContent.rows, []);
+    const missing = (await mcp(c, "ListModelRevisions", { ...args, view: "detail", modelRevisionId: "missing" })).value.result;
+    assert.equal(missing.structuredContent.code, "MODEL_REVISION_NOT_FOUND");
+    assert.equal((await mcp(c, "GetTrackerInfo")).value.result.isError, undefined);
     assert.equal(entries.length, count);
   } finally { console.error = originalError; c.close(); }
 });
