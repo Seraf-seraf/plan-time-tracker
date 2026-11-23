@@ -1,65 +1,67 @@
-// Real cold-start integration, followed by controlled model responses for UI state and race coverage.
-// All traffic stays in an isolated SQLite-backed Worker; no production samples are created.
 import assert from 'node:assert/strict';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { assessForStart, context, OWNER, PLAN, running, call, ok } from './fixtures/tracker-db.mjs';
+import { fitAtlm, normalizeAgentTask } from '../worker/atlm/model.js';
+import { processAtlmSampleRefresh } from '../worker/atlm/sample-refresh.js';
+import { context, OWNER, PLAN, call, ok, mcp, plannedAtlm, completeAtlm, taskV4 } from './fixtures/tracker-db.mjs';
 
 const modulePath = process.env.PLAYWRIGHT_MODULE || 'playwright';
 const { chromium } = await import(modulePath.startsWith('/') ? pathToFileURL(modulePath).href : modulePath);
-const c = context();c.advance(Date.now() - c.now());
-if (process.env.SITE_WORKER_MODULE) c.worker = (await import(pathToFileURL(process.env.SITE_WORKER_MODULE).href)).createWorker(() => c.now());
-const legacyPlan=crypto.randomUUID(), legacyOther=crypto.randomUUID();
-await running(c,[],legacyPlan);await running(c,[],legacyOther);
-const otherPlan=crypto.randomUUID();
-for(const planId of [PLAN,otherPlan])await ok(c,"CreatePlan",{planId,title:"Forecast planned",planText:"## Этап 1. Проверить\nГотово.",planCreatedAt:{precision:"dateOnly",on:"2026-10-01",timeZone:"UTC"}});
-const capabilities = await call(c, '/api/tracker/capabilities');
-assert.equal(capabilities.status, 200);assert(capabilities.value.assessments.atlm, 'the delivered Worker must advertise ATLM');
-const initial = await call(c, '/api/tracker/estimation-model');
-assert.equal(initial.status, 200);assert.equal(initial.value.eligibleSampleCount, 0);
-assert.equal(initial.value.activeModel, null);assert.equal(initial.value.training.due, true, 'first starts queue source refresh even without a usable ATLM input');
+const c = context();
+c.advance(Date.now() - c.now());
+if (process.env.SITE_WORKER_MODULE) c.worker = (await import(pathToFileURL(process.env.SITE_WORKER_MODULE).href)).createWorker(c.now);
+const otherPlan = crypto.randomUUID();
+const activeId = 'atlm-11-r2';
+const priorId = 'atlm-11-r1';
+const longId = 'atlm-' + 'archived-revision-'.repeat(6) + '7';
+for (const planId of [PLAN, otherPlan]) {
+  await ok(c, 'CreatePlan', { planId, title: 'Forecast planned', planText: '## Этап 1. Проверить\nГотово.',
+    planCreatedAt: { precision: 'dateOnly', on: '2026-10-01', timeZone: 'UTC' } });
+}
+const initial = await call(c, '/api/tracker/model-revisions?view=list');
+assert.equal(initial.status, 200);
+assert.equal(initial.value.activeRevision, null);
+assert.equal(initial.value.dataSummary.currentEligibleCount, 0);
 const initialEstimate = await call(c, '/api/tracker/plans/' + PLAN + '/estimate');
-assert.equal(initialEstimate.status, 200);assert.equal(initialEstimate.value.planId, PLAN);
+assert.equal(initialEstimate.status, 200);
 assert.equal(initialEstimate.value.serverEstimation.unavailableReason, 'ASSESSMENT_REQUIRED');
-assert.equal(initialEstimate.value.source,'CURRENT_INPUT');
 
 const artifacts = resolve(process.env.UI_ACCEPTANCE_ARTIFACT_DIR || '/tmp/tracker-atlm-ui');
 mkdirSync(artifacts, { recursive: true });
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE || '/usr/bin/chromium', headless: true, args: ['--no-sandbox'] });
 const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
-page.setDefaultTimeout(10000);await page.clock.install({ time: c.now() });
-const requests = [], errors = [];let controlled = false, statusError = false, estimateError = false, processError = false;
-let status = structuredClone(initial.value), estimate, holdPlan = null, heldStarted, releaseHeld, heldFinished;
-let processCount = 0, statusCount = 0, advancingQueue = false, startCount = 0, startError = false, holdStart = false, releaseStart;
-let historyAttempt = null;
+page.setDefaultTimeout(10000);
+await page.clock.install({ time: c.now() });
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+const requests = [], errors = [];
+let controlled = false, estimateError = false, estimate, holdPlan = null, heldStarted, releaseHeld, heldFinished;
+let failRegistry = true, failRegistryPage = false, failCasesPage = false, holdModel = null;
 page.on('pageerror', error => errors.push(error.message));
-const json = (route, value, code = 200) => route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify(value) });
+const json = (route, value, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) });
+const unavailable = route => json(route, { error: { message: 'Fixture unavailable' } }, 503);
 const estimateFor = id => ({ planId: id, source:'CURRENT_INPUT', isStale: false, serverEstimation: { formatVersion: 1, calculatedAt:c.now(), status: 'AVAILABLE', pointMs: id === PLAN ? 120000 : 420000, metric: 'PLAN_ACTIVE', forecastScope: 'FULL_FROM_FIRST_START', method: { id: 'atlm', version: 'agent-v4-probabilistic' }, sampleCount: 23, accuracy:'HISTORICALLY_EVALUATED', modelVersion: 'agent-v2/model-7', modelId: 'model-7', evaluation: { validationStatus:"HISTORICALLY_EVALUATED", caseCount: 6, pointCaseCount:6, maeMs: 30000 }, interval: {status:'AVAILABLE',lowerMs:60000,upperMs:600000,nominalCoverage:0.8,engine:'BAYESIAN_PREDICTIVE',calibrationSampleCount:0,validationStatus:'EXPERIMENTAL',unavailableReason:null} } });
-const modelState = (trainingStatus, due = false) => ({ ...structuredClone(initial.value), datasetRevision: 7, newPlansSinceTraining: 3, eligibleSampleCount: 23, excludedSampleCount: 2, retrainEveryNewPlans: 2, exclusionReasons: [{ reason: 'MISSING_FEATURES', count: 2 }], activeModel: { modelId: 'model-7', modelVersion: 'agent-v2/model-7', sampleCount: 23, accuracy:'HISTORICALLY_EVALUATED', evaluation:{validationStatus:"HISTORICALLY_EVALUATED",caseCount:6,pointCaseCount:6,maeMs:30000} }, training: { status: trainingStatus, due, generation: 4, progressRevision: 0, pendingRefreshCount: 0, nextAttemptAt: null, progress: null }, lastError: null, lastReason: null });
 await page.route('**/*', async route => {
-  const request = route.request(), url = new URL(request.url());assert.equal(url.origin, 'http://localhost', 'production traffic is forbidden');
-  requests.push({ path: url.pathname, method: request.method(), body: request.postData() });
-  if (url.pathname === '/api/tracker/estimation-model') {
-    statusCount++;
-    if (controlled) return statusError ? json(route, { error: { message: 'Status service unavailable' } }, 503) : json(route, status);
-  }
-  if (url.pathname === '/api/tracker/estimation-training-history' && historyAttempt) {
-    return json(route, { rows: [historyAttempt], nextCursor: null });
-  }
-  if (url.pathname === '/api/tracker/estimation-model/process' && controlled) {
-    assert.equal(request.method(), 'POST');assert.deepEqual(request.postDataJSON(), {});processCount++;
-    if (processError) return json(route, { error: { message: 'Training service unavailable' } }, 503);
-    if (advancingQueue) status.training.progressRevision++;
-    return json(route, { processed: true });
-  }
-  if (url.pathname === '/api/tracker/estimation-model/start') {
-    startCount++;assert.equal(request.method(), 'POST');assert.deepEqual(request.postDataJSON(), {});
-    if (controlled) {
-      if (holdStart) { holdStart = false;await new Promise(resolve => { releaseStart = resolve; }); }
-      if (startError) return route.abort('failed');
-      return json(route, status);
+  const request = route.request(), url = new URL(request.url());
+  assert.equal(url.origin, 'http://localhost');
+  requests.push({ path: url.pathname, method: request.method(), query: new URLSearchParams(url.search) });
+  if (url.pathname.startsWith('/api/tracker/model-revisions')) {
+    const view = url.searchParams.get('view');
+    if (holdModel?.matches(url)) {
+      const held = holdModel;
+      holdModel = null;
+      held.arrival.resolve();
+      await held.release.promise;
     }
+    if (view === 'list' && (failRegistry || (failRegistryPage && url.searchParams.has('cursor')))) return unavailable(route);
+    if (url.pathname.endsWith('/evidence/cases') && failCasesPage && url.searchParams.has('cursor')) return unavailable(route);
+    if (view === 'list' || url.pathname.endsWith('/evidence/cases')) url.searchParams.set('limit', '2');
   }
   const match = url.pathname.match(/^\/api\/tracker\/plans\/([^/]+)\/estimate$/);
   if (match && controlled) {
@@ -72,11 +74,30 @@ await page.route('**/*', async route => {
     }
     return json(route, response);
   }
-  const response = await c.worker.fetch(new Request(request.url(), { method: request.method(), headers: { 'content-type': 'application/json', 'oai-authenticated-user-id': OWNER }, ...(request.postData() ? { body: request.postData() } : {}) }), { DB: c.db });
+
+  const response = await c.worker.fetch(new Request(url, { method: request.method(), headers: {
+    'content-type': 'application/json', 'oai-authenticated-user-id': OWNER,
+  }, ...(request.postData() ? { body: request.postData() } : {}) }), { DB: c.db });
   await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() });
 });
+
 const forecast = () => page.locator('.atlm-plan-estimate');
-const settings = () => page.locator('#atlm-model-status');
+const settings = page.locator('#atlm-model-overview');
+const modelHeading = settings.getByRole('heading', { name: 'Модель прогноза', exact: true });
+const qualityHeading = settings.getByRole('heading', { name: 'Качество', exact: true });
+const navSettings = page.locator('[data-view="settings"]');
+const history = settings.locator('#atlm-model-history');
+const cases = settings.locator('#atlm-model-cases');
+const current = settings.locator('#atlm-model-current');
+const activeLabel = current.getByText('Используется для прогнозов', { exact: true });
+const retry = settings.getByRole('button', { name: 'Повторить загрузку', exact: true });
+const openSummary = (section, text) => section.locator('summary').filter({ hasText: text }).click();
+const isFocused = locator => locator.evaluate(node => node === document.activeElement);
+const hold = matches => {
+  const gate = { matches, arrival: deferred(), release: deferred() };
+  holdModel = gate;
+  return gate;
+};
 const open = async id => {
   await page.locator('[data-view="overview"]').click();
   await page.locator('[data-plan-id="' + id + '"] .plan-open').first().click();
@@ -84,48 +105,102 @@ const open = async id => {
   await page.waitForFunction(id => document.querySelector('.atlm-plan-estimate')?.dataset.planId === id && !document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy'), id);
 };
 const refreshPlan = async () => { await forecast().getByRole('button', { name: 'Обновить прогноз', exact: true }).click();await page.waitForFunction(() => !document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy')); };
-const refreshStatus = async () => { await page.locator('[data-view="settings"]').click();await page.waitForFunction(() => !document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy')); };
-const readPoll = async (elapsed = 800) => {
-  const before = statusCount;await page.clock.runFor(elapsed);
-  // Fetch callbacks run in Node, outside Playwright's controlled browser clock.
-  const deadline = Date.now() + 10000;while (statusCount === before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
-  assert(statusCount > before, 'the bounded status poll must run');
-  await page.waitForFunction(() => !document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy'));
-};
+
+async function seedRegistry() {
+  const training = [];
+  const task = taskV4();
+  const features = normalizeAgentTask(task).features;
+  for (let index = 0; index < 61; index++) {
+    const plan = await plannedAtlm(c, crypto.randomUUID(), task);
+    const capturedAt = c.now();
+    const actualMs = 60000 + (index % 3) * 60000;
+    await completeAtlm(c, plan, actualMs);
+    training.push({ planId: plan.planId, features, actualMs, capturedAt, sourceAvailableAt: c.now() });
+    c.advance(1);
+  }
+  await processAtlmSampleRefresh(c.db, OWNER, c.now(), { clock: c.now });
+  const sql = c.db.sqlite;
+  const sequence = sql.prepare('SELECT max(sequence) AS sequence FROM estimation_samples WHERE owner_id=? AND plan_id=?');
+  const examples = training.map(row => ({ ...row, sampleId: String(sequence.get(OWNER, row.planId).sequence) }));
+  const fitted = await fitAtlm(examples);
+  assert.equal(fitted.status, 'AVAILABLE', JSON.stringify(fitted));
+  const artifact = fitted.artifact;
+  const register = sql.prepare(`INSERT INTO estimation_model_revisions(owner_id,model_revision_id,model_version,origin,
+    method_version,feature_version,registered_at,imported_at,artifact_json,manifest_json,dataset_digest,
+    evaluation_json,provenance_json,fit_count,source_count,train_cutoff,supported)
+    VALUES(?,?,11,'IMPORTED',?,?,?,?,?,?,?,?,'{}',?,?,?,?)`);
+  const archive = (id, evaluation = null) => register.run(OWNER, id, artifact.method.version, artifact.featureSchemaVersion, c.now(),
+    c.now(), null, '[]', null, evaluation ? JSON.stringify(evaluation) : null, 0, 0, null, 0);
+  const controlMode = prediction => ({
+    status: 'AVAILABLE', summary: {
+      rowCount: 1, groupCount: 1, excludedFromScoringCount: 0,
+      forecastAvailability: { numerator: 1, denominator: 1 },
+      intervalAvailability: { numerator: 0, denominator: 1 },
+      metrics: { maeMs: prediction - 60000 },
+    },
+    cases: [{ planId: examples[0].planId, actualMs: 60000, pointMs: prediction }],
+  });
+  archive(priorId, { schemaVersion: 1, modes: {
+    INTERNAL_HOLDOUT_PLANNED: controlMode(90000),
+    INTERNAL_HOLDOUT_ACTUAL: controlMode(150000),
+  } });
+  c.advance(1);
+  archive(longId);
+  c.advance(1);
+  const evaluation = { protocol: 'Grouped rolling-origin', unit: 'minutes',
+    all: { cases: 50, groups: 19, revisedMAE: 84.08, own: 50 }, cases: [] };
+  register.run(OWNER, activeId, artifact.method.version, artifact.featureSchemaVersion, c.now(), c.now(),
+    JSON.stringify(artifact), JSON.stringify(artifact.manifest), artifact.datasetDigest, JSON.stringify(evaluation),
+    artifact.n, examples.length, artifact.trainCutoff, 1);
+  const source = sql.prepare(`INSERT INTO estimation_model_revision_sources(owner_id,model_revision_id,plan_id,source_generation,ordinal)
+    SELECT owner_id,?,plan_id,generation,? FROM estimation_jobs WHERE owner_id=? AND plan_id=?`);
+  for (const [index, example] of examples.entries()) source.run(activeId, index, OWNER, example.planId);
+  c.advance(1000);
+  const activation = await mcp(c, 'ActivateModelRevision', { schemaVersion: 1, commandId: crypto.randomUUID(),
+    modelRevisionId: activeId, expectedActiveModelRevisionId: null, expectedActivationVersion: 0,
+    acceptExperimental: true, reason: 'Изолированная браузерная проверка' });
+  assert.equal(activation.value.result.structuredContent?.activeModelRevisionId, activeId, JSON.stringify(activation.value));
+  for (let index = 0; index < 14; index++) {
+    const plan = await plannedAtlm(c, crypto.randomUUID(), task);
+    await completeAtlm(c, plan, 60000 + (index % 5) * 60000);
+    c.advance(1);
+  }
+  await processAtlmSampleRefresh(c.db, OWNER, c.now(), { clock: c.now });
+  const detail = (await call(c, '/api/tracker/model-revisions?view=detail&modelRevisionId=' + activeId)).value;
+  assert.equal(detail.revision.fitCount, 61);
+  assert.equal(detail.evidence[0].summary.rowCount, 14);
+  return examples[0].planId;
+}
+
 try {
-  await page.goto('http://localhost');await page.locator('#plans[data-loaded="true"]').waitFor({ state: 'attached' });
+  const response = await page.goto('http://localhost');
+  assert.match(await response.text(), /Для загрузки сведений о модели требуется JavaScript/);
+  await page.locator('#plans[data-loaded="true"]').waitFor({ state: 'attached' });
   await open(PLAN);
   assert.match(await forecast().innerText(), /До первого запуска не сохранены исходные признаки/);
-  assert.equal(requests.filter(item => item.path.endsWith('/status-history') || item.path.endsWith('/timeline')).length, 0, 'the removed status-history UI must not make history requests');
+  assert.equal(requests.filter(item => item.path.endsWith('/status-history') || item.path.endsWith('/timeline')).length, 0);
   assert.equal(await page.getByText('История команд', { exact: true }).count(), 0);
-  await page.locator('[data-view="settings"]').click();await page.waitForFunction(()=>!document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy'));
-  assert.equal(requests.filter(item=>item.path==='/api/tracker/estimation-model/process').length,0,'viewing the UI does not start training');
-  await settings().getByRole('button',{name:'Продолжить обработку',exact:true}).click();
-  await page.waitForFunction(() => !document.querySelector('#atlm-model-status').hasAttribute('aria-busy'));
-  await readPoll();
-  await settings().getByRole('button', {name:'Начать обучение', exact:true}).waitFor();
-  const recovered = await call(c, '/api/tracker/estimation-model');assert.equal(recovered.status, 200);
-  assert.equal(recovered.value.training.due, false);assert.equal(recovered.value.activeModel, null);
-  assert(requests.some(item => item.path === '/api/tracker/estimation-model/process' && item.method === 'POST'), 'explicit continuation must recover pending source refresh');
-  const details = () => settings().locator('.atlm-status-details');
-  await details().getByText('Данные и качество', { exact: true }).click();
-  assert.match(await details().innerText(), /Исключено планов\s+2/);
-  assert.match(await details().innerText(), /План ещё не завершён/);
-  await refreshStatus();
-  assert.equal(await details().evaluate(node => node.open), true, 'status reads preserve the open explanation');
-  await details().getByText('Данные и качество', { exact: true }).click();
-  const manual = () => settings().getByRole('button', { name: 'Начать обучение', exact: true });
-  await manual().click();await settings().getByText('Попытка обучения завершена.', { exact: true }).waitFor();
-  assert.equal(startCount, 1);assert.match(await settings().innerText(), /Недостаточно данных/);
-  const history = settings().locator('.atlm-history');
-  await history.getByText('Недостаточно данных', { exact: true }).waitFor();
-  assert.match(await history.innerText(), /Пока недостаточно пригодных данных/);
-  assert.equal((await call(c, '/api/tracker/estimation-model')).value.training.generation, 1, 'real browser request reaches Worker training below two plans');
-  await page.locator('[data-view="settings"]').click();await page.waitForFunction(()=>!document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy'));
-  const readsAfterReopen=statusCount;await page.clock.runFor(3000);assert.equal(statusCount,readsAfterReopen,'reopening settings cancels stale polling');
-  await page.screenshot({ path: resolve(artifacts, 'atlm-cold-start.png'), fullPage: true });
 
-  controlled = true;status = modelState('COLLECTING_DATA');await open(PLAN);
+  const first = hold(url => url.searchParams.get('view') === 'list');
+  await navSettings.click();
+  await first.arrival.promise;
+  await modelHeading.waitFor();
+  await settings.getByRole('status').filter({ hasText: 'Загружаем модель прогноза…' }).waitFor();
+  assert.ok(await settings.locator('[aria-busy="true"]').count() || await settings.getAttribute('aria-busy') === 'true');
+  first.release.resolve();
+  await settings.getByText('Не удалось загрузить сведения о модели', { exact: true }).waitFor();
+  failRegistry = false;
+  await retry.focus();
+  await page.keyboard.press('Enter');
+  await settings.getByText('Активной ревизии пока нет', { exact: true }).waitFor();
+  assert.equal(await isFocused(modelHeading), true);
+  await openSummary(history, 'История ревизий');
+  await history.getByText('Ревизий пока нет', { exact: true }).waitFor();
+  await page.screenshot({ path: resolve(artifacts, 'atlm-cold-start.png'), fullPage: true });
+  await openSummary(history, 'История ревизий');
+
+  controlled = true;
+  await open(PLAN);
   await forecast().getByText('Около 2 мин', { exact: true }).waitFor();
   assert.match(await forecast().innerText(), /Диапазон:/);
   assert.match(await forecast().innerText(), /цель 80%/);
@@ -213,198 +288,167 @@ try {
   releaseHeld();releaseHeld = null;await finished;
   assert.equal(await forecast().getAttribute('data-plan-id'), otherPlan);assert.match(await forecast().innerText(), /Около 7 мин/);assert.doesNotMatch(await forecast().innerText(), /Около 2 мин/);
 
-  await page.locator('[data-view="settings"]').click();
-  status = modelState('IDLE');
-  status.newPlansSinceTraining = 1;
-  status.activeModel.sampleCount = 2;
-  status.activeModel.accuracy = 'EXPERIMENTAL';
-  status.activeModel.evaluation = {validationStatus:'EXPERIMENTAL', pointCaseCount:0, caseCount:0, maeMs:null};
-  status.activeModel.hybrid = {policyVersion:2, selectedEngine:'RIDGE', intervalEngine:'BAYESIAN_PREDICTIVE'};
-  await refreshStatus();
-  const overview = settings().locator('.atlm-status-overview');
-  const summary = await overview.innerText();
-  assert.match(summary, /Активная модель\s+Экспериментальная/);
-  assert.match(summary, /Пригодных планов\s+23/);
-  assert.match(summary, /Планов до автообучения\s+1/);
-  assert.equal(await manual().isEnabled(), true);
-  assert.equal(await details().evaluate(node => node.open), false);
-  assert.equal(await details().getByText('Планов в модели', { exact: true }).isVisible(), false);
+  const changedPlan = await seedRegistry();
+  const modelRequests = () => requests.filter(item => item.path.startsWith('/api/tracker/model-revisions'));
+  const caseRequests = () => modelRequests().filter(item => item.path.endsWith('/evidence/cases'));
+  await navSettings.click();
+  await activeLabel.waitFor();
+  await settings.getByText('Планов 14', { exact: true }).waitFor();
+  assert.match(await current.innerText(), /atlm-11-r2/);
+  assert.match(await current.innerText(), /Активирована/);
+  assert.equal(await current.locator('time[datetime]').count(), 1);
+  const data = settings.locator('#atlm-model-data');
+  assert.match(await data.innerText(), /В обучении\s+61/);
+  assert.match(await data.innerText(), /Новые пригодные\s+14/);
+  assert.match(await data.innerText(), /Изменились после обучения\s+0/);
+  assert.equal(await caseRequests().length, 0, 'the case table loads only on demand');
+  assert.equal(await history.evaluate(node => node.open), false);
+  assert.equal(await cases.evaluate(node => node.open), false);
+  const coverage = settings.locator('.model-quality-grid').filter({ hasText: 'Попадания в интервал' }).first();
+  assert.match(await coverage.innerText(), /Попадания в интервал\s+[\d]+ из [\d]+\s+Средняя ширина/);
+  writeFileSync(resolve(artifacts, 'model-overview.html'), await page.content());
+  await page.screenshot({ path: resolve(artifacts, 'model-overview-1440.png'), fullPage: true });
 
-  const disclosure = details().getByText('Данные и качество', { exact: true });
-  await disclosure.focus();
+  const reportPicker = settings.getByLabel('Отчёт проверки');
+  const issued = settings.getByRole('radio', { name: 'Выданные прогнозы' });
+  const control = settings.getByRole('radio', { name: 'Контрольная проверка' });
+  await issued.focus();
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await control.isChecked(), true);
+  assert.equal(await isFocused(control), true);
+  await settings.getByRole('heading', { name: 'Проверка на истории' }).waitFor();
+  assert.match(await settings.locator('#atlm-model-report').innerText(), /50, групп 19/);
+  assert.match(await settings.locator('#atlm-model-report').innerText(), /84,1 мин/);
+  await settings.locator('#atlm-model-report').getByText('Список задач этой проверки не сохранён.', { exact: true }).waitFor();
+  await issued.check();
+
+  const staleCases = hold(url => url.pathname.endsWith('/evidence/cases'));
+  await settings.getByRole('button', { name: 'Показать планы', exact: true }).click();
+  await staleCases.arrival.promise;
+  assert.equal(await isFocused(cases.locator('summary')), true);
+  await control.check();
+  staleCases.release.resolve();
+  await cases.getByText('Список задач этой проверки не сохранён.', { exact: true }).waitFor();
+  assert.equal(await cases.getByRole('table').count(), 0);
+  await issued.check();
+  await cases.getByRole('table').waitFor();
+  assert.equal(await cases.getByRole('rowheader').count(), 2);
+  failCasesPage = true;
+  await cases.getByRole('button', { name: 'Показать ещё планы' }).click();
+  await cases.getByText('Не удалось загрузить планы.', { exact: true }).waitFor();
+  assert.equal(await cases.getByRole('rowheader').count(), 2);
+  const failedCursor = caseRequests().at(-1).query.get('cursor');
+  failCasesPage = false;
+  const caseRetry = cases.getByRole('button', { name: 'Повторить', exact: true });
+  await caseRetry.focus();
   await page.keyboard.press('Enter');
-  const facts = await details().innerText();
-  assert.match(facts, /Планов в модели\s+2/);
-  assert.match(facts, /Точечный метод\s+Ridge/);
-  assert.match(facts, /Проверено прогнозов\s+0/);
-  assert.match(facts, /Средняя ошибка\s+Нет оценки/);
-  await disclosure.click();
+  await page.waitForFunction(() => document.querySelectorAll('#atlm-model-cases tbody tr').length === 4);
+  assert.equal(caseRequests().at(-1).query.get('cursor'), failedCursor);
+  assert.equal(await isFocused(cases.locator('summary')), true);
 
-  status = modelState('RUNNING');
-  status.training.progress = {phase:'EVALUATION', completedCases:2, totalCases:7};
-  await refreshStatus();
-  assert.match(await overview.innerText(), /Модель обучается/);
-  assert.match(await overview.innerText(), /Проверено примеров: 2 из 7/);
-  assert.doesNotMatch(await overview.innerText(), /Планов до автообучения/);
-  status = modelState('REJECTED');
-  status.lastReason = 'CANDIDATE_MAE_WORSE';
-  await refreshStatus();
-  assert.match(await overview.innerText(), /Новая модель не прошла проверку/);
-  assert.match(await overview.innerText(), /Активная модель\s+Проверена на истории/);
-  assert.match(await overview.innerText(), /Средняя ошибка новой модели выше/);
-  await open(PLAN);assert.match(await forecast().innerText(), /Около 2 мин/, 'a rejected candidate must not hide the saved forecast');
-  await page.locator('[data-view="settings"]').click();statusError = true;await refreshStatus();
-  assert.match(await settings().innerText(), /Не удалось загрузить состояние/);assert.equal(await details().isVisible(), false);
-  statusError = false;await refreshStatus();assert.match(await overview.innerText(), /Активная модель\s+Проверена на истории/);
-  status.eligibleSampleCount = null;await refreshStatus();assert.match(await settings().innerText(), /Не удалось прочитать состояние обучения/);
+  await history.locator('summary').focus();
+  await page.keyboard.press('Space');
+  await history.getByRole('table').waitFor();
+  const moreRevisions = history.getByRole('button', { name: 'Показать ещё ревизии' });
+  failRegistryPage = true;
+  await moreRevisions.click();
+  await history.getByText('Не удалось загрузить ревизии.', { exact: true }).waitFor();
+  assert.equal(await history.getByRole('rowheader').count(), 2);
+  failRegistryPage = false;
+  const historyRetry = history.getByRole('button', { name: 'Повторить', exact: true });
+  await historyRetry.focus();
+  await page.keyboard.press('Enter');
+  await history.getByRole('button', { name: 'Показать ' + priorId, exact: true }).waitFor();
+  assert.equal(await isFocused(history.locator('summary')), true);
 
-  // A server-side completion must update the already visible attempt, including after tab suspension.
-  await page.setViewportSize({ width: 390, height: 1100 });
-  for (const mode of ['started here', 'already running', 'hidden tab']) {
-    if (mode === 'started here') {
-      status = modelState('IDLE');
-      await refreshStatus();
-    }
-    status = modelState('RUNNING');
-    historyAttempt = { attemptId: crypto.randomUUID(), startedAt: c.now(), completedAt: null, manifest: [] };
-    if (mode === 'started here') await manual().click();
-    else await refreshStatus();
-    await history.getByText('В работе', { exact: true }).waitFor();
-    const writesBefore = processCount + startCount;
-    if (mode === 'hidden tab') {
-      await page.evaluate(() => {
-        Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
-        document.dispatchEvent(new Event('visibilitychange'));
-      });
-      const readsBefore = statusCount;
-      await page.clock.runFor(8000);
-      assert.equal(statusCount, readsBefore, 'hidden tabs suspend status observation');
-    }
-    historyAttempt = { ...historyAttempt, completedAt: c.now() + 2000, reason: 'INSUFFICIENT_DATA' };
-    status = modelState('COLLECTING_DATA');
-    status.lastAttempt = { completedAt: historyAttempt.completedAt };
-    if (mode === 'hidden tab') {
-      await page.evaluate(() => {
-        delete document.visibilityState;
-        document.dispatchEvent(new Event('visibilitychange'));
-      });
-    } else {
-      await readPoll(mode === 'started here' ? 800 : 4200);
-    }
-    await history.getByText('Недостаточно данных', { exact: true }).waitFor();
-    assert.equal(await history.getByText('В работе', { exact: true }).count(), 0);
-    assert.equal(processCount + startCount, writesBefore, 'observing the attempt is read-only');
-  }
-  // Old failures have no saved sample count; an empty manifest must not claim zero samples.
-  status = modelState('FAILED');
-  historyAttempt = { attemptId: crypto.randomUUID(), startedAt: c.now(), completedAt: c.now() + 60000,
-    manifest: [], reason: 'LEASE_EXPIRED', diagnostics: { code: 'LEASE_EXPIRED' } };
-  status.lastAttempt = { completedAt: historyAttempt.completedAt };
-  await refreshStatus();
-  await history.getByText('Прервано', { exact: true }).waitFor();
-  assert.match(await history.locator('.atlm-attempt-count').innerText(), /Нет сведений/);
-  assert.equal(await history.locator('.atlm-attempt-duration').getAttribute('title'), 'Календарное время попытки, включая ожидание продолжений.');
-
-  historyAttempt = { ...historyAttempt, attemptId: crypto.randomUUID(), completedAt: c.now() + 60001,
-    manifest: [1, 2], diagnostics: { code: 'LEASE_EXPIRED', parameters: {
-      sampleCount: 2, phase: 'EVALUATE', completedCases: 1, recoveredAt: c.now() + 12 * 60 * 60 * 1000,
-    } } };
-  status.lastAttempt = { completedAt: historyAttempt.completedAt };
-  await refreshStatus();
-  await history.locator('.atlm-attempt-count').getByText('2', { exact: true }).waitFor();
-  await history.getByText('Подробности', { exact: true }).click();
-  assert.match(await history.innerText(), /Обработано примеров\s+1/);
-
-  status = modelState('COLLECTING_DATA');
-  historyAttempt = { ...historyAttempt, attemptId: crypto.randomUUID(), completedAt: c.now() + 60002,
-    reason: 'INSUFFICIENT_INCUMBENT_CASES', selected: { point: { selectedEngine: 'RIDGE' } },
-    diagnostics: { code: 'INSUFFICIENT_INCUMBENT_CASES', incumbentComparison: { commonCaseCount: 2, requiredCaseCount: 5 } } };
-  status.lastAttempt = { completedAt: historyAttempt.completedAt };
-  await refreshStatus();
-  await history.getByText('Независимых сравнений: 2 из 5.', { exact: true }).waitFor();
-  assert.match(await history.innerText(), /Недостаточно данных/);
-  for (const width of [390, 1440]) {
+  for (const width of [1440, 768, 720, 390, 320]) {
     await page.setViewportSize({ width, height: 1100 });
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-    await page.screenshot({ path: resolve(artifacts, `atlm-history-diagnostics-${width}.png`), fullPage: true });
+    const layout = await settings.evaluate(panel => ({
+      panel: panel.getBoundingClientRect().width,
+      grid: panel.parentElement.getBoundingClientRect().width,
+      pageOverflow: document.documentElement.scrollWidth > innerWidth,
+      panelOverflow: panel.scrollWidth > panel.clientWidth,
+    }));
+    assert.ok(layout.panel >= layout.grid - 2, 'model occupies the settings grid at ' + width);
+    assert.equal(layout.pageOverflow || layout.panelOverflow, false, 'no horizontal overflow at ' + width);
+    assert.match(await history.getByRole('table').ariaSnapshot(), /columnheader.*Ревизия/);
+    assert.match(await cases.getByRole('table').ariaSnapshot(), /columnheader.*Интервал/);
+    assert.equal(await history.getByRole('rowheader').filter({ hasText: longId }).count(), 1);
+    if (width <= 390) assert.ok(await history.locator('summary').evaluate(node => node.getBoundingClientRect().height >= 44));
+    await page.screenshot({ path: resolve(artifacts, 'model-overview-tables-' + width + '.png'), fullPage: true });
   }
-  historyAttempt = null;
   await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.evaluate(() => { document.body.style.zoom = '2'; });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.evaluate(() => { document.body.style.zoom = ''; });
 
-  // Opening settings and refreshing status are read-only, even with queued work.
-  status = modelState('QUEUED', true);await page.locator('[data-view="overview"]').click();await page.locator('[data-view="settings"]').click();
-  await page.waitForFunction(() => !document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy'));
-  assert.equal(processCount, 0);await refreshStatus();assert.equal(processCount, 0);
-  await settings().getByRole('button', { name:'Продолжить обработку',exact:true }).click();
-  await page.waitForFunction(() => !document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy'));
-  assert.equal(processCount,1);for (let i = 0; i < 3; i++) await readPoll();
-  const boundedReads = statusCount;await page.clock.runFor(30000);assert.equal(statusCount, boundedReads);assert.equal(processCount, 1);
-  await refreshStatus();assert.equal(processCount, 1, 'explicit status refresh is read-only');
-
-  processError = true;await settings().getByRole('button', { name: 'Продолжить обработку', exact: true }).click();
-  await settings().getByText(/Не удалось продолжить обучение/).waitFor();assert.equal(processCount, 2);
-  await readPoll();assert.match(await settings().innerText(), /Не удалось продолжить обучение/, 'polling must preserve a failed process message');
-  processError = false;advancingQueue = true;
-  const beforeBudget = processCount;await settings().getByRole('button', { name: 'Продолжить обработку', exact: true }).click();
-  await page.waitForFunction(() => !document.querySelector('#atlm-model-status')?.hasAttribute('aria-busy'));
-  for (let i = 0; i < 10; i++) await readPoll();
-  assert.equal(processCount - beforeBudget, 8, 'even changing checkpoints cannot cause unlimited automatic processing');
-  const finalReads = statusCount;await page.clock.runFor(30000);assert.equal(statusCount, finalReads);
-  assert.equal(await settings().getByRole('button', { name: 'Продолжить обработку', exact: true }).isVisible(), true);
-  assert.doesNotMatch(await settings().innerText(), /Не удалось продолжить обучение/);
-  advancingQueue = false;status = modelState('IDLE');await refreshStatus();
-
-  status = modelState('RETRY_WAIT');status.training.nextAttemptAt = c.now() + 60000;await refreshStatus();
-  const beforeWaitStart=startCount;await settings().getByRole('button',{name:'Проверить состояние',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('#atlm-model-status').hasAttribute('aria-busy'));
-  assert.equal(startCount,beforeWaitStart,'checking a pending attempt must not start training again');
-  assert.doesNotMatch(await settings().innerText(), /Попытка обучения завершена/, 'a delayed retry remains unfinished');
-  status = modelState('IDLE');await refreshStatus();
-
-  holdStart = true;const startsBefore = startCount;
-  await manual().focus();await page.keyboard.press('Enter');
-  await settings().getByRole('button', { name: 'Запускаем обучение…', exact: true }).waitFor();
-  assert.equal(await settings().getByRole('button').count(),1);assert.equal(await settings().getByRole('button',{name:'Запускаем обучение…',exact:true}).isDisabled(),true);
-  await settings().getByRole('button', { name: 'Запускаем обучение…', exact: true }).evaluate(button => button.click());
-  assert.equal(startCount, startsBefore + 1, 'duplicate clicks cannot submit another training request');
-  releaseStart();releaseStart = null;await manual().waitFor();assert.equal(await manual().isEnabled(), true);
-  startError = true;await manual().click();await settings().getByText(/Не удалось подтвердить запуск обучения/).waitFor();
-  assert.doesNotMatch(await settings().innerText(), /Попытка обучения завершена/, 'a new attempt cannot retain the previous success message');
-  const failedStarts = startCount;await page.clock.runFor(30000);assert.equal(startCount, failedStarts, 'a lost start response is never retried automatically');
-  startError = false;await settings().getByRole('button',{name:'Проверить состояние',exact:true}).click();await page.waitForFunction(()=>!document.querySelector('#atlm-model-status').hasAttribute('aria-busy'));assert.equal(startCount,failedStarts,'reconciling an unknown start outcome only reads status');await manual().click();await settings().getByText('Попытка обучения завершена.', { exact: true }).waitFor();
-  assert.doesNotMatch(await settings().innerText(), /Не удалось подтвердить запуск/);
-
-  for (const width of [320, 390, 768, 1440]) {
-    await page.setViewportSize({ width, height: 1100 });await open(PLAN);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `forecast overflows at ${width}`);
-    assert.equal(await forecast().getByRole('button').evaluate(node => node.getBoundingClientRect().height >= 42), true);
-    await page.screenshot({ path: resolve(artifacts, `atlm-plan-${width}.png`), fullPage: true });
-    await page.locator('[data-view="settings"]').click();await refreshStatus();
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `model status overflows at ${width}`);
-    assert.equal(await settings().getByRole('button').count(),1);await page.waitForFunction(()=>!document.querySelector('#atlm-model-status .atlm-controls button')?.disabled);await manual().focus();
-    assert.equal(await manual().evaluate(node=>node===document.activeElement),true);
-    await page.screenshot({ path: resolve(artifacts, `atlm-settings-${width}.png`), fullPage: true });
+  const moreCases = cases.getByRole('button', { name: 'Показать ещё планы' });
+  for (let count = 6; count <= 14; count += 2) {
+    await moreCases.click();
+    await page.waitForFunction(expected => document.querySelectorAll('#atlm-model-cases tbody tr').length === expected, count);
   }
-  controlled=false;await open(legacyPlan);assert.equal(await forecast().getByRole('button').count(),0);
-  assert.match(await forecast().innerText(),/зафиксирована при первом запуске/);
-  await ok(c,'PausePlan',{planId:legacyPlan},1);
-  controlled=false;
-  await open(legacyPlan);assert.equal(await forecast().getByRole('button').count(),0);
-  assert.match(await forecast().innerText(),/зафиксирована при первом запуске/);
-  controlled=true;
-  // Completed plans retain the frozen forecast and show the measured result.
-  controlled=false;
-  const completedStep = c.db.sqlite.prepare('SELECT step_id FROM plan_steps WHERE plan_id=?').get(otherPlan).step_id;
-  await assessForStart(c,otherPlan);await ok(c,'StartPlan',{planId:otherPlan},0);
-  await ok(c, 'SetStepStatus', { stepId: completedStep, status: 'DONE' }, 1);
-  await ok(c, 'FinishPlan', { planId: otherPlan }, 1);
-  await page.reload();await page.locator('#plans[data-loaded="true"]').waitFor({ state: 'attached' });
-  const estimateReads = requests.filter(item => item.path.endsWith('/' + otherPlan + '/estimate')).length;
-  await page.locator('[data-plan-id="' + otherPlan + '"] .plan-open').first().click();
-  await page.waitForFunction(id => document.querySelector('#planDetail')?.dataset.planId === id, otherPlan);
-  await forecast().waitFor();await page.waitForFunction(()=>!document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy'));
-  assert.match(await forecast().innerText(),/Факт:/);
-  assert.equal(requests.filter(item => item.path.endsWith('/' + otherPlan + '/estimate')).length, estimateReads+1);
+  assert.equal(await isFocused(moreCases), true);
+  assert.equal(await moreCases.getAttribute('aria-disabled'), 'true');
+  await settings.getByRole('status').filter({ hasText: 'Все планы загружены' }).waitFor();
+  await page.keyboard.press('Tab');
+  await moreCases.waitFor({ state: 'hidden' });
+
+  await navSettings.click();
+  await settings.getByText('Планов 14', { exact: true }).waitFor();
+  await moreRevisions.click();
+  await history.getByRole('button', { name: 'Показать ' + priorId, exact: true }).waitFor();
+  assert.equal(await isFocused(moreRevisions), true);
+  assert.equal(await moreRevisions.getAttribute('aria-disabled'), 'true');
+  await settings.getByRole('status').filter({ hasText: 'Все ревизии загружены' }).waitFor();
+  await page.keyboard.press('Tab');
+  await moreRevisions.waitFor({ state: 'hidden' });
+
+  const waiting = hold(url => url.searchParams.get('view') === 'detail' && url.searchParams.get('modelRevisionId') === priorId);
+  const prior = history.getByRole('button', { name: 'Показать ' + priorId, exact: true });
+  await prior.focus();
+  await page.keyboard.press('Enter');
+  await waiting.arrival.promise;
+  assert.equal(await isFocused(qualityHeading), true);
+  await settings.getByRole('button', { name: 'Вернуться к активной ревизии' }).click();
+  await settings.getByText('Планов 14', { exact: true }).waitFor();
+  waiting.release.resolve();
+  await prior.click();
+  await control.check();
+  await settings.getByRole('heading', { name: 'Проверка на отложенных планах по исходным признакам' }).waitFor();
+  assert.match(await reportPicker.locator('option:checked').textContent(), /по исходным признакам/);
+  await cases.getByRole('table').waitFor();
+  assert.match(await cases.getByRole('table').innerText(), /1,5 мин/);
+  await reportPicker.focus();
+  await reportPicker.selectOption({ label: 'Проверка на отложенной выборке' });
+  await cases.getByText('2,5 мин', { exact: true }).waitFor();
+  assert.equal(await isFocused(reportPicker), true);
+  assert.match(await current.innerText(), /atlm-11-r2/);
+
+  failRegistry = true;
+  await navSettings.click();
+  await settings.getByText('Обновить сведения не удалось', { exact: true }).waitFor();
+  await settings.getByText('Показаны данные от', { exact: false }).waitFor();
+  assert.equal(await activeLabel.count(), 0, 'stale content does not claim current serving');
+  failRegistry = false;
+  await retry.click();
+  await activeLabel.waitFor();
+  await settings.getByRole('heading', { name: 'Проверка на отложенной выборке' }).waitFor();
+  assert.equal(await history.evaluate(node => node.open), true);
+  assert.equal(await cases.evaluate(node => node.open), true);
+
+  await ok(c, 'DeletePlan', { planId: changedPlan }, 2);
+  await navSettings.click();
+  await current.getByText('Аннулирована', { exact: true }).waitFor();
+  assert.equal(await current.getByText('Используется для прогнозов', { exact: true }).count(), 0);
+  assert.equal(await settings.getByText('Накопление опыта', { exact: true }).count(), 0);
+  assert.ok(modelRequests().every(request => request.method === 'GET'));
+  const legacyPath = /^\/api\/tracker\/(atlm-dataset|estimation-model|estimation-training-history)(\/|$)/;
+  assert.equal(requests.some(item => legacyPath.test(item.path)), false);
   assert.deepEqual(errors, []);
-  console.log('ATLM UI: real cold start and queue recovery; saved/unknown/stale forecasts; rejection, errors and retry; late responses; bounded recovery; keyboard and 320/390/768/1440 layouts passed.');
-  console.log('Screenshots: ' + artifacts);
-} finally { releaseHeld?.();await browser.close();c.close(); }
+  console.log('Forecasts and read-only model overview: browser checks passed.');
+} finally {
+  releaseHeld?.();
+  holdModel?.release.resolve();
+  await browser.close();
+  c.close();
+}

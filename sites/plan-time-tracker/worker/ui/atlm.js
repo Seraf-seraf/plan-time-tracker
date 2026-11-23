@@ -1,210 +1,15 @@
 export const UI_ATLM = String.raw`(()=>{
-  const planRoot=document.querySelector("#planDetail"),settingsView=document.querySelector("#view-settings"),settingsRoot=settingsView?.querySelector(".settings-grid");
-  if(!planRoot||!settingsRoot)return;
+  const planRoot=document.querySelector("#planDetail");
+  if(!planRoot)return;
   const make=(tag,text,cls)=>{const el=document.createElement(tag);if(text!=null)el.textContent=text;if(cls)el.className=cls;return el;};
   const button=(text,action)=>{const el=make("button",text);el.type="button";el.addEventListener("click",action);return el;};
   const minutes=value=>new Intl.NumberFormat("ru-RU",{maximumFractionDigits:1}).format(value/60000)+" мин";
   const count=value=>Number.isSafeInteger(value)&&value>=0?value:0;
   const reasons={ASSESSMENT_REQUIRED:"До первого запуска не сохранены исходные признаки.",ASSESSMENT_INCOMPLETE:"Заполните обязательные поля оценки.",ASSESSMENT_INVALID:"Исправьте ошибки в оценке.",ASSESSMENT_SCHEMA_OUTDATED:"Требуется оценка по актуальной схеме.",ASSESSMENT_CONTEXT_CHANGED:"Требования или признаки изменились. Обновите оценку.",AVAILABLE:"Модель успешно обучена.",MISSING_REQUIRED_FEATURES:"Нужны признаки задачи.",HISTORY_RESET:"Нет нового прогноза для ранее начатого плана.",TRAINING_TIME_BUDGET:"Обучение не завершилось в отведённое время.",COLLECTING_DATA:"Пока недостаточно проверенных завершённых планов.",INCOMPLETE_FEATURES:"Для прогноза не хватает исходных сведений о задаче.",UNSUPPORTED_CATEGORY:"В накопленной истории ещё нет опыта для этого вида задачи.",MODEL_INVALIDATED:"Исходные данные модели изменились; требуется пересборка.",INVALID_PREDICTION:"Модель не смогла получить корректную оценку.",UNSUPPORTED_FORECAST_SCOPE:"Прогноз доступен для полного плана до первого запуска.",DATASET_LIMIT_REACHED:"Накопленные данные сохранены, но превышен текущий предел обучения.",RANK_DEFICIENT:"Данных пока недостаточно для независимой оценки влияния признаков.",MODEL_CAPACITY_LIMIT:"Превышен ресурсный предел числа коэффициентов модели. История сохранена.",INSUFFICIENT_DATA:"Пока недостаточно пригодных данных для обучения и проверки.",INSUFFICIENT_VALIDATION:"Пока недостаточно случаев для проверки новой модели.",INSUFFICIENT_EVALUATION_CASES:"В последней попытке не хватило проверочных сравнений. Новая версия допускает ранний прогноз с неподтверждённым качеством.",INSUFFICIENT_INCUMBENT_CASES:"Для замены действующей модели недостаточно независимых сравнений с ней.",MEDIAN_BASELINE_BETTER:"Новая модель ошибается сильнее обычной медианы прошлых длительностей.",MEDIAN_BASELINE_NOT_WORSE:"Медиана прошлых длительностей не хуже проверенных обучаемых способов. Новая обученная модель не активирована.",CANDIDATE_COVERAGE_WORSE:"Новая модель даёт прогноз для меньшей доли задач, чем действующая.",CANDIDATE_MAE_WORSE:"Средняя ошибка новой модели выше, чем у действующей.",SNAPSHOT_INVALIDATED:"Исходные данные изменились; подготовлена новая попытка обучения.",LEASE_EXPIRED:"Предыдущая обработка не завершилась вовремя; её состояние сохранено.",TRAINING_EXECUTION_FAILED:"Во время обучения произошёл технический сбой.",SOURCE_UNAVAILABLE:"Источник данных временно недоступен.",INVALID_ESTIMATION_SOURCE:"Сохранённый источник оценки не удалось проверить.",AVAILABLE:"Модель успешно обучена.",
     MISSING_FEATURES:"До первого запуска не сохранены исходные признаки.",INVALID_FEATURES:"Исходные признаки не соответствуют схеме.",PLAN_DELETED:"План удалён.",PLAN_NOT_COMPLETED:"План ещё не завершён.",RESULT_NOT_VERIFIED:"Результат и обязательные проверки не подтверждены.",SCOPE_CHANGED:"После начала изменился объём задачи.",INCOMPLETE_MEASUREMENT:"Нет полного подтверждённого измерения активного времени."};
-  const statuses={IDLE:"Ожидаем новые планы",QUEUED:"Обучение в очереди",RUNNING:"Модель обучается",RETRY_WAIT:"Ожидание повторной попытки",COLLECTING_DATA:"Недостаточно данных",REJECTED:"Новая модель не прошла проверку",FAILED:"Не удалось завершить обучение"};
-  const style=make("style");style.textContent=".atlm-panel{min-width:0;overflow-wrap:anywhere}.atlm-panel p{margin:9px 0}.atlm-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.atlm-heading h2,.atlm-heading h3{margin:0}.atlm-panel button{min-height:44px;white-space:normal}.atlm-controls{display:flex;gap:8px;flex-wrap:wrap}.atlm-point{font-size:1.35rem;font-weight:700;color:var(--ink)}.atlm-plan-estimate{margin:18px 0;padding:16px;border:1px solid var(--line-strong,var(--line));border-radius:var(--radius,10px);background:var(--paper-3,var(--panel))}.atlm-note{color:var(--ink-2,var(--muted));font-size:.9rem}.atlm-stale{border-left:3px solid var(--amber,var(--amber));padding-left:10px}.atlm-range-text,.atlm-fact{font-variant-numeric:tabular-nums}.atlm-scale{height:14px;position:relative;margin:18px 6px;background:var(--paper-2);border-radius:8px}.atlm-band{position:absolute;height:8px;top:3px;background:var(--amber);border-radius:8px}.atlm-marker,.atlm-fact-marker{position:absolute;top:0;height:14px;border-left:3px solid var(--ink)}.atlm-fact-marker{border-color:var(--blue)}.atlm-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:1px;background:var(--line);border:1px solid var(--line)}.atlm-metric{display:grid;gap:8px;padding:12px;background:var(--paper-2)}.atlm-metric strong{font-variant-numeric:tabular-nums}.atlm-metrics-help{margin:16px 0}.atlm-attempts{margin-top:24px}.atlm-table-wrap{max-width:100%;overflow-x:auto}.atlm-table-wrap table{width:100%;border-collapse:collapse;text-align:left;font-size:.9rem}.atlm-table-wrap th,.atlm-table-wrap td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}.atlm-panel summary{min-height:44px;display:flex;align-items:center;cursor:pointer}.atlm-panel summary::before{content:'▸';margin-right:6px}.atlm-panel details[open]>summary::before{content:'▾'}.atlm-table-wrap:focus-visible{outline:3px solid var(--amber-text);outline-offset:2px}.atlm-features{margin-top:16px}.atlm-features dl{display:grid;grid-template-columns:minmax(8rem,1fr) minmax(0,2fr);gap:6px 12px}.atlm-features dd{margin:0}.atlm-features h4{margin:14px 0 4px}@media(max-width:390px){.atlm-heading{align-items:flex-start}.atlm-controls{width:100%}.atlm-controls button{flex:1 1 100%}}";document.head.append(style);
-  style.textContent += "#atlm-model-status{grid-column:1/-1}";
+  const style=make("style");style.textContent=".atlm-panel{min-width:0;overflow-wrap:anywhere}.atlm-panel p{margin:9px 0}.atlm-heading{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px}.atlm-heading h2,.atlm-heading h3{margin:0}.atlm-panel button{min-height:44px;white-space:normal}.atlm-controls{display:flex;gap:8px;flex-wrap:wrap}.atlm-point{font-size:1.35rem;font-weight:700;color:var(--ink)}.atlm-plan-estimate{margin:18px 0;padding:16px;border:1px solid var(--line-strong,var(--line));border-radius:var(--radius,10px);background:var(--paper-3,var(--panel))}.atlm-note{color:var(--ink-2,var(--muted));font-size:.9rem}.atlm-stale{border-left:3px solid var(--amber,var(--amber));padding-left:10px}.atlm-range-text,.atlm-fact{font-variant-numeric:tabular-nums}.atlm-scale{height:14px;position:relative;margin:18px 6px;background:var(--paper-2);border-radius:8px}.atlm-band{position:absolute;height:8px;top:3px;background:var(--amber);border-radius:8px}.atlm-marker,.atlm-fact-marker{position:absolute;top:0;height:14px;border-left:3px solid var(--ink)}.atlm-fact-marker{border-color:var(--blue)}.atlm-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:1px;background:var(--line);border:1px solid var(--line)}.atlm-metric{display:grid;gap:8px;padding:12px;background:var(--paper-2)}.atlm-metric strong{font-variant-numeric:tabular-nums}.atlm-metrics-help{margin:16px 0}.atlm-table-wrap{max-width:100%;overflow-x:auto}.atlm-table-wrap table{width:100%;border-collapse:collapse;text-align:left;font-size:.9rem}.atlm-table-wrap th,.atlm-table-wrap td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}.atlm-panel summary{min-height:44px;display:flex;align-items:center;cursor:pointer}.atlm-panel summary::before{content:'▸';margin-right:6px}.atlm-panel details[open]>summary::before{content:'▾'}.atlm-table-wrap:focus-visible{outline:3px solid var(--amber-text);outline-offset:2px}.atlm-features{margin-top:16px}.atlm-features dl{display:grid;grid-template-columns:minmax(8rem,1fr) minmax(0,2fr);gap:6px 12px}.atlm-features dd{margin:0}.atlm-features h4{margin:14px 0 4px}@media(max-width:390px){.atlm-heading{align-items:flex-start}.atlm-controls{width:100%}.atlm-controls button{flex:1 1 100%}}";document.head.append(style);
   style.textContent += ".atlm-feature-hint,.atlm-feature-reason{display:block;color:var(--ink-2,var(--muted));font-size:.85rem;line-height:1.4;margin-top:3px}.atlm-features dl{row-gap:14px}@media(max-width:600px){.atlm-features dl{grid-template-columns:1fr;gap:4px}.atlm-features dd{margin-bottom:12px}}";
-  let supported=false,capabilityPending=false,planToken=0,planAbort=null,statusPending=null,pollTimer=null,pollsLeft=0,autoBudget=8,processPending=false,startPending=false,lastProcessFailure=null,latestStatus=null,recoveryAction=null;
-  const processed=new Set();
-  const statusPanel=make("article",null,"panel atlm-panel");statusPanel.id="atlm-model-status";statusPanel.setAttribute("aria-labelledby","atlm-model-heading");
-  const statusHeading=make("h2","Накопление опыта");statusHeading.id="atlm-model-heading";
-  const statusBody=make("div");statusBody.setAttribute("role","status");statusBody.setAttribute("aria-live","polite");
-  const startTraining=button("Начать обучение",trainingAction);
-  const controls=make("div",null,"atlm-controls");controls.append(startTraining);
-  const statusOverview = make("div", null, "atlm-status-overview");
-  statusOverview.append(statusBody, controls);
-  const statusDetails = make("details", null, "atlm-status-details");
-  const statusFacts = make("div");
-  statusDetails.hidden = true;
-  statusDetails.append(make("summary", "Данные и качество"), statusFacts);
-  const attemptsRegion=make("section",null,"atlm-attempts");attemptsRegion.append(make("h3","Попытки обучения"));
-  const attemptsBody=make("div","Загружаем историю…");attemptsBody.setAttribute("aria-live","polite");attemptsRegion.append(attemptsBody);
-  statusPanel.append(statusHeading, statusOverview, statusDetails, attemptsRegion);
-  let attemptsToken=0,attemptsCursor=null,attemptsRows=[];
-  async function loadAttempts({more=false,refresh=false}={}){
-    const token=++attemptsToken;
-    const loadedCount=refresh?attemptsRows.length:0;
-    const rows=more?attemptsRows.slice():[];
-    let cursor=more?attemptsCursor:null;
-    if(!more&&!refresh){attemptsRows=[];attemptsCursor=null;attemptsBody.replaceChildren(make("p","Загружаем историю…","atlm-note"));}
-    try{
-      do{
-        const query=cursor?"?limit=50&cursor="+encodeURIComponent(cursor):"?limit=50";
-        const page=await api("/api/tracker/estimation-training-history"+query);
-        if(token!==attemptsToken)return;
-        if(!Array.isArray(page.rows))throw new Error("Неполная история обучения.");
-        rows.push(...page.rows);cursor=page.nextCursor;
-      }while(cursor&&rows.length<loadedCount);
-      attemptsRows=rows;attemptsCursor=cursor;attemptsBody.replaceChildren();
-      if(!attemptsRows.length){attemptsBody.append(make("p","Попыток обучения пока нет.","atlm-note"));return;}
-      attemptsBody.append(renderAttempts(attemptsRows));
-      if(attemptsCursor)attemptsBody.append(button("Показать ещё",()=>loadAttempts({more:true})));
-    }catch(error){if(token!==attemptsToken)return;attemptsBody.replaceChildren(make("p","Не удалось загрузить историю. "+error.message,"error"),button("Повторить загрузку истории",()=>loadAttempts({refresh})));}
-    finally{if(token===attemptsToken&&!statusPending&&!startPending&&pollTimer===null)schedulePoll();}
-  }
-  const trainingColumns = ["Дата", "Результат", "Примеры", "Точка", "Интервал", "Причина"];
-  const trainingEngines = {
-    OLS: "OLS", RIDGE: "Ridge", BAYESIAN: "Байесовская",
-    BAYESIAN_PREDICTIVE: "Байесовский", BAYES_QUANTILE: "Квантильный"
-  };
-  const trainingPhases = {EVALUATE: "Проверка на истории", FIT: "Расчёт моделей", CALIBRATION: "Калибровка интервала"};
-  const trainingFailures = new Set([
-    "LEASE_EXPIRED", "TRAINING_EXECUTION_FAILED", "SOURCE_UNAVAILABLE",
-    "INVALID_ESTIMATION_SOURCE", "TRAINING_TIME_BUDGET", "DATASET_LIMIT_REACHED"
-  ]);
-  function attemptOutcome(item) {
-    if (item.completedAt === null) return {tone: "pending", label: "В работе"};
-    if (!item.reason) return {tone: "success", label: "Модель обучена"};
-    if (item.reason === "TRAINING_TIME_BUDGET") return {tone: "error", label: "Таймаут"};
-    if (trainingFailures.has(item.reason)) return {tone: "error", label: "Прервано"};
-    if (item.reason.startsWith("INSUFFICIENT_")) return {tone: "neutral", label: "Недостаточно данных"};
-    return {tone: "neutral", label: "Кандидат отклонён"};
-  }
-  function candidateSummary(candidate) {
-    if (candidate.status === "AVAILABLE") return "Доступен";
-    if (candidate.reason === "INSUFFICIENT_DATA" && candidate.p > candidate.sampleCount) {
-      return "Примеров: " + candidate.sampleCount + ", коэффициентов: " + candidate.p;
-    }
-    return candidate.reason ? reasonText(candidate.reason) : "Недоступен";
-  }
-  function renderAttempts(attempts) {
-    const wrap = make("div", null, "atlm-table-wrap atlm-history-wrap");
-    wrap.tabIndex = 0;
-    wrap.setAttribute("role", "region");
-    wrap.setAttribute("aria-label", "Таблица попыток обучения");
-    const table = make("table", null, "atlm-history");
-    table.setAttribute("role", "table");
-    const head = make("thead"), headRow = make("tr"), body = make("tbody");
-    head.setAttribute("role", "rowgroup");
-    headRow.setAttribute("role", "row");
-    body.setAttribute("role", "rowgroup");
-    for (const label of trainingColumns) {
-      const th = make("th", label);
-      th.scope = "col";
-      th.setAttribute("role", "columnheader");
-      headRow.append(th);
-    }
-    head.append(headRow);
-    table.append(head, body);
-    const timeZone = document.querySelector("#tz")?.value || "UTC";
-    const timestamp = new Intl.DateTimeFormat("ru-RU", {dateStyle: "short", timeStyle: "short", timeZone});
-    const seconds = new Intl.NumberFormat("ru-RU", {maximumFractionDigits: 1});
-    for (const item of attempts.slice().reverse()) {
-      const outcome = attemptOutcome(item);
-      const diagnostic = item.diagnostics?.parameters;
-      const row = make("tr");
-      row.dataset.outcome = outcome.tone;
-      row.setAttribute("role", "row");
-      const appendCell = (index, content, className) => {
-        const cell = make("td", null, className);
-        const label = make("span", trainingColumns[index], "atlm-cell-label");
-        label.setAttribute("aria-hidden", "true");
-        cell.setAttribute("role", "cell");
-        cell.append(label, content);
-        row.append(cell);
-      };
-      const date = make("time", "Неизвестно");
-      if (Number.isSafeInteger(item.startedAt)) {
-        const start = new Date(item.startedAt);
-        date.dateTime = start.toISOString();
-        date.textContent = timestamp.format(start);
-      }
-      const time = make("div");
-      time.append(date);
-      if (Number.isSafeInteger(item.startedAt) && Number.isSafeInteger(item.completedAt) && item.completedAt >= item.startedAt) {
-        const duration = make("span", seconds.format((item.completedAt - item.startedAt) / 1000) + " с всего", "atlm-attempt-duration");
-        duration.title = "Календарное время попытки, включая ожидание продолжений.";
-        time.append(duration);
-      }
-      appendCell(0, time, "atlm-attempt-date");
-      appendCell(1, make("strong", outcome.label, "atlm-attempt-outcome"), "atlm-attempt-status");
-      const sampleCount = Number.isSafeInteger(diagnostic?.sampleCount) ? diagnostic.sampleCount
-        : Array.isArray(item.manifest) && (item.manifest.length || (item.completedAt !== null && !trainingFailures.has(item.reason)))
-          ? item.manifest.length : null;
-      appendCell(2, make("span", sampleCount === null ? "Нет сведений" : String(sampleCount)), "atlm-attempt-count");
-      const point = item.selected?.point?.selectedEngine;
-      const interval = item.selected?.interval?.selectedEngine;
-      appendCell(3, make("span", trainingEngines[point] ?? point ?? "Нет"), "atlm-attempt-point");
-      appendCell(4, make("span", trainingEngines[interval] ?? interval ?? "Нет"), "atlm-attempt-interval");
-
-      const reason = make("div");
-      if (item.reason) {
-        const explanation = item.reason === "TRAINING_TIME_BUDGET"
-          ? "Исчерпан бюджет времени прохода."
-          : reasonText(item.reason);
-        reason.append(make("span", explanation));
-      }
-      const comparison = item.diagnostics?.incumbentComparison;
-      if (Number.isSafeInteger(comparison?.commonCaseCount) && Number.isSafeInteger(comparison?.requiredCaseCount)) {
-        reason.append(make("div", "Независимых сравнений: " + comparison.commonCaseCount + " из " + comparison.requiredCaseCount + ".", "atlm-note"));
-      }
-      const candidates = Object.entries(item.diagnostics?.candidates || {});
-      const phase = trainingPhases[diagnostic?.phase];
-      if (phase || candidates.length) {
-        const details = make("details", null, "atlm-attempt-details");
-        details.append(make("summary", "Подробности"));
-        const facts = make("dl");
-        const addFact = (label, value) => facts.append(make("dt", label), make("dd", value));
-        if (phase) {
-          addFact("Этап", phase);
-          if (Number.isSafeInteger(diagnostic.completedCases))
-            addFact("Обработано примеров", String(diagnostic.completedCases));
-          if (Number.isSafeInteger(diagnostic.stalledPasses))
-            addFact("Проходов без прогресса", String(diagnostic.stalledPasses));
-          if (Number.isFinite(diagnostic.passElapsedMs))
-            addFact("Последний проход", seconds.format(diagnostic.passElapsedMs / 1000) + " с");
-        }
-        for (const [name, candidate] of candidates) {
-          const engine = name.toUpperCase();
-          addFact(trainingEngines[engine] ?? engine, candidateSummary(candidate));
-        }
-        details.append(facts);
-        reason.append(details);
-      } else if (!item.reason) {
-        reason.append(make("span", "Нет", "atlm-note"));
-      }
-      appendCell(5, reason, "atlm-attempt-reason");
-      body.append(row);
-    }
-    wrap.append(table);
-    return wrap;
-  }
-  function updateControls(){
-    startTraining.disabled=startPending||processPending||statusPending!==null;
-    const stalled=latestStatus?.training.due&&(autoBudget<=0||processed.has(queueKey(latestStatus)));
-    startTraining.textContent=startPending?"Запускаем обучение…":statusPending!==null?"Проверяем состояние…":recoveryAction==="status"?"Проверить состояние":recoveryAction==="process"||stalled||latestStatus?.training.due?"Продолжить обработку":["QUEUED","RUNNING","RETRY_WAIT"].includes(latestStatus?.training.status)?"Проверить состояние":"Начать обучение";
-  }
-  function trainingAction(){
-    if(startPending||processPending||statusPending)return;
-    if(recoveryAction==="status")return loadStatus(false);
-    if(recoveryAction==="process"||latestStatus?.training.due||["QUEUED","RUNNING","RETRY_WAIT"].includes(latestStatus?.training.status)){
-      autoBudget=8;processed.clear();lastProcessFailure=null;recoveryAction=null;pollsLeft=3;return loadStatus(true);
-    }
-    return requestTraining();
-  }
-  async function requestTraining(){
-    if(startPending||processPending||statusPending)return;
-    statusBody.querySelectorAll(".atlm-start-feedback,.atlm-process-feedback").forEach(message=>message.remove());lastProcessFailure=null;
-    startPending=true;clearPoll();statusPanel.setAttribute("aria-busy","true");updateControls();
-    startTraining.textContent="Запускаем обучение…";
-    try{
-      const data=await api("/api/tracker/estimation-model/start",{method:"POST",body:"{}"});
-      lastProcessFailure=null;recoveryAction=null;processed.clear();autoBudget=8;pollsLeft=3;showStatus(data);loadAttempts();
-      const pending=data.training.due||["QUEUED","RUNNING","RETRY_WAIT"].includes(data.training.status);
-      statusBody.append(make("p",pending?"Запрос принят.":"Попытка обучения завершена.","atlm-note atlm-start-feedback"));
-      schedulePoll(true);
-    }catch(error){
-      recoveryAction="status";lastProcessFailure="Не удалось подтвердить запуск обучения. "+error.message+" Обновите состояние перед повторным запуском.";
-      statusBody.append(make("p",lastProcessFailure,"error atlm-start-feedback"));
-    }finally{startPending=false;startTraining.textContent="Начать обучение";statusPanel.removeAttribute("aria-busy");updateControls();}
-  }
+  let planToken=0,planAbort=null;
   async function api(path,options={}){
     const response=await fetch(path,{cache:"no-store",...options,headers:{"content-type":"application/json",...options.headers}});
     const data=await response.json().catch(()=>null);
@@ -291,139 +96,8 @@ export const UI_ATLM = String.raw`(()=>{
     }
     target.append(details);
   }
-  function modelQuality(model) {
-    const evaluation = model.evaluation;
-    const checked = count(evaluation?.pointCaseCount);
-    const confirmed = model.accuracy === "HISTORICALLY_EVALUATED" && checked >= 5
-      && (evaluation.metricsScope !== "FULL_POLICY" || evaluation.modelCaseCount >= 5);
-    return confirmed ? "Проверена на истории" : "Экспериментальная";
-  }
-  function addStatusFact(list, label, value) {
-    const item = make("div");
-    item.append(make("dt", label), make("dd", String(value)));
-    list.append(item);
-  }
-  function renderStatusDetails(data) {
-    const facts = make("dl", null, "atlm-status-facts");
-    addStatusFact(facts, "Исключено планов", data.excludedSampleCount);
-    const model = data.activeModel;
-    if (model) {
-      const evaluation = model.evaluation;
-      const fullPolicy = evaluation?.metricsScope === "FULL_POLICY";
-      const point = model.hybrid?.selectedEngine;
-      const interval = model.hybrid?.intervalEngine;
-      const checked = evaluation?.pointCaseCount;
-      const version = model.modelVersion ?? model.modelId;
-      if (version != null) addStatusFact(facts, "Версия модели", version);
-      addStatusFact(facts, "Планов в модели", model.sampleCount);
-      if (point) addStatusFact(facts, "Точечный метод", trainingEngines[point] ?? point);
-      if (interval) addStatusFact(facts, "Интервал", trainingEngines[interval] ?? interval);
-      if (Number.isSafeInteger(checked)) addStatusFact(facts, "Проверено прогнозов", checked);
-      if (fullPolicy && Number.isSafeInteger(evaluation.modelCaseCount))
-        addStatusFact(facts, "Из них прогнозы модели", evaluation.modelCaseCount);
-      const mae = evaluation?.maeMs;
-      const errorLabel = fullPolicy ? "Средняя ошибка с учётом запасного прогноза" : "Средняя ошибка";
-      addStatusFact(facts, errorLabel, checked > 0 && Number.isFinite(mae) && mae >= 0 ? minutes(mae) : "Нет оценки");
-      if (fullPolicy && Number.isFinite(evaluation.medianBaselineMaeMs))
-        addStatusFact(facts, "Ошибка медианы на тех же задачах", minutes(evaluation.medianBaselineMaeMs));
-      if (fullPolicy && Number.isSafeInteger(evaluation.profileGroupCount))
-        addStatusFact(facts, "Разных профилей задач", evaluation.profileGroupCount);
-    }
-    statusFacts.replaceChildren(facts);
-    const exclusions = make("ul", null, "atlm-status-exclusions");
-    for (const item of Array.isArray(data.exclusionReasons) ? data.exclusionReasons : []) {
-      if (typeof item.reason === "string" && Number.isSafeInteger(item.count) && item.count > 0)
-        exclusions.append(make("li", reasonText(item.reason) + " Планов: " + item.count + "."));
-    }
-    if (exclusions.childElementCount) {
-      statusFacts.append(exclusions);
-      if (exclusions.childElementCount > 1)
-        statusFacts.append(make("p", "У одного плана может быть несколько причин.", "atlm-note"));
-    }
-    statusDetails.hidden = false;
-  }
-  function showStatus(data) {
-    const training = data.training;
-    const counts = [data.newPlansSinceTraining, data.eligibleSampleCount, data.excludedSampleCount];
-    if (!training || !Object.hasOwn(statuses, training.status)
-      || !counts.every(value => Number.isSafeInteger(value) && value >= 0)
-      || !Number.isSafeInteger(data.retrainEveryNewPlans) || data.retrainEveryNewPlans < 1
-      || typeof training.due !== "boolean" || !Object.hasOwn(data, "activeModel")
-      || (data.activeModel !== null && (!Number.isSafeInteger(data.activeModel?.sampleCount) || data.activeModel.sampleCount < 1))) {
-      throw new Error("Не удалось прочитать состояние обучения.");
-    }
-
-    latestStatus = data;
-    const busy = ["QUEUED", "RUNNING", "RETRY_WAIT"].includes(training.status);
-    statusBody.replaceChildren(make("p", statuses[training.status], "atlm-status-title"));
-    const progress = training.progress;
-    if (busy && progress?.phase !== "DONE" && Number.isSafeInteger(progress?.totalCases) && progress.totalCases > 0) {
-      statusBody.append(make("p", "Проверено примеров: " + count(progress.completedCases) + " из " + progress.totalCases, "atlm-note"));
-    }
-    if (training.status === "RETRY_WAIT" && Number.isFinite(training.nextAttemptAt)) {
-      const timeZone = document.querySelector("#tz")?.value || "UTC";
-      const time = new Intl.DateTimeFormat("ru-RU", {dateStyle: "short", timeStyle: "short", timeZone});
-      statusBody.append(make("p", "Повтор с " + time.format(new Date(training.nextAttemptAt)), "atlm-note"));
-    }
-    const reason = data.lastError || data.lastReason;
-    if (reason && (training.status === "FAILED" || training.status === "REJECTED")) {
-      statusBody.append(make("p", reasonText(reason), training.status === "FAILED" ? "error" : "atlm-note"));
-    }
-
-    const overview = make("dl", null, "atlm-status-metrics");
-    addStatusFact(overview, "Активная модель", data.activeModel ? modelQuality(data.activeModel) : "Нет");
-    addStatusFact(overview, "Пригодных планов", data.eligibleSampleCount);
-    if (!busy && !training.due && data.newPlansSinceTraining < data.retrainEveryNewPlans) {
-      addStatusFact(overview, "Планов до автообучения", data.retrainEveryNewPlans - data.newPlansSinceTraining);
-    }
-    statusBody.append(overview);
-    if (lastProcessFailure) statusBody.append(make("p", lastProcessFailure, "error atlm-process-feedback"));
-    renderStatusDetails(data);
-    updateControls();
-  }
-  function queueKey(data){const t=data.training;return JSON.stringify([data.datasetRevision,t.generation,t.progressRevision,t.pendingRefreshCount,t.nextAttemptAt]);}
-  function canObserveTraining(){return supported&&document.visibilityState==="visible"&&!settingsView.classList.contains("hidden");}
-  function hasPendingAttempts(){return attemptsRows.some(item=>item.completedAt===null);}
-  function historyKey(data){return JSON.stringify([data.training.generation,data.training.status,data.lastAttempt?.completedAt]);}
-  function clearPoll(){clearTimeout(pollTimer);pollTimer=null;}
-  function schedulePoll(allowProcess=false){
-    clearPoll();
-    if(!canObserveTraining())return;
-    const continueProcessing=allowProcess&&pollsLeft>0;
-    if(!continueProcessing&&latestStatus?.training.status!=="RUNNING"&&!hasPendingAttempts())return;
-    if(continueProcessing)pollsLeft--;
-    pollTimer=setTimeout(()=>{
-      pollTimer=null;
-      if(canObserveTraining())loadStatus(continueProcessing);
-    },continueProcessing?750:4000);
-  }
-  function loadStatus(allowProcess=true){
-    if(!supported||startPending)return Promise.resolve();if(statusPending)return statusPending;
-    statusPanel.setAttribute("aria-busy","true");
-    statusPending=(async()=>{
-      try{
-        const previous=latestStatus;
-        const data=await api("/api/tracker/estimation-model");if(recoveryAction==="status"){recoveryAction=null;lastProcessFailure=null;}showStatus(data);
-        const statusChanged=previous&&historyKey(previous)!==historyKey(data);
-        const stalePendingRow=!["RUNNING","QUEUED","RETRY_WAIT"].includes(data.training.status)&&hasPendingAttempts();
-        if(canObserveTraining()&&(statusChanged||stalePendingRow))loadAttempts({refresh:true});
-        const key=queueKey(data);
-        if(allowProcess&&canObserveTraining()&&data.training.due&&!processPending&&autoBudget>0&&!processed.has(key)){
-          processed.add(key);autoBudget--;processPending=true;updateControls();
-          try{await api("/api/tracker/estimation-model/process",{method:"POST",body:"{}"});lastProcessFailure=null;pollsLeft=Math.max(pollsLeft,3);}
-          catch(error){recoveryAction="process";lastProcessFailure="Не удалось продолжить обучение. "+error.message;statusBody.append(make("p",lastProcessFailure,"error atlm-process-feedback"));}
-          finally{processPending=false;updateControls();}
-        }
-      }catch(error){recoveryAction="status";statusDetails.hidden=true;statusBody.replaceChildren(make("p","Не удалось загрузить состояние обучения. "+error.message,"error"));}
-      finally{
-        statusPending=null;updateControls();statusPanel.removeAttribute("aria-busy");
-        const pendingWork=latestStatus?.training.due||latestStatus?.training.status==="RUNNING";
-        schedulePoll(allowProcess&&pendingWork);
-      }
-    })();updateControls();return statusPending;
-  }
   async function loadPlan(planId,retry=0){
-    if(!supported||!planId||planRoot.dataset.planId!==planId)return;
+    if(!planId||planRoot.dataset.planId!==planId)return;
     const token=++planToken;planAbort?.abort();planAbort=new AbortController();
     planRoot.querySelector(".atlm-plan-estimate")?.remove();
     if(planRoot.dataset.deleted==="true")return;
@@ -490,56 +164,168 @@ export const UI_ATLM = String.raw`(()=>{
     }catch(error){if(token!==planToken||planRoot.dataset.planId!==planId||error.name==="AbortError")return;body.replaceChildren(make("p","Не удалось загрузить прогноз. "+error.message,"error"));}
     finally{if(token===planToken&&panel.isConnected){refresh.disabled=false;panel.removeAttribute("aria-busy");}}
   }
-  const analyticsRoot=document.querySelector("#view-analytics"),qualityPanel=make("section",null,"panel atlm-panel atlm-analytics");
-  const qualityHeading=make("h2","Качество прогнозов"),qualityBody=make("div","Загружаем…");qualityBody.setAttribute("aria-live","polite");qualityPanel.append(qualityHeading,qualityBody);analyticsRoot?.append(qualityPanel);
-  let qualityToken=0,qualityRows=[],qualityPage=0;
-  function renderQuality(){
-    qualityBody.replaceChildren();const rows=qualityRows,points=rows.filter(row=>Number.isSafeInteger(row.issuedPrediction?.pointMs));
-    const intervals=points.filter(row=>row.issuedPrediction.interval?.status==="AVAILABLE" && Number.isSafeInteger(row.issuedPrediction.interval.lowerMs) && Number.isSafeInteger(row.issuedPrediction.interval.upperMs));
-    if(!rows.length){qualityBody.append(make("p","Нет наблюдений за выбранный период.","atlm-note"));return;}
-    const errors=points.map(row=>row.issuedPrediction.pointMs-row.actualMs),absolute=errors.map(Math.abs).sort((a,b)=>a-b),sum=values=>values.reduce((a,b)=>a+b,0),actual=sum(points.map(row=>row.actualMs));
-    const medianError=absolute.length?(absolute[Math.floor((absolute.length-1)/2)]+absolute[Math.floor(absolute.length/2)])/2:null;
-    const rate=value=>Number.isFinite(value)?new Intl.NumberFormat("ru-RU",{maximumFractionDigits:1}).format(value)+"%":"—";
-    const metric=(label,value)=>{const item=make("div",null,"atlm-metric");item.append(make("span",label),make("strong",value));return item;};
-    const stats=make("div",null,"atlm-metrics");stats.append(metric("Средняя ошибка",points.length?minutes(sum(absolute)/points.length):"—"),metric("Медианная ошибка",medianError===null?"—":minutes(medianError)),
-      metric("WAPE",actual?rate(100*sum(absolute)/actual):"—"),metric("Смещение",actual?rate(100*sum(errors)/actual):"—"),
-      metric("Прогнозы",points.length+" / "+rows.length),metric("Попадания в диапазон",intervals.filter(row=>row.issuedPrediction.interval.lowerMs<=row.actualMs&&row.actualMs<=row.issuedPrediction.interval.upperMs).length+" / "+intervals.length),
-      metric("Средняя ширина",intervals.length?minutes(sum(intervals.map(row=>row.issuedPrediction.interval.upperMs-row.issuedPrediction.interval.lowerMs))/intervals.length):"—"));qualityBody.append(stats);
-    const help=make("details",null,"atlm-metrics-help");help.append(make("summary","Как читать показатели"),make("p","Ошибки сравнивают прогноз и фактическое активное время. WAPE и смещение не рассчитываются при нулевой сумме факта. Попадания считаются только для доступных диапазонов; цель 80% не является гарантией.","atlm-note"));qualityBody.append(help);
-    const wrap=make("div",null,"atlm-table-wrap"),table=make("table"),head=make("thead"),hr=make("tr");wrap.setAttribute("tabindex","0");wrap.setAttribute("role","region");wrap.setAttribute("aria-label","Таблица прогнозов и фактического времени");
-    for(const label of ["План","Прогноз","Диапазон","Факт","Ошибка"])hr.append(make("th",label));head.append(hr);table.append(head);const body=make("tbody");
-    for(const row of rows.slice(qualityPage*10,qualityPage*10+10)){const tr=make("tr"),prediction=row.issuedPrediction;for(const value of [row.title||row.planId,prediction?.pointMs!=null?minutes(prediction.pointMs):"—",prediction?.interval?.status==="AVAILABLE"?intervalText(prediction.interval):"—",minutes(row.actualMs),prediction?.pointMs!=null?minutes(prediction.pointMs-row.actualMs):"—"])tr.append(make("td",value));body.append(tr);}table.append(body);wrap.append(table);qualityBody.append(wrap);
-    const pages=Math.ceil(rows.length/10),nav=make("div",null,"atlm-controls");const previous=button("Назад",()=>{qualityPage--;renderQuality();}),next=button("Далее",()=>{qualityPage++;renderQuality();});previous.disabled=qualityPage===0;next.disabled=qualityPage+1>=pages;nav.append(previous,make("span","Страница "+(qualityPage+1)+" из "+pages),next);qualityBody.append(nav);
+  const ISSUED_PAGE_SIZE = 10;
+  const analyticsRoot = document.querySelector("#view-analytics");
+  const qualityPanel = make("section", null, "panel atlm-panel atlm-analytics");
+  const qualityHeading = make("h2", "Выданные прогнозы всех версий за выбранный период");
+  qualityHeading.id = "atlm-issued-history-heading";
+  qualityHeading.tabIndex = -1;
+  qualityPanel.setAttribute("aria-labelledby", qualityHeading.id);
+  const qualityBody = make("div");
+  const qualityStatus = make("p", null, "atlm-note");
+  qualityStatus.setAttribute("role", "status");
+  const qualityActions = make("div", null, "atlm-controls");
+  qualityPanel.append(qualityHeading, qualityBody, qualityStatus, qualityActions);
+  analyticsRoot.append(qualityPanel);
+
+  let qualityAbort = null;
+  let qualityRows = null;
+  let qualityParams = null;
+  const numberFormat = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
+  const qualityValue = (value, format) => Number.isFinite(value) ? format(value) : "Нет оценки";
+  const ratioText = value => Number.isFinite(value?.numerator) && Number.isFinite(value?.denominator)
+    ? value.numerator + " / " + value.denominator : "Нет оценки";
+  function metric(label, value) {
+    const item = make("div", null, "atlm-metric");
+    item.append(make("span", label), make("strong", value));
+    return item;
   }
-  async function loadQuality(){
-    const token=++qualityToken;qualityBody.replaceChildren(make("p","Загружаем данные…","atlm-note"));
-    try{let cursor=null,all=[];do{const page=await api("/api/tracker/atlm-dataset",{method:"POST",body:JSON.stringify({limit:100,...(cursor?{cursor}:{})})});if(token!==qualityToken)return;all.push(...page.rows);cursor=page.nextCursor;}while(cursor);
-      const latest=new Map();for(const row of all)latest.set(row.planId,row);
-      const planFacts=new Map();let planCursor=null;do{const list=await api("/api/plans?limit=100"+(planCursor?"&cursor="+encodeURIComponent(planCursor):""));if(token!==qualityToken)return;
-        for(const plan of list.plans)planFacts.set(plan.planId,{title:plan.title,finishedAt:plan.finishedAt});planCursor=list.nextCursor;}while(planCursor);
-      const from=document.querySelector("#from")?.value,to=document.querySelector("#to")?.value,zone=document.querySelector("#tz")?.value||"UTC";
-      const day=ms=>new Intl.DateTimeFormat("en-CA",{timeZone:zone,year:"numeric",month:"2-digit",day:"2-digit"}).format(new Date(ms));
-      qualityRows=[...latest.values()].map(row=>({...row,...planFacts.get(row.planId)})).filter(row=>row.eligibility==="ELIGIBLE"&&Number.isSafeInteger(row.actualMs)&&Number.isSafeInteger(row.finishedAt)&&(!from||day(row.finishedAt)>=from)&&(!to||day(row.finishedAt)<=to)).sort((a,b)=>b.finishedAt-a.finishedAt||a.planId.localeCompare(b.planId));qualityPage=0;renderQuality();
-    }catch(error){if(token!==qualityToken)return;qualityBody.replaceChildren(make("p","Не удалось загрузить качество прогнозов. "+error.message,"error"),button("Повторить загрузку качества",loadQuality));}
+
+  function renderQuality(summary) {
+    qualityBody.replaceChildren();
+    if (!summary.rowCount) {
+      qualityBody.append(make("p", "Нет наблюдений за выбранный период.", "atlm-note"));
+      return;
+    }
+    const metrics = summary.metrics;
+    const percent = value => qualityValue(value, number => numberFormat.format(number) + "%");
+    const coverage = metrics?.coverageDenominator > 0
+      ? ratioText({ numerator: metrics.coverageNumerator, denominator: metrics.coverageDenominator })
+      : "Нет оценки";
+    const stats = make("div", null, "atlm-metrics");
+    const coverageMetric = metric("Попадания в интервал", coverage);
+    coverageMetric.append(make("span", "Средняя ширина " + qualityValue(metrics?.meanIntervalWidthMs, minutes)));
+    if (Number.isFinite(metrics?.nominalCoverage)) coverageMetric.append(make("span", "Целевой охват " + percent(100 * metrics.nominalCoverage)));
+    stats.append(
+      metric("Средняя абсолютная ошибка", qualityValue(metrics?.maeMs, minutes)),
+      metric("Медиана абсолютной ошибки", qualityValue(metrics?.medaeMs, minutes)),
+      metric("WAPE", percent(metrics?.wapePercent)),
+      metric("Смещение", percent(metrics?.signedBiasPercent)),
+      metric("Прогнозы", ratioText(summary.forecastAvailability)),
+      metric("Интервалы", ratioText(summary.intervalAvailability)),
+      coverageMetric,
+    );
+    const help = make("details", null, "atlm-metrics-help");
+    help.append(make("summary", "Как читать показатели"), make("p",
+      "Ошибки сравнивают прогноз и фактическое активное время. WAPE и смещение доступны при ненулевой сумме факта. Попадания считаются для сопоставимых планов с диапазоном. Целевой охват не является гарантией.", "atlm-note"));
+    if (summary.excludedFromScoringCount) help.append(make("p", "Исключено из расчёта ошибок: " + summary.excludedFromScoringCount + ".", "atlm-note"));
+    const wrap = make("div", null, "atlm-table-wrap"), table = make("table");
+    wrap.tabIndex = 0;
+    wrap.setAttribute("role", "region");
+    wrap.setAttribute("aria-label", "Таблица прогнозов и фактического времени");
+    table.append(make("caption", "Прогнозы и фактическое время планов"));
+    const head = table.createTHead().insertRow();
+    for (const label of ["План", "Прогноз", "Интервал", "Факт", "Ошибка"]) {
+      const cell = make("th", label);
+      cell.scope = "col";
+      head.append(cell);
+    }
+    qualityRows = table.createTBody();
+    wrap.append(table);
+    qualityBody.append(stats, help, wrap);
   }
-  document.querySelector('[data-view="analytics"]')?.addEventListener("click",loadQuality);
-  document.querySelector("#apply")?.addEventListener("click",loadQuality);
-  window.addEventListener("plan-time-zone-changed",loadQuality);
-  async function discover(){
-    if(capabilityPending)return;capabilityPending=true;
-    try{const capabilities=await api("/api/tracker/capabilities");supported=!!capabilities.assessments?.atlm;if(!supported){statusPanel.remove();return;}if(!statusPanel.isConnected)settingsRoot.append(statusPanel);pollsLeft=0;await Promise.all([loadStatus(false),loadAttempts()]);if(planRoot.dataset.planId)await loadPlan(planRoot.dataset.planId);}
-    catch(error){if(!statusPanel.isConnected)settingsRoot.append(statusPanel);statusBody.replaceChildren(make("p","Не удалось проверить поддержку прогноза. "+error.message,"error"),button("Повторить проверку прогноза",discover));controls.hidden=true;}
-    finally{capabilityPending=false;if(supported)controls.hidden=false;}
+
+  function appendQualityCases(cases) {
+    if (!qualityRows) return;
+    const date = new Intl.DateTimeFormat("ru-RU", { dateStyle: "short", timeZone: qualityParams.timeZone });
+    for (const row of cases) {
+      const tr = qualityRows.insertRow();
+      const plan = make("th", row.title || row.planId);
+      plan.scope = "row";
+      if (Number.isFinite(row.finishedAt)) {
+        const time = make("time", date.format(row.finishedAt), "atlm-note");
+        time.dateTime = new Date(row.finishedAt).toISOString();
+        plan.append(make("br"), time);
+      }
+      const model = row.method === "historical-median" ? "Медиана прошлых задач"
+        : row.modelRevisionId || (row.pointMs != null && row.method === "atlm" ? "Ревизия не установлена" : null);
+      if (model) plan.append(make("br"), make("span", model, "atlm-note"));
+      tr.append(plan);
+      for (const value of [
+        qualityValue(row.pointMs, minutes),
+        intervalText(row.interval),
+        qualityValue(row.actualMs, minutes),
+        qualityValue(row.signedErrorMs, ms => (ms > 0 ? "+" : "") + minutes(ms)),
+      ]) tr.append(make("td", value));
+    }
   }
-  window.addEventListener("plan-time-tracker:plan-will-render",()=>{planToken++;planAbort?.abort();});
-  window.addEventListener("plan-time-tracker:plan-rendered",event=>{loadPlan(event.detail?.planId);loadStatus(false);});
-  document.querySelector('[data-view="settings"]')?.addEventListener("click",()=>{clearPoll();pollsLeft=0;loadStatus(false);loadAttempts();});
-  function refreshVisibleTraining(){
-    if(!canObserveTraining())return;
-    loadStatus(false);loadAttempts({refresh:true});
+
+  async function requestQuality(cursor = null, trigger = null) {
+    if (qualityAbort || !qualityParams) return;
+    const request = new AbortController();
+    qualityAbort = request;
+    const params = new URLSearchParams({ view: "issued-history", limit: ISSUED_PAGE_SIZE, ...qualityParams });
+    if (cursor) params.set("cursor", cursor);
+    if (trigger) trigger.disabled = true;
+    qualityPanel.setAttribute("aria-busy", "true");
+    qualityStatus.textContent = "Загружаем выданные прогнозы…";
+    try {
+      const data = await api("/api/tracker/model-revisions?" + params, { signal: request.signal });
+      if (qualityAbort !== request) return;
+      if (!cursor) renderQuality(data.summary);
+      appendQualityCases(data.cases);
+      qualityStatus.textContent = cursor ? "Добавлено планов: " + data.cases.length + "." : "";
+      const focused = trigger === document.activeElement;
+      qualityActions.replaceChildren();
+      if (data.nextCursor) {
+        const next = button("Показать ещё планы", () => requestQuality(data.nextCursor, next));
+        qualityActions.append(next);
+        if (focused) next.focus();
+      } else if (focused) {
+        qualityHeading.focus();
+      }
+    } catch (error) {
+      if (qualityAbort !== request) return;
+      qualityStatus.textContent = "Не удалось загрузить выданные прогнозы. " + error.message;
+      if (!trigger || trigger.textContent !== "Повторить загрузку качества") {
+        const focused = trigger === document.activeElement;
+        const retry = button("Повторить загрузку качества", () => requestQuality(cursor, retry));
+        qualityActions.replaceChildren(retry);
+        if (focused) retry.focus();
+      }
+    } finally {
+      if (qualityAbort === request) {
+        qualityAbort = null;
+        if (trigger) trigger.disabled = false;
+        qualityPanel.removeAttribute("aria-busy");
+      }
+    }
   }
-  document.addEventListener("visibilitychange",()=>{clearPoll();pollsLeft=0;refreshVisibleTraining();});
-  window.addEventListener("pageshow",event=>{if(event.persisted)refreshVisibleTraining();});
-  window.addEventListener("pagehide",()=>{clearPoll();pollsLeft=0;planAbort?.abort();});
-  discover();
+
+  function cancelQuality() {
+    qualityAbort?.abort();
+    qualityAbort = null;
+    qualityPanel.removeAttribute("aria-busy");
+  }
+
+  function loadQuality(timeZone = document.querySelector("#tz").value || "UTC") {
+    cancelQuality();
+    qualityParams = { from: document.querySelector("#from").value, to: document.querySelector("#to").value, timeZone };
+    qualityRows = null;
+    qualityBody.replaceChildren();
+    qualityActions.replaceChildren();
+    requestQuality();
+  }
+
+  document.querySelector("#apply").addEventListener("click", () => loadQuality());
+  window.addEventListener("plan-time-zone-changed", event => {
+    if (!analyticsRoot.classList.contains("hidden")) loadQuality(event.detail);
+  });
+  window.addEventListener("plan-time-tracker:view-changed", event => {
+    if (event.detail.view === "analytics") loadQuality(event.detail.timeZone);
+    else cancelQuality();
+  });
+  window.addEventListener("plan-time-tracker:plan-will-render", () => { planToken++; planAbort?.abort(); });
+  window.addEventListener("plan-time-tracker:plan-rendered", event => loadPlan(event.detail?.planId));
+  window.addEventListener("pagehide", () => { cancelQuality(); planAbort?.abort(); });
 })();`;

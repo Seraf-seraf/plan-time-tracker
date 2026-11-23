@@ -1,30 +1,85 @@
 import assert from 'node:assert/strict';
-import {pathToFileURL} from 'node:url';
-import {mkdirSync} from 'node:fs';
-import {resolve} from 'node:path';
-import {goldenBoundary,goldenCases} from './fixtures/atlm-v4-golden.mjs';
-import {taskV4,context,OWNER,plannedAtlm,completeAtlm,mcp,ok} from './fixtures/tracker-db.mjs';
-const modulePath=process.env.PLAYWRIGHT_MODULE||'playwright';
-const {chromium}=await import(modulePath.startsWith('/')?pathToFileURL(modulePath).href:modulePath);
-const c=context();c.advance(Date.now()-c.now());
-for(let i=0;i<2;i++){const p=await plannedAtlm(c,crypto.randomUUID());await completeAtlm(c,p,60000+i*10000);c.advance(1);}
-await mcp(c,'ContinueTraining');
-const mixed=taskV4();mixed.systemBoundaries=goldenBoundary(goldenCases[0]);delete mixed.evidence.systemBoundaries;
-const target=await plannedAtlm(c,crypto.randomUUID(),mixed);await completeAtlm(c,target,80000);c.advance(1);await mcp(c,'ContinueTraining');
-// History fixtures cover the failure details alongside the successful model above.
-const insertAttempt = c.db.sqlite.prepare(`INSERT INTO estimation_training_attempts
-  (owner_id,attempt_id,started_at,completed_at,method_version,feature_version,dataset_revision,
-    manifest_json,reason,diagnostics_json) VALUES(?,?,?,?,?,?,?,?,?,?)`);
-insertAttempt.run(OWNER, 'fixture-budget', c.now(), c.now() + 20400, 'agent-v5-operations',
-  'agent-task-v4', 42, '[1,2]', 'TRAINING_TIME_BUDGET', JSON.stringify({
-    code: 'TRAINING_TIME_BUDGET',
-    parameters: {phase:'FIT',completedCases:2,stalledPasses:3,passElapsedMs:9001},
-  }));
-const dir=resolve(process.env.UI_ACCEPTANCE_ARTIFACT_DIR||'/tmp/tracker-atlm-v4/ui');mkdirSync(dir,{recursive:true});
-const browser=await chromium.launch({executablePath:process.env.CHROMIUM_EXECUTABLE||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
-const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];let datasetOverride=null,historyFailure=false,datasetFailure=false,taskFailure=false,planFailure=false,planReads=0;page.on('pageerror',e=>errors.push(e.message));
-await page.route('**/*',async route=>{const req=route.request(),url=new URL(req.url());assert.equal(url.origin,'http://localhost');if(url.pathname==='/api/plans/'+target.planId&&planFailure&&++planReads>1)return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{message:'Fixture unavailable'}})});if(url.pathname==='/api/tracker/assessment'&&taskFailure)return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{message:'Fixture unavailable'}})});if((url.pathname==='/api/tracker/atlm-dataset'&&datasetFailure)||(url.pathname==='/api/tracker/estimation-training-history'&&historyFailure))return route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({error:{message:'Fixture unavailable'}})});if(url.pathname==='/api/plans'&&datasetOverride)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({plans:datasetOverride.rows.map(row=>({planId:row.planId,title:row.planId,finishedAt:c.now()})),nextCursor:null,serverNow:c.now()})});if(url.pathname==='/api/tracker/atlm-dataset'&&datasetOverride)return route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(datasetOverride)});const r=await c.worker.fetch(new Request(req.url(),{method:req.method(),headers:{'content-type':'application/json','oai-authenticated-user-id':OWNER},...(req.postData()?{body:req.postData()}:{})}),{DB:c.db});await route.fulfill({status:r.status,headers:Object.fromEntries(r.headers),body:await r.text()});});
-try{
+import { pathToFileURL } from 'node:url';
+import { mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fitAtlm, normalizeAgentTask } from '../worker/atlm/model.js';
+import { processAtlmSampleRefresh } from '../worker/atlm/sample-refresh.js';
+import { goldenBoundary, goldenCases } from './fixtures/atlm-v4-golden.mjs';
+import { taskV4, context, OWNER, plannedAtlm, completeAtlm, mcp, ok, call } from './fixtures/tracker-db.mjs';
+
+const modulePath = process.env.PLAYWRIGHT_MODULE || 'playwright';
+const { chromium } = await import(modulePath.startsWith('/') ? pathToFileURL(modulePath).href : modulePath);
+const drain = c => processAtlmSampleRefresh(c.db, OWNER, c.now(), { clock: c.now });
+const revisionId = 'atlm-intervals-fixture-r1';
+const browserOptions = { executablePath: process.env.CHROMIUM_EXECUTABLE || '/usr/bin/chromium', headless: true, args: ['--no-sandbox'] };
+async function installFixtureRevision(c) {
+  const examples = [], task = taskV4(), features = normalizeAgentTask(task).features;
+  const sql = c.db.sqlite;
+  const sample = sql.prepare('SELECT max(sequence) AS sequence FROM estimation_samples WHERE owner_id=? AND plan_id=?');
+  for (let index = 0; index < 10; index++) {
+    const plan = await plannedAtlm(c, crypto.randomUUID(), task);
+    const actualMs = 60000 + index * 1000, capturedAt = c.now();
+    await completeAtlm(c, plan, actualMs);
+    await drain(c);
+    examples.push({ planId: plan.planId, sampleId: String(sample.get(OWNER, plan.planId).sequence), features,
+      actualMs, capturedAt, sourceAvailableAt: c.now() });
+    c.advance(1);
+  }
+  const fitted = await fitAtlm(examples);
+  assert.equal(fitted.status, 'AVAILABLE', JSON.stringify(fitted));
+  const artifact = fitted.artifact;
+  sql.prepare(`INSERT INTO estimation_model_revisions(owner_id,model_revision_id,model_version,origin,
+    method_version,feature_version,registered_at,imported_at,artifact_json,manifest_json,dataset_digest,
+    provenance_json,fit_count,source_count,train_cutoff,supported)
+    VALUES(?,?,1,'IMPORTED',?,?,?,?,?,?,?,'{}',?,?,?,1)`).run(OWNER, revisionId, artifact.method.version,
+    artifact.featureSchemaVersion, c.now(), c.now(), JSON.stringify(artifact), JSON.stringify(artifact.manifest),
+    artifact.datasetDigest, artifact.n, examples.length, artifact.trainCutoff);
+  const source = sql.prepare(`INSERT INTO estimation_model_revision_sources(owner_id,model_revision_id,plan_id,source_generation,ordinal)
+    SELECT owner_id,?,plan_id,generation,? FROM estimation_jobs WHERE owner_id=? AND plan_id=?`);
+  for (const [index, example] of examples.entries()) source.run(revisionId, index, OWNER, example.planId);
+  const activation = await mcp(c, 'ActivateModelRevision', { schemaVersion: 1, commandId: crypto.randomUUID(),
+    modelRevisionId: revisionId, expectedActiveModelRevisionId: null, expectedActivationVersion: 0,
+    reason: 'Изолированная проверка интервалов', acceptExperimental: true });
+  assert.equal(activation.value.result.structuredContent?.activeModelRevisionId, revisionId, JSON.stringify(activation.value));
+}
+
+const c = context();
+c.advance(Date.now() - c.now());
+await installFixtureRevision(c);
+const mixed = taskV4();
+mixed.systemBoundaries = goldenBoundary(goldenCases[0]);
+delete mixed.evidence.systemBoundaries;
+const target = await plannedAtlm(c, crypto.randomUUID(), mixed);
+await completeAtlm(c, target, 80000);
+await drain(c);
+
+const dir = resolve(process.env.UI_ACCEPTANCE_ARTIFACT_DIR || '/tmp/tracker-atlm-v4/ui');
+mkdirSync(dir, { recursive: true });
+const browser = await chromium.launch(browserOptions);
+const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+page.setDefaultTimeout(10000);
+const errors = [], issuedRequests = [], paths = [];
+page.on('pageerror', error => errors.push(error.message));
+let analyticsFailure = false, cursorFailure = false, taskFailure = false, planFailure = false, planReads = 0;
+const unavailable = route => route.fulfill({ status: 503, contentType: 'application/json',
+  json: { error: { message: 'Fixture unavailable' } } });
+await page.route('**/*', async route => {
+  const request = route.request(), url = new URL(request.url());
+  assert.equal(url.origin, 'http://localhost');
+  paths.push(url.pathname);
+  if (url.pathname === '/api/plans/' + target.planId && planFailure && ++planReads > 1) return unavailable(route);
+  if (url.pathname === '/api/tracker/assessment' && taskFailure) return unavailable(route);
+  if (url.pathname === '/api/tracker/model-revisions' && url.searchParams.get('view') === 'issued-history') {
+    issuedRequests.push({ query: new URLSearchParams(url.search), method: request.method() });
+    if (analyticsFailure || (cursorFailure && url.searchParams.has('cursor'))) return unavailable(route);
+  }
+  const response = await c.worker.fetch(new Request(url, { method: request.method(), headers: {
+    'content-type': 'application/json', 'oai-authenticated-user-id': OWNER,
+  }, ...(request.postData() ? { body: request.postData() } : {}) }), { DB: c.db });
+  await route.fulfill({ status: response.status, headers: Object.fromEntries(response.headers), body: await response.text() });
+});
+
+try {
  await page.goto('http://localhost');await page.locator('#plans[data-loaded="true"]').waitFor({state:'attached'});
  await page.locator('[data-plan-id="'+target.planId+'"] .plan-open').first().click();
  const forecast=page.locator('.atlm-plan-estimate');await forecast.waitFor();await page.waitForFunction(()=>!document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy'));
@@ -48,55 +103,81 @@ try{
  planFailure=false;await forecast.getByRole('button',{name:'Повторить загрузку факта'}).click();await page.waitForFunction(()=>!document.querySelector('.atlm-plan-estimate')?.hasAttribute('aria-busy'));assert.match(await forecast.innerText(),/Факт:/);
 
  for(const width of [320,390,768,1440]){await page.setViewportSize({width,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.screenshot({path:resolve(dir,'forecast-'+width+'.png'),fullPage:true});}
- await page.locator('[data-view="settings"]').click();await page.getByText('Попытки обучения',{exact:true}).waitFor();await page.locator('.atlm-attempts table').waitFor();assert.match(await page.locator('.atlm-attempts').innerText(),/Точка/);
- for(const width of [320,390,768,1440]){
-  await page.setViewportSize({width,height:1000});
-  const layout=await page.locator('#atlm-model-status').evaluate(panel=>{
-   const grid=panel.parentElement.getBoundingClientRect(),box=panel.getBoundingClientRect(),table=panel.querySelector('.atlm-attempts table');
-   return {width:box.width,gridWidth:grid.width,pageOverflow:document.documentElement.scrollWidth>innerWidth,
-    headLines:[...table.querySelectorAll('th')].map(th=>{const range=document.createRange();range.selectNodeContents(th);return [...range.getClientRects()].filter(r=>r.width&&r.height).length;}),
-    mobileLabels:[...table.querySelectorAll('.atlm-cell-label')].filter(label=>getComputedStyle(label).display!=='none').length};
+
+  await page.locator('[data-view="analytics"]').click();
+  const quality = page.locator('.atlm-analytics');
+  await quality.getByRole('heading', { name: 'Выданные прогнозы всех версий за выбранный период' }).waitFor();
+  const table = quality.getByRole('table');
+  await table.waitFor();
+  assert.match(await quality.innerText(), /Попадания в интервал/);
+  assert.match(await quality.innerText(), /Средняя ширина/);
+  assert.match(await table.innerText(), /Медиана прошлых задач/);
+  assert.match(await table.innerText(), /atlm-intervals-fixture-r1/);
+  assert.equal(await table.getByRole('rowheader').count(), 10);
+  const server = await call(c, '/api/tracker/model-revisions?' + issuedRequests[0].query);
+  assert.equal(server.status, 200);
+  assert.equal(server.value.summary.rowCount, 11);
+  const point = server.value.summary.forecastAvailability;
+  assert.match(await quality.innerText(), new RegExp('Прогнозы\\s+' + point.numerator + ' / 11'));
+  const initialMetrics = await quality.locator('.atlm-metrics').innerText();
+
+  cursorFailure = true;
+  const more = quality.getByRole('button', { name: 'Показать ещё планы' });
+  await more.click();
+  const retry = quality.getByRole('button', { name: 'Повторить загрузку качества' });
+  await retry.waitFor();
+  assert.equal(await table.getByRole('rowheader').count(), 10);
+  const firstAttempt = issuedRequests.at(-1).query.toString();
+  cursorFailure = false;
+  await retry.click();
+  await table.getByRole('rowheader').nth(10).waitFor();
+  assert.equal(issuedRequests.at(-1).query.toString(), firstAttempt);
+  assert.equal(await quality.locator('.atlm-metrics').innerText(), initialMetrics);
+  assert.match(await table.innerText(), /Нет оценки/);
+
+  analyticsFailure = true;
+  await page.locator('#apply').click();
+  await retry.waitFor();
+  analyticsFailure = false;
+  await retry.click();
+  await table.waitFor();
+  await quality.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  assert.match(await quality.locator('.atlm-metrics-help').innerText(), /не является гарантией/);
+  for (const width of [320, 390, 768, 1440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({ path: resolve(dir, 'analytics-' + width + '.png'), fullPage: true });
+  }
+  await page.evaluate(() => { document.body.style.zoom = '2'; });
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.evaluate(() => { document.body.style.zoom = ''; });
+
+  await page.locator('[data-view="settings"]').click();
+  await page.locator('#tz').selectOption('Europe/Moscow');
+  await page.locator('#settings button').click();
+  await page.getByText('Часовой пояс сохранён.', { exact: true }).waitFor();
+  const zonedReport = page.waitForRequest(request => {
+    const query = new URL(request.url()).searchParams;
+    return query.get('view') === 'issued-history' && query.get('timeZone') === 'Europe/Moscow';
   });
-  assert.equal(layout.pageOverflow,false,`history overflows page at ${width}`);
-  assert.ok(layout.width>=layout.gridWidth-2,`history should use available settings width at ${width}`);
-  if(width<=600)assert.ok(layout.mobileLabels>=6,`each mobile cell needs a visible label at ${width}`);
-  else assert.ok(layout.headLines.every(lines=>lines<=1),`table headings must remain on one line at ${width}`);
-  await page.screenshot({path:resolve(dir,'attempts-'+width+'.png'),fullPage:true});
- }
- const attempts = page.locator('.atlm-attempts');
- const timeout = attempts.getByRole('row').filter({hasText:'Таймаут'});
- assert.match(await timeout.innerText(),/20,4 с/);
- assert.match(await attempts.innerText(),/Модель обучена/);
- await timeout.locator('summary').focus();
- await page.keyboard.press('Enter');
- assert.equal(await timeout.locator('details').evaluate(node=>node.open),true);
- assert.match(await timeout.innerText(),/Расчёт моделей/);
- assert.match(await timeout.innerText(),/Проходов без прогресса\s+3/);
- for (const width of [1440, 390]) {
-   await page.setViewportSize({width,height:1000});
-   await attempts.screenshot({path:resolve(dir,'attempts-detail-'+width+'.png')});
- }
- await page.setViewportSize({width:1440,height:1000});
-
- historyFailure=true;await page.locator('[data-view="settings"]').click();await page.getByRole('button',{name:'Повторить загрузку истории'}).waitFor();historyFailure=false;await page.getByRole('button',{name:'Повторить загрузку истории'}).click();await page.locator('.atlm-attempts table').waitFor();
- await page.locator('[data-view="analytics"]').click();await page.locator('.atlm-analytics table').waitFor();const analytics=await page.locator('.atlm-analytics').innerText();assert.match(analytics,/Попадания в диапазон/);assert.match(analytics,/Прогноз/);assert.match(analytics,/Факт/);
- datasetFailure=true;await page.locator('[data-view="analytics"]').click();await page.getByRole('button',{name:'Повторить загрузку качества'}).waitFor();datasetFailure=false;await page.getByRole('button',{name:'Повторить загрузку качества'}).click();await page.locator('.atlm-analytics table').waitFor();
- await page.locator('.atlm-metrics-help summary').focus();await page.keyboard.press('Enter');assert.match(await page.locator('.atlm-metrics-help').innerText(),/не является гарантией/);
- for(const width of [320,390,768,1440]){await page.setViewportSize({width,height:1000});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.screenshot({path:resolve(dir,'analytics-'+width+'.png'),fullPage:true});}
- await page.setViewportSize({width:1440,height:1000});await page.evaluate(()=>{document.body.style.zoom='2';});
- assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.evaluate(()=>{document.body.style.zoom='';});
- datasetOverride={rows:Array.from({length:12},(_,i)=>({planId:'sample-'+i,eligibility:'ELIGIBLE',actualMs:0,sourceAvailableAt:c.now(),issuedPrediction:i<6?{pointMs:0,interval:i<3?{status:'AVAILABLE',lowerMs:0,upperMs:1}:{status:'UNAVAILABLE',lowerMs:null,upperMs:null}}:null})),nextCursor:null};
- await page.locator('#apply').click();await page.waitForFunction(()=>document.querySelector('.atlm-analytics')?.innerText.includes('6 / 12'));
- let synthetic=await page.locator('.atlm-analytics').innerText();assert.match(synthetic,/3 \/ 3/);assert.match(synthetic,/WAPE\s+—/);
- await page.locator('.atlm-analytics').getByRole('button',{name:'Далее'}).click();assert.match(await page.locator('.atlm-analytics').innerText(),/Страница 2 из 2/);
- assert.deepEqual(errors,[]);console.log('Forecast intervals, frozen result, model history and analytics: browser checks passed.');
-}finally{await browser.close();c.close();}
-
+  await page.locator('[data-view="analytics"]').click();
+  await zonedReport;
+  assert.equal(issuedRequests.at(-1).query.get('timeZone'), 'Europe/Moscow');
+  assert.equal(issuedRequests.at(-1).query.get('from'), await page.locator('#from').inputValue());
+  assert.equal(issuedRequests.at(-1).query.get('to'), await page.locator('#to').inputValue());
+  assert.ok(issuedRequests.every(request => request.method === 'GET'));
+  assert.equal(paths.includes('/api/tracker/atlm-dataset'), false);
+  assert.deepEqual(errors, []);
+} finally {
+  await browser.close();
+  c.close();
+}
 
 // A start racing the current forecast must display the authoritative frozen result.
 {
  const c=context();c.advance(Date.now()-c.now());
- for(let i=0;i<2;i++){const p=await plannedAtlm(c,crypto.randomUUID());await completeAtlm(c,p,1000);c.advance(1);}await mcp(c,'ContinueTraining');
+ for(let i=0;i<2;i++){const p=await plannedAtlm(c,crypto.randomUUID());await completeAtlm(c,p,1000);c.advance(1);}await drain(c);
  const p=await plannedAtlm(c,crypto.randomUUID());let unblock,arrived,block=true;const reached=new Promise(r=>arrived=r);
  const browser=await chromium.launch({executablePath:process.env.CHROMIUM_EXECUTABLE||'/usr/bin/chromium',headless:true,args:['--no-sandbox']}),page=await browser.newPage();
  await page.route('**/*',async route=>{const req=route.request(),response=await c.worker.fetch(new Request(req.url(),{method:req.method(),headers:{'oai-authenticated-user-id':OWNER,'content-type':'application/json'},...(req.postData()?{body:req.postData()}:{})}),{DB:c.db}),body=await response.text();
@@ -109,11 +190,13 @@ try{
 
 // Restoring a finished plan cannot move its result to the restoration date.
 {
- const c=context();c.advance(Date.parse('2026-11-12T12:00:00Z')-c.now());const p=await plannedAtlm(c,crypto.randomUUID());await completeAtlm(c,p,60000);await mcp(c,'ContinueTraining');c.advance(2*86400000);
- await ok(c,'DeletePlan',{planId:p.planId},2);await ok(c,'RestorePlan',{planId:p.planId},3);await mcp(c,'ContinueTraining');
+ const c=context();c.advance(Date.parse('2026-11-12T12:00:00Z')-c.now());const p=await plannedAtlm(c,crypto.randomUUID());await completeAtlm(c,p,60000);await drain(c);c.advance(2*86400000);
+ await ok(c,'DeletePlan',{planId:p.planId},2);await ok(c,'RestorePlan',{planId:p.planId},3);await drain(c);
  const browser=await chromium.launch({executablePath:process.env.CHROMIUM_EXECUTABLE||'/usr/bin/chromium',headless:true,args:['--no-sandbox']}),page=await browser.newPage();await page.clock.install({time:c.now()});
  await page.route('**/*',async route=>{const req=route.request(),r=await c.worker.fetch(new Request(req.url(),{method:req.method(),headers:{'oai-authenticated-user-id':OWNER,'content-type':'application/json'},...(req.postData()?{body:req.postData()}:{})}),{DB:c.db});await route.fulfill({status:r.status,headers:Object.fromEntries(r.headers),body:await r.text()});});
  try{await page.goto('http://localhost');await page.locator('[data-view="analytics"]').click();await page.locator('#from').fill('2026-11-12');await page.locator('#to').fill('2026-11-12');await page.locator('#apply').click();await page.locator('.atlm-analytics table').waitFor();assert.match(await page.locator('.atlm-analytics').innerText(),/ATLM synthetic feature/);
   await page.locator('#from').fill('2026-11-14');await page.locator('#to').fill('2026-11-14');await page.locator('#apply').click();await page.locator('.atlm-analytics').getByText('Нет наблюдений за выбранный период.').waitFor();
  }finally{await browser.close();c.close();}
 }
+
+console.log('Forecast intervals, first-start freeze and issued history: browser checks passed.');
