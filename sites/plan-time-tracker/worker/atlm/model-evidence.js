@@ -199,11 +199,11 @@ function compactInterval(interval, pointMs, defaultReason = 'INTERVAL_NOT_RECORD
 }
 
 function caseView({ planId, title, finishedAt, actualMs, pointMs, interval, scoringExclusionReason,
-  modelRevisionId, method, pointUnavailableReason, eligibility, reasons, scopeChanged, rowId }) {
+  forecastIdentity, pointUnavailableReason, eligibility, reasons, scopeChanged, rowId }) {
   return {
     rowId, planId, title, finishedAt, actualMs, pointMs, interval,
     signedErrorMs: scoringExclusionReason === null && pointMs !== null && actualMs !== null ? pointMs - actualMs : null,
-    modelRevisionId, method, pointUnavailableReason, eligibility, reasons, scopeChanged, scoringExclusionReason,
+    ...forecastIdentity, pointUnavailableReason, eligibility, reasons, scopeChanged, scoringExclusionReason,
   };
 }
 
@@ -286,8 +286,9 @@ async function issuedCases(db, ownerId, revisionId, period, watermark) {
     const interval = compactInterval(parseColumn(row.interval, null), pointMs, pointUnavailableReason ?? undefined);
     return caseView({
       rowId: row.plan_id, planId: row.plan_id, title: row.title, finishedAt: row.finished_at,
-      actualMs, pointMs, interval, scoringExclusionReason: exclusion, modelRevisionId: row.model_revision_id,
-      method: row.method, pointUnavailableReason, eligibility: row.eligibility,
+      actualMs, pointMs, interval, scoringExclusionReason: exclusion,
+      forecastIdentity: { modelRevisionId: row.model_revision_id, method: row.method },
+      pointUnavailableReason, eligibility: row.eligibility,
       reasons: exclusion && !reasons.includes(exclusion) ? [...reasons, exclusion] : reasons,
       scopeChanged: row.scope_known && row.sequence !== null ? reasons.includes('SCOPE_CHANGED') : null,
     });
@@ -370,16 +371,35 @@ async function evaluationEntries(db, ownerId, revision) {
   return { entries, trainingEvaluation };
 }
 
+function recordedText(value) {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+function evaluationIssuedIdentity(row, source) {
+  const forecast = parseColumn(source?.issued_prediction, null);
+  // Reports without frozen rows store both identity formats in one field with distinct types.
+  const reportRevision = source ? null : row.issuedModelRevision;
+  const revisionNumber = source ? forecast?.modelRevision : reportRevision;
+  return {
+    modelRevisionId: recordedText(forecast?.modelRevisionId ?? reportRevision),
+    modelId: recordedText(source ? forecast?.modelId : row.issuedModelId),
+    modelRevision: nonnegative(revisionNumber) ? revisionNumber : null,
+    method: recordedText(forecast?.method?.id),
+  };
+}
+
 async function evaluationCasePage(db, ownerId, revision, entry, position, limit) {
+  const issued = entry.evidence.kind === 'ISSUED_FORECASTS';
   const rows = entry.cases.slice(position, position + limit + 1);
   const rowIds = rows.map(row => row.rowId).filter(id => typeof id === 'string');
   const sources = revision.origin === 'NATIVE' && rowIds.length ? await dbAll(db, `
     SELECT d.row_id,json_extract(s.evidence_json,'$.title') AS title,
-      json_extract(d.source_json,'$.finishedAt') AS finished_at
+      json_extract(d.source_json,'$.finishedAt') AS finished_at,
+      CASE WHEN ?4 THEN json_extract(d.source_json,'$.issuedPrediction') END AS issued_prediction
     FROM estimation_dataset_revision_rows d JOIN estimation_training_snapshot_rows s
       ON s.owner_id=d.owner_id AND s.snapshot_id=d.snapshot_id AND s.row_id=d.snapshot_row_id
     WHERE d.owner_id=?1 AND d.dataset_revision_id=?2 AND d.row_id IN (SELECT value FROM json_each(?3))`,
-    ownerId, revision.datasetRevisionId, JSON.stringify(rowIds)) : [];
+    ownerId, revision.datasetRevisionId, JSON.stringify(rowIds), issued ? 1 : 0) : [];
   const byId = new Map(sources.map(row => [row.row_id, row]));
   return compactPage(rows, limit, row => {
     const source = byId.get(row.rowId);
@@ -389,7 +409,8 @@ async function evaluationCasePage(db, ownerId, revision, entry, position, limit)
       rowId: row.rowId ?? row.planId, planId: row.planId, title: row.title ?? source?.title ?? row.planId,
       finishedAt: Object.hasOwn(row, 'finishedAt') ? row.finishedAt : source?.finished_at ?? null,
       actualMs, pointMs, interval: compactInterval(row.interval ?? row.revised?.interval, pointMs),
-      modelRevisionId: revision.modelRevisionId, method: 'ATLM',
+      forecastIdentity: issued ? evaluationIssuedIdentity(row, source)
+        : { modelRevisionId: revision.modelRevisionId, method: 'ATLM' },
       pointUnavailableReason: pointMs === null ? evidenceCode(row.pointUnavailableReason ?? row.revised?.reason, 'FORECAST_UNAVAILABLE') : null,
       scoringExclusionReason: evidenceCode(row.scoringExclusionReason, null),
       eligibility: null, reasons: [], scopeChanged: null,

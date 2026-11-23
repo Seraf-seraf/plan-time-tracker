@@ -14,6 +14,7 @@ if (process.env.SITE_WORKER_MODULE) c.worker = (await import(pathToFileURL(proce
 const otherPlan = crypto.randomUUID();
 const activeId = 'atlm-11-r2';
 const priorId = 'atlm-11-r1';
+const registeredId = 'atlm-11-r3';
 const longId = 'atlm-' + 'archived-revision-'.repeat(6) + '7';
 for (const planId of [PLAN, otherPlan]) {
   await ok(c, 'CreatePlan', { planId, title: 'Forecast planned', planText: '## Этап 1. Проверить\nГотово.',
@@ -89,7 +90,7 @@ const navSettings = page.locator('[data-view="settings"]');
 const history = settings.locator('#atlm-model-history');
 const cases = settings.locator('#atlm-model-cases');
 const current = settings.locator('#atlm-model-current');
-const activeLabel = current.getByText('Используется для прогнозов', { exact: true });
+const activeLabel = current.getByText('Выдаёт прогнозы', { exact: true });
 const retry = settings.getByRole('button', { name: 'Повторить загрузку', exact: true });
 const openSummary = (section, text) => section.locator('summary').filter({ hasText: text }).click();
 const isFocused = locator => locator.evaluate(node => node === document.activeElement);
@@ -143,6 +144,7 @@ async function seedRegistry() {
   archive(priorId, { schemaVersion: 1, modes: {
     INTERNAL_HOLDOUT_PLANNED: controlMode(90000),
     INTERNAL_HOLDOUT_ACTUAL: controlMode(150000),
+    ISSUED_FORECASTS: controlMode(60000),
   } });
   c.advance(1);
   archive(longId);
@@ -160,6 +162,11 @@ async function seedRegistry() {
     modelRevisionId: activeId, expectedActiveModelRevisionId: null, expectedActivationVersion: 0,
     acceptExperimental: true, reason: 'Изолированная браузерная проверка' });
   assert.equal(activation.value.result.structuredContent?.activeModelRevisionId, activeId, JSON.stringify(activation.value));
+  c.advance(1);
+  register.run(OWNER, registeredId, artifact.method.version, artifact.featureSchemaVersion, c.now(), c.now(),
+    JSON.stringify(artifact), JSON.stringify(artifact.manifest), artifact.datasetDigest, null,
+    artifact.n, examples.length, artifact.trainCutoff, 1);
+  for (const [index, example] of examples.entries()) source.run(registeredId, index, OWNER, example.planId);
   for (let index = 0; index < 14; index++) {
     const plan = await plannedAtlm(c, crypto.randomUUID(), task);
     await completeAtlm(c, plan, 60000 + (index % 5) * 60000);
@@ -192,7 +199,7 @@ try {
   failRegistry = false;
   await retry.focus();
   await page.keyboard.press('Enter');
-  await settings.getByText('Активной ревизии пока нет', { exact: true }).waitFor();
+  await current.getByText('Модель для новых прогнозов пока не назначена', { exact: true }).waitFor();
   assert.equal(await isFocused(modelHeading), true);
   await openSummary(history, 'История ревизий');
   await history.getByText('Ревизий пока нет', { exact: true }).waitFor();
@@ -295,7 +302,7 @@ try {
   await activeLabel.waitFor();
   await settings.getByText('Планов 14', { exact: true }).waitFor();
   assert.match(await current.innerText(), /atlm-11-r2/);
-  assert.match(await current.innerText(), /Активирована/);
+  assert.match(await current.innerText(), /Назначенная ревизия/);
   assert.equal(await current.locator('time[datetime]').count(), 1);
   const data = settings.locator('#atlm-model-data');
   assert.match(await data.innerText(), /В обучении\s+61/);
@@ -306,6 +313,10 @@ try {
   assert.equal(await cases.evaluate(node => node.open), false);
   const coverage = settings.locator('.model-quality-grid').filter({ hasText: 'Попадания в интервал' }).first();
   assert.match(await coverage.innerText(), /Попадания в интервал\s+[\d]+ из [\d]+\s+Средняя ширина/);
+  const methodology = settings.locator('#atlm-model-metrics');
+  await methodology.locator('summary').click();
+  await methodology.getByText(/прогнозы выбранной ревизии/).waitFor();
+  await methodology.locator('summary').click();
   writeFileSync(resolve(artifacts, 'model-overview.html'), await page.content());
   await page.screenshot({ path: resolve(artifacts, 'model-overview-1440.png'), fullPage: true });
 
@@ -349,6 +360,8 @@ try {
   await history.locator('summary').focus();
   await page.keyboard.press('Space');
   await history.getByRole('table').waitFor();
+  const registered = history.getByRole('row').filter({ hasText: registeredId });
+  await registered.getByText('Не назначена', { exact: true }).waitFor();
   const moreRevisions = history.getByRole('button', { name: 'Показать ещё ревизии' });
   failRegistryPage = true;
   await moreRevisions.click();
@@ -359,6 +372,9 @@ try {
   await historyRetry.focus();
   await page.keyboard.press('Enter');
   await history.getByRole('button', { name: 'Показать ' + priorId, exact: true }).waitFor();
+  const archived = history.getByRole('row').filter({ hasText: longId });
+  await archived.getByText('Недоступна', { exact: true }).waitFor();
+  await archived.getByText('Формат артефакта не поддерживается.', { exact: true }).waitFor();
   assert.equal(await isFocused(history.locator('summary')), true);
 
   for (const width of [1440, 768, 720, 390, 320]) {
@@ -409,7 +425,7 @@ try {
   await page.keyboard.press('Enter');
   await waiting.arrival.promise;
   assert.equal(await isFocused(qualityHeading), true);
-  await settings.getByRole('button', { name: 'Вернуться к активной ревизии' }).click();
+  await settings.getByRole('button', { name: 'Вернуться к назначенной ревизии' }).click();
   await settings.getByText('Планов 14', { exact: true }).waitFor();
   waiting.release.resolve();
   await prior.click();
@@ -423,11 +439,17 @@ try {
   await cases.getByText('2,5 мин', { exact: true }).waitFor();
   assert.equal(await isFocused(reportPicker), true);
   assert.match(await current.innerText(), /atlm-11-r2/);
+  await reportPicker.selectOption({ label: 'Выданные прогнозы в сохранённом отчёте' });
+  await methodology.locator('summary').click();
+  await methodology.getByText(/историческая медиана/).waitFor();
+  await methodology.locator('summary').click();
+  await reportPicker.selectOption({ label: 'Проверка на отложенной выборке' });
 
   failRegistry = true;
   await navSettings.click();
   await settings.getByText('Обновить сведения не удалось', { exact: true }).waitFor();
   await settings.getByText('Показаны данные от', { exact: false }).waitFor();
+  await current.getByText('Выдавала прогнозы', { exact: true }).waitFor();
   assert.equal(await activeLabel.count(), 0, 'stale content does not claim current serving');
   failRegistry = false;
   await retry.click();
@@ -437,9 +459,11 @@ try {
   assert.equal(await cases.evaluate(node => node.open), true);
 
   await ok(c, 'DeletePlan', { planId: changedPlan }, 2);
-  await navSettings.click();
-  await current.getByText('Аннулирована', { exact: true }).waitFor();
-  assert.equal(await current.getByText('Используется для прогнозов', { exact: true }).count(), 0);
+  await moreRevisions.click();
+  await current.getByText('Недоступна', { exact: true }).waitFor();
+  await current.getByText('Изменились исходные наблюдения.', { exact: true }).waitFor();
+  await current.getByText(activeId, { exact: true }).waitFor();
+  assert.equal(await settings.getByText('Выдаёт прогнозы', { exact: true }).count(), 0);
   assert.equal(await settings.getByText('Накопление опыта', { exact: true }).count(), 0);
   assert.ok(modelRequests().every(request => request.method === 'GET'));
   const legacyPath = /^\/api\/tracker\/(atlm-dataset|estimation-model|estimation-training-history)(\/|$)/;

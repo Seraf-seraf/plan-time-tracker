@@ -68,6 +68,9 @@ export const atlmModelOverviewScript = String.raw`
     HISTORY_RESET: 'История исходных наблюдений сброшена.',
     MODEL_SOURCE_MISSING: 'Часть исходных наблюдений недоступна.',
     ARTIFACT_UNSUPPORTED: 'Формат артефакта не поддерживается.',
+    NO_ARTIFACT: 'Артефакт модели не сохранён.',
+    HISTORICAL_PROVENANCE_INCOMPLETE: 'Состав обучающего набора подтверждён частично.',
+    RETIRED_BY_AGENT_FLOW: 'Прежний процесс обучения закрыт.',
     TOO_FEW_HOLDOUT_GROUPS_OR_ROWS: 'В отложенной выборке недостаточно планов или групп.',
     TOO_FEW_DEVELOPMENT_GROUPS_OR_ROWS: 'До границы отложенной выборки недостаточно планов или групп.',
     NO_COMPARABLE_ROWS: 'Нет сопоставимых планов.',
@@ -223,19 +226,15 @@ export const atlmModelOverviewScript = String.raw`
     return response.json();
   }
 
-  function statusLabel(status) {
-    return ({
-      ACTIVE: stale ? 'Использовалась при загрузке' : 'Используется для прогнозов',
-      REGISTERED: 'Зарегистрирована',
-      RETIRED: 'Ранее использовалась',
-      INVALIDATED: 'Аннулирована',
-      ARCHIVED: 'Архивная',
-    })[status] ?? 'Статус недоступен';
-  }
-
-  function badge(status) {
-    const tone = status === 'ACTIVE' ? (stale ? 'stale' : 'active') : status === 'INVALIDATED' ? 'invalid' : 'neutral';
-    return element('span', statusLabel(status), 'model-status model-status-' + tone);
+  function badge(serving, unavailable) {
+    if (serving) {
+      return stale
+        ? element('span', 'Выдавала прогнозы', 'model-status model-status-stale')
+        : element('span', 'Выдаёт прогнозы', 'model-status model-status-active');
+    }
+    return unavailable
+      ? element('span', 'Недоступна', 'model-status model-status-invalid')
+      : element('span', 'Не назначена', 'model-status');
   }
 
   function renderOverview() {
@@ -244,13 +243,16 @@ export const atlmModelOverviewScript = String.raw`
     const modelId = overview.activeModelRevisionId;
     current.replaceChildren();
     if (!modelId) {
-      current.append(element('p', 'Активной ревизии пока нет'));
+      current.append(element('p', 'Модель для новых прогнозов пока не назначена'));
     } else {
       const model = element('div', null, 'model-current-grid');
       const identity = element('div', null, 'model-current-id');
-      const status = overview.servingModelRevisionId === modelId ? 'ACTIVE' : overview.sourceStatus ?? selected?.status;
-      identity.append(element('p', 'Активная ревизия', 'model-label'), element('p', modelId, 'model-id'), badge(status));
-      if (overview.sourceProblem) identity.append(element('p', reason(overview.sourceProblem), 'model-muted'));
+      const serving = overview.servingModelRevisionId === modelId;
+      identity.append(element('p', 'Назначенная ревизия', 'model-label'), element('p', modelId, 'model-id'),
+        badge(serving, !serving));
+      if (!serving) {
+        identity.append(element('p', reason(overview.sourceProblem) || 'Причина недоступности не сохранена.', 'model-muted'));
+      }
       if (selected?.historicalDecision?.status) {
         const decision = selected.historicalDecision;
         identity.append(element('p', 'Результат исторической проверки ' + decision.status + '. ' + reason(decision.reason), 'model-muted'));
@@ -259,7 +261,7 @@ export const atlmModelOverviewScript = String.raw`
       info.append(fact('Точечный прогноз', pointText[selected?.pointEngine] ?? 'Нет данных'),
         fact('Интервал', intervalText[selected?.intervalEngine] ?? 'Нет данных'));
       if (selected?.activatedAt !== null && selected?.activatedAt !== undefined) {
-        info.append(fact('Активирована', date(selected.activatedAt)));
+        info.append(fact('Назначена', date(selected.activatedAt)));
       }
       model.append(identity, info);
       current.append(model);
@@ -311,6 +313,13 @@ export const atlmModelOverviewScript = String.raw`
     return evidenceNames[entry.kind] ?? 'Проверка';
   }
 
+  function evidenceMethodology(entry) {
+    if (entry.kind === 'ISSUED_FORECASTS' && entry.source === 'evaluation') {
+      return 'Отчёт сопоставляет прогнозы первого старта из снимка обучения с активным временем планов. В нём могут быть прогнозы прежних ревизий, историческая медиана и случаи без прогноза.';
+    }
+    return methodologies[entry.kind] ?? 'Сохранённая проверка.';
+  }
+
   function emptyEvidence() {
     if (!selectedId) return 'Выберите ревизию в истории.';
     return source === 'issued' ? 'По этой ревизии пока нет завершённых планов с выданным прогнозом.'
@@ -338,7 +347,7 @@ export const atlmModelOverviewScript = String.raw`
       line.append(element('span', selectedId, 'model-number'));
       selection.append(line);
       if (overview?.activeModelRevisionId && selectedId !== overview.activeModelRevisionId) {
-        selection.append(button('Вернуться к активной ревизии', () => chooseRevision(null)));
+        selection.append(button('Вернуться к назначенной ревизии', () => chooseRevision(null)));
       }
     }
     if (selectionMessage) selection.append(element('p', selectionMessage, 'model-muted'));
@@ -402,7 +411,7 @@ export const atlmModelOverviewScript = String.raw`
       const intervalCounts = summary.intervalAvailability;
       if (intervalCounts?.denominator > 0)
         method.append(fact('Доступные интервалы', fraction(intervalCounts.numerator, intervalCounts.denominator)));
-      get('methodology').replaceChildren(element('p', methodologies[evidence.kind] ?? 'Сохранённая проверка.', 'model-muted'), method);
+      get('methodology').replaceChildren(element('p', evidenceMethodology(evidence), 'model-muted'), method);
     }
 
     if (detail?.trainingEvaluation) {
@@ -477,7 +486,14 @@ export const atlmModelOverviewScript = String.raw`
       action.dataset.revisionId = id;
       action.setAttribute('aria-label', (chosen ? 'Выбрана ' : 'Показать ') + id);
       if (chosen) action.setAttribute('aria-disabled', 'true');
-      return [element('span', id, 'model-number'), badge(revision.status), date(revision.registeredAt), count(revision.fitCount), action];
+      const serving = revision.status === 'ACTIVE' && id === overview.servingModelRevisionId;
+      const unavailable = revision.status === 'INVALIDATED' || revision.status === 'ARCHIVED';
+      const status = element('div');
+      status.append(badge(serving, unavailable));
+      if (unavailable && !serving) {
+        status.append(element('div', reason(revision.sourceProblem) || 'Причина недоступности не сохранена.', 'model-muted'));
+      }
+      return [element('span', id, 'model-number'), status, date(revision.registeredAt), count(revision.fitCount), action];
     });
     host.replaceChildren(rows.length ? table('История ревизий', labels, rows) : element('p', 'Ревизий пока нет', 'model-muted'));
     if (focusedId && document.activeElement === document.body) {
@@ -572,6 +588,12 @@ export const atlmModelOverviewScript = String.raw`
       const result = await read(registryUrl, { view: 'list', cursor }, request);
       if (!requestCurrent('history', request)) return;
       requests.delete('history');
+      if (result.activationVersion !== overview.activationVersion
+        || result.servingModelRevisionId !== overview.servingModelRevisionId
+        || result.sourceProblem !== overview.sourceProblem) {
+        await loadAtlmModelOverview();
+        return;
+      }
       history = { rows: [...history.rows, ...result.rows], cursor: result.nextCursor };
       const retryFocused = document.activeElement === retryButton;
       clearNotice(get('history-notice'));
@@ -640,7 +662,7 @@ export const atlmModelOverviewScript = String.raw`
     selectionMessage = '';
     controlId = null;
     get('quality-heading').focus();
-    announce(selectedId ? 'Выбрана ревизия ' + selectedId : 'Активной ревизии пока нет.');
+    announce(selectedId ? 'Выбрана ревизия ' + selectedId : 'Модель для новых прогнозов пока не назначена.');
     renderQuality();
     renderHistory();
     resetCases();

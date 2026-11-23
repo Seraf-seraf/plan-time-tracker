@@ -73,6 +73,26 @@ function evidencePage(c, id, source, evidenceId, args = {}) {
   return readAtlmModelEvidenceCases(c.db, OWNER, id, { source, evidenceId, ...args }, c.now());
 }
 
+test('saved issued reports distinguish string revision IDs, legacy numbers, and missing provenance', async () => {
+  const c = context();
+  try {
+    register(c, SECOND_REVISION, { evaluation: { schemaVersion: 1, modes: { ISSUED_FORECASTS: {
+      status: 'AVAILABLE', summary: { rowCount: 3 }, cases: [
+        { planId: 'legacy-plan', actualMs: 1000, pointMs: 1500, issuedModelId: 'atlm-11', issuedModelRevision: 1 },
+        { planId: 'explicit-plan', actualMs: 1000, pointMs: 1500, issuedModelRevision: '1' },
+        { planId: 'unavailable-plan', actualMs: 1000, pointMs: null, pointUnavailableReason: 'ISSUED_FORECAST_NOT_RECORDED' },
+      ],
+    } } } });
+    const report = (await detail(c, SECOND_REVISION)).evidence.find(item => item.source === 'evaluation');
+    const page = await evidencePage(c, SECOND_REVISION, 'evaluation', report.evidenceId);
+    assert.equal(page.modelRevisionId, SECOND_REVISION);
+    assert.deepEqual(page.cases.map(row => [row.modelRevisionId, row.modelId, row.modelRevision, row.method]), [
+      [null, 'atlm-11', 1, null], ['1', null, null, null], [null, null, null, null],
+    ]);
+    assert.equal(page.cases[2].pointUnavailableReason, 'ISSUED_FORECAST_NOT_RECORDED');
+  } finally { c.close(); }
+});
+
 test('revision evidence uses exact forecast identity and freezes the sample versions for cases and summary', async () => {
   const c = context();
   try {
