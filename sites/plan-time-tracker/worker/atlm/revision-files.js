@@ -147,7 +147,7 @@ function makeManifest(sha256, byteLength) {
 }
 
 const initialUpload = JSON.stringify({ words: SHA_INITIAL_WORDS });
-const initialExport = JSON.stringify({ chunkIndex: 0, chunkOffset: 0, tail: '', words: SHA_INITIAL_WORDS });
+const initialExport = { chunkIndex: 0, chunkOffset: 0, tail: '', words: SHA_INITIAL_WORDS };
 const uploadStates = "state IN ('UPLOADING','VALIDATING')";
 const fileKeyWhere = 'owner_id=? AND storage_id=? AND file_kind=?';
 
@@ -352,18 +352,25 @@ function readyView(row) {
   return { state: 'READY', file: makeManifest(row.sha256, row.byte_length) };
 }
 
-async function exportPass(row, readChunk) {
-  let { chunkIndex, chunkOffset, tail, words } = JSON.parse(row.descriptor_json);
+export function sliceAtlmExportText(text, offset, limit) {
+  if (text === null) return null;
+  const bytes = encodeUtf8.encode(text);
+  return { bytes: bytes.subarray(offset, offset + limit), done: offset + limit >= bytes.length };
+}
+
+async function exportPass(checkpoint, byteLength, readSlice) {
+  let { chunkIndex, chunkOffset } = checkpoint;
+  const { tail, words, format } = checkpoint;
   const hash = new ResumableSha256(words);
   const buffer = new Uint8Array(ATLM_PART_BYTES);
   const tailBytes = tail ? Uint8Array.from(atob(tail), character => character.charCodeAt(0)) : new Uint8Array(0);
   buffer.set(tailBytes);
   let fill = tailBytes.length;
   const parts = [];
-  let byteLength = row.checked_bytes;
   let sha256 = null;
   for (let reads = 0; reads < ATLM_EXPORT_CHUNKS_PER_PASS && parts.length < ATLM_PARTS_PER_PASS; reads++) {
-    const chunk = await readChunk(chunkIndex);
+    const available = (ATLM_PARTS_PER_PASS - parts.length) * ATLM_PART_BYTES - fill;
+    const chunk = await readSlice(chunkIndex, chunkOffset, available);
     if (chunk === null) {
       const end = buffer.subarray(0, fill);
       if (fill) parts.push({ byteLength: fill, contentBase64: encodePart(end) });
@@ -372,11 +379,11 @@ async function exportPass(row, readChunk) {
       fill = 0;
       break;
     }
-    const bytes = encodeUtf8.encode(chunk);
-    while (chunkOffset < bytes.length && parts.length < ATLM_PARTS_PER_PASS) {
-      const length = Math.min(ATLM_PART_BYTES - fill, bytes.length - chunkOffset);
-      buffer.set(bytes.subarray(chunkOffset, chunkOffset + length), fill);
-      chunkOffset += length;
+    const { bytes, done } = chunk;
+    for (let offset = 0; offset < bytes.length;) {
+      const length = Math.min(ATLM_PART_BYTES - fill, bytes.length - offset);
+      buffer.set(bytes.subarray(offset, offset + length), fill);
+      offset += length;
       fill += length;
       if (fill === ATLM_PART_BYTES) {
         hash.blocks(buffer);
@@ -385,31 +392,42 @@ async function exportPass(row, readChunk) {
         fill = 0;
       }
     }
-    if (chunkOffset === bytes.length) {
+    if (done) {
       chunkIndex++;
       chunkOffset = 0;
-    }
+    } else chunkOffset += bytes.length;
   }
-  const state = JSON.stringify({ chunkIndex, chunkOffset, tail: encodePart(buffer.subarray(0, fill)), words: Array.from(hash.words) });
+  const state = JSON.stringify({
+    chunkIndex, chunkOffset, tail: encodePart(buffer.subarray(0, fill)), words: Array.from(hash.words), format,
+  });
   return { parts, byteLength, sha256, state };
 }
 
-export async function materializeAtlmRevisionFile(db, ownerId, { storageId, fileKind, readChunk }, nowMs) {
+export async function materializeAtlmRevisionFile(db, ownerId, { storageId, fileKind, readChunk, readSlice, format }, nowMs) {
   if (!EXPORT_KINDS.has(fileKind)) throw appError('VALIDATION_ERROR', 'Неизвестный вид файла ревизии.');
   const key = [ownerId, storageId, fileKind];
+  const initial = { ...initialExport, format };
   await db.prepare(`INSERT OR IGNORE INTO estimation_revision_files(owner_id,storage_id,file_kind,state,descriptor_json,
-    updated_at) VALUES(?,?,?,'MATERIALIZING',?,?)`).bind(...key, initialExport, nowMs).run();
+    updated_at) VALUES(?,?,?,'MATERIALIZING',?,?)`).bind(...key, JSON.stringify(initial), nowMs).run();
   const row = await readDraftStatement(db, key).first();
   if (row.state === 'READY') return readyView(row);
   if (row.state !== 'MATERIALIZING') return exportPending();
-  const next = await exportPass(row, readChunk);
-  const checkedParts = row.checked_parts + next.parts.length;
+  const checkpoint = JSON.parse(row.descriptor_json);
+  const restart = checkpoint.format !== format;
+  const firstPart = restart ? 0 : row.checked_parts;
+  const next = await exportPass(restart ? initial : checkpoint, restart ? 0 : row.checked_bytes,
+    readSlice ?? (async (index, offset, limit) => sliceAtlmExportText(await readChunk(index), offset, limit)));
+  const checkedParts = firstPart + next.parts.length;
   const guard = `${fileKeyWhere} AND state='MATERIALIZING' AND checked_parts=? AND descriptor_json=?`;
   const expected = [...key, row.checked_parts, row.descriptor_json];
   const writes = next.parts.map((part, index) => db.prepare(`INSERT INTO estimation_revision_file_parts(owner_id,
     storage_id,file_kind,part_index,byte_length,content_base64)
     SELECT ?,?,?,?,?,? FROM estimation_revision_files WHERE ${guard}`)
-    .bind(...key, row.checked_parts + index, part.byteLength, part.contentBase64, ...expected));
+    .bind(...key, firstPart + index, part.byteLength, part.contentBase64, ...expected));
+  // Unfinished parts and the byte cursor must use the same serialization.
+  if (restart && row.checked_parts > 0) writes.unshift(db.prepare(`DELETE FROM estimation_revision_file_parts
+    WHERE ${fileKeyWhere} AND EXISTS(SELECT 1 FROM estimation_revision_files WHERE ${guard})`)
+    .bind(...key, ...expected));
   const checkParts = next.sha256 ? `AND (SELECT count(*)=? AND coalesce(sum(byte_length),0)=?
     FROM estimation_revision_file_parts WHERE ${fileKeyWhere})` : '';
   writes.push(db.prepare(`UPDATE estimation_revision_files SET state=?,descriptor_json=?,checked_parts=?,checked_bytes=?,

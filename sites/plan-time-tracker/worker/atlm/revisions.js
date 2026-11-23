@@ -11,6 +11,7 @@ import { readAtlmModelRevisions } from './model-evidence.js';
 import {
   ATLM_MAX_UPLOAD_BYTES, ATLM_PART_BYTES, ATLM_UPLOAD_READY_SQL, ATLM_UPLOAD_TTL_MS, atlmUploadReadyArgs, hashAtlmTextChunks, materializeAtlmRevisionFile,
   prepareAtlmUpload, putAtlmUploadPart, readAtlmRevisionFilePart, readAtlmUpload, readyAtlmUploadStatement,
+  sliceAtlmExportText,
 } from './revision-files.js';
 import {
   ATLM_DATASET_VERSION, ATLM_TEACHER_CODE_PATHS, ATLM_TEACHER_MODES, ATLM_TEACHER_TRAINER_VERSION,
@@ -29,6 +30,9 @@ const VALIDATION_BATCH_ROWS = 32;
 const MIN_ROLLING_REGRESSION_ROWS = 2;
 const DOCUMENT_MAX_DEPTH = 32;
 const SNAPSHOT_CONTRACT = 'atlm-training-snapshot';
+const SNAPSHOT_EXPORT_FORMAT = 'snapshot-json-slices-v1';
+const SNAPSHOT_READ_BYTES = 2 * ATLM_PART_BYTES;
+const HEX_DIGITS = '0123456789ABCDEF';
 
 const id = { type: 'string', minLength: 1, maxLength: 128, pattern: '^[!-~]+$' };
 const uuid = { type: 'string', format: 'uuid' };
@@ -439,7 +443,7 @@ async function* rowExport(header, rows) {
   yield ']}';
 }
 
-function exportReader(db, ownerId, spec, key, header, rowCount, project) {
+function datasetExportReader(db, ownerId, datasetRevisionId, header, rowCount) {
   let page = [];
   return async (index) => {
     if (index === 0) return JSON.stringify(header).slice(0, -1) + ',"rows":[';
@@ -447,12 +451,38 @@ function exportReader(db, ownerId, spec, key, header, rowCount, project) {
     if (index > rowCount + 1) return null;
     const ordinal = index - 1;
     if (!page.length || ordinal < page[0].ordinal || ordinal > page.at(-1).ordinal) {
-      page = await dbAll(db, 'SELECT * FROM ' + spec.table + ' WHERE owner_id=? AND ' + spec.key
-        + '=? AND ordinal>=? ORDER BY ordinal LIMIT ?', ownerId, key, ordinal, VALIDATION_BATCH_ROWS);
+      page = await dbAll(db, `SELECT * FROM estimation_dataset_revision_rows
+        WHERE owner_id=? AND dataset_revision_id=? AND ordinal>=? ORDER BY ordinal LIMIT ?`,
+      ownerId, datasetRevisionId, ordinal, VALIDATION_BATCH_ROWS);
     }
     const row = page[ordinal - (page[0]?.ordinal ?? -1)];
     if (row?.ordinal !== ordinal) throw error('SOURCE_UNAVAILABLE', 503, { reason: 'EXPORT_ROW_MISSING' });
-    return (ordinal === 0 ? '' : ',') + JSON.stringify(project(row));
+    return (ordinal === 0 ? '' : ',') + JSON.stringify(datasetRow(row));
+  };
+}
+
+function snapshotExportReader(db, ownerId, snapshotId, header, rowCount) {
+  return async (index, offset, available) => {
+    if (index === 0) return sliceAtlmExportText(JSON.stringify(header).slice(0, -1) + ',"rows":[', offset, available);
+    if (index === rowCount + 1) return sliceAtlmExportText(']}', offset, available);
+    if (index > rowCount + 1) return null;
+    const limit = Math.min(available, SNAPSHOT_READ_BYTES);
+    // The frozen JSON columns are valid JSON. Slice their UTF-8 bytes in SQLite
+    // and use hex so a split inside a character survives transport intact.
+    const row = await dbFirst(db, `SELECT hex(substr(CAST(
+      (CASE WHEN ordinal=0 THEN '' ELSE ',' END) ||
+      '{"rowId":' || json_quote(row_id) || ',"planId":' || json_quote(plan_id) ||
+      ',"rawEligibility":' || json_quote(raw_eligibility) || ',"rawReasons":' || raw_reasons_json ||
+      ',"source":' || source_json || ',"evidence":' || evidence_json || '}' AS BLOB), ?, ?)) AS chunk_hex
+      FROM estimation_training_snapshot_rows WHERE owner_id=? AND snapshot_id=? AND ordinal=?`,
+    offset + 1, limit + 1, ownerId, snapshotId, index - 1);
+    if (!row) throw error('SOURCE_UNAVAILABLE', 503, { reason: 'EXPORT_ROW_MISSING' });
+    const length = row.chunk_hex.length / 2;
+    const bytes = new Uint8Array(Math.min(length, limit));
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = HEX_DIGITS.indexOf(row.chunk_hex[2 * i]) * 16 + HEX_DIGITS.indexOf(row.chunk_hex[2 * i + 1]);
+    }
+    return { bytes, done: length <= limit };
   };
 }
 
@@ -477,8 +507,12 @@ async function readRevisionEntity(db, ownerId, kind, args, nowMs) {
     capturedAt: header.capturedAt, sourceDataVersion: header.sourceDataVersion,
     featureSchemaVersion: header.featureSchemaVersion,
   } : datasetExportHeader(row);
-  const readChunk = exportReader(db, ownerId, spec, entityId, exportHeader, row.row_count, snapshot ? snapshotRow : datasetRow);
-  const result = await materializeAtlmRevisionFile(db, ownerId, { ...selector, readChunk }, nowMs);
+  const source = snapshot ? {
+    readSlice: snapshotExportReader(db, ownerId, entityId, exportHeader, row.row_count), format: SNAPSHOT_EXPORT_FORMAT,
+  } : {
+    readChunk: datasetExportReader(db, ownerId, entityId, exportHeader, row.row_count),
+  };
+  const result = await materializeAtlmRevisionFile(db, ownerId, { ...selector, ...source }, nowMs);
   if (!snapshot && result.state === 'READY' && row.dataset_digest !== null && result.file.sha256 !== row.dataset_digest)
     throw error('SOURCE_UNAVAILABLE', 503, { reason: 'DATASET_DIGEST_MISMATCH', datasetRevisionId: entityId });
   return { ...header, ...result };

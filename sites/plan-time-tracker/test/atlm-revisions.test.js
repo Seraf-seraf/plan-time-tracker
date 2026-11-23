@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { materializeAtlmRevisionFile } from '../worker/atlm/revision-files.js';
 import { summarizeAtlmTeacherMode } from '../worker/atlm/teacher-dataset.js';
 import { createWorker } from '../worker/index.js';
 import { teacherAnnotation } from './fixtures/atlm-revisions.mjs';
@@ -261,6 +262,67 @@ test('snapshot retries pending refresh, preserves failed rows, and remains froze
   await expectError(c, SNAPSHOT, snapshotRead(saved.snapshotId, 'filePart', { partIndex: 0 }),
     'SNAPSHOT_NOT_FOUND', OTHER);
   await expectError(c, SNAPSHOT, { ...create, ownerId: OTHER }, 'VALIDATION_ERROR');
+});
+
+test('snapshot downloads large evidence under a database response limit and resumes unfinished exports', async (t) => {
+  const c = setup(t);
+  const plan = await completed(c, 60_000);
+  await completed(c, 30_000);
+  const detail = '🙂я'.repeat(100_000);
+  c.db.sqlite.prepare(`INSERT INTO command_receipts(owner_id,command_id,payload_hash,command_type,plan_id,
+    server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at)
+    VALUES(?,?,'hash','AppendObservation',?,?,'agent','agent',?,'OK',?)`)
+    .run(OWNER, crypto.randomUUID(), plan.planId, c.now(),
+      '{"number":1.0,"detail":' + JSON.stringify(detail) + '}', c.now());
+  const { snapshotId, capturedAt, sourceDataVersion, featureSchemaVersion } = await tool(c, SNAPSHOT, snapshotArgs());
+  const header = { schemaVersion: 1, contract: 'atlm-training-snapshot',
+    snapshotId, capturedAt, sourceDataVersion, featureSchemaVersion };
+  const rows = c.db.sqlite.prepare(`SELECT * FROM estimation_training_snapshot_rows
+    WHERE owner_id=? AND snapshot_id=? ORDER BY ordinal`).all(OWNER, snapshotId).map(row => ({
+    rowId: row.row_id, planId: row.plan_id, rawEligibility: row.raw_eligibility,
+    rawReasons: JSON.parse(row.raw_reasons_json), source: JSON.parse(row.source_json),
+    evidence: JSON.parse(row.evidence_json),
+  }));
+  const chunks = [JSON.stringify(header).slice(0, -1) + ',"rows":[',
+    ...rows.map((row, index) => (index ? ',' : '') + JSON.stringify(row)), ']}'];
+  const draft = await materializeAtlmRevisionFile(c.db, OWNER, {
+    storageId: snapshotId, fileKind: 'SNAPSHOT', readChunk: index => chunks[index] ?? null,
+  }, c.now());
+  assert.equal(draft.state, 'MATERIALIZING');
+  assert.ok(c.db.sqlite.prepare('SELECT checked_parts FROM estimation_revision_files WHERE storage_id=?')
+    .get(snapshotId).checked_parts > 0);
+
+  const maxResponseBytes = 4 * PART_BYTES + 1024;
+  const prepare = c.db.prepare;
+  let sourceReads = 0;
+  c.db.prepare = function(sql) {
+    const statement = prepare.call(this, sql);
+    if (!/\bFROM estimation_training_snapshot_rows\b/i.test(sql)) return statement;
+    const bind = statement.bind.bind(statement);
+    statement.bind = (...args) => {
+      const bound = bind(...args);
+      for (const method of ['first', 'all']) {
+        const read = bound[method].bind(bound);
+        bound[method] = async () => {
+          const result = await read();
+          sourceReads++;
+          if (Buffer.byteLength(JSON.stringify(result)) > maxResponseBytes) throw new Error('DB_REQUEST_TIMEOUT');
+          return result;
+        };
+      }
+      return bound;
+    };
+    return statement;
+  };
+
+  const downloads = await Promise.all([0, 1].map(() => tool(c, SNAPSHOT, snapshotRead(snapshotId, 'download'))));
+  assert.ok(downloads.every(result => result.state === 'MATERIALIZING'));
+  const { value, file } = await download(c, SNAPSHOT, { mode: 'read', snapshotId });
+  assert.deepEqual(value, { ...header, rows });
+  assert.ok(sourceReads > 1);
+  const completedReads = sourceReads;
+  assert.deepEqual((await tool(c, SNAPSHOT, snapshotRead(snapshotId, 'download'))).file, file);
+  assert.equal(sourceReads, completedReads);
 });
 
 test('snapshot checks its refresh boundary in the final batch and retains source and sample generations', async (t) => {
