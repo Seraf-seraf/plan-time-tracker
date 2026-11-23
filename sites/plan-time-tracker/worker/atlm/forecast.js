@@ -4,7 +4,6 @@ import {
   canonical,
   dbFirst,
   hashCommandInput,
-  isPlainRecord,
   isSnapshotDigest,
   median,
   messageFor,
@@ -21,17 +20,9 @@ import {
   predictAtlm,
   validateAssessmentValue,
 } from './model.js';
-import { ATLM_TOOL_SCHEMAS, atlmSampleView, readAtlmSampleSource } from './sample.js';
-import {
-  ATLM_LATEST_SAMPLE_SQL,
-  atlmDiagnostics,
-  atlmReadActiveModel,
-  atlmStatusDiagnostics,
-  atlmTrainingJson,
-  getEstimationModelStatus,
-  predictWithActiveModel,
-  processEstimationTraining,
-} from './training.js';
+import { ATLM_LATEST_SAMPLE_SQL, ATLM_TOOL_SCHEMAS, readAtlmSampleSource } from './sample.js';
+import { atlmDiagnostics, atlmReadActiveModel, predictWithActiveModel, readAtlmServingState } from './serving.js';
+import { readAtlmSampleRefreshStatus } from './sample-refresh.js';
 
 async function atlmPlanContext(db, ownerId, planId) {
   const row = await dbFirst(
@@ -55,19 +46,15 @@ const HISTORICAL_MEDIAN_METHOD = Object.freeze({ id: 'historical-median', versio
 function canUseHistoricalMedian(prediction) {
   const allowed = new Set([
     'COLLECTING_DATA',
-    'TRAINING_NOT_STARTED',
-    'TRAINING_IN_PROGRESS',
+    'SOURCES_PENDING',
+    'SOURCE_REFRESH_FAILED',
     'INSUFFICIENT_DATA',
     'RANK_DEFICIENT',
     'UNSUPPORTED_CATEGORY',
     'MODEL_INVALIDATED',
-    'INSUFFICIENT_INCUMBENT_CASES',
-    'INSUFFICIENT_EVALUATION_CASES',
     'INVALID_PREDICTION',
-    'MEDIAN_BASELINE_NOT_WORSE',
     'MODEL_RESOURCE_LIMIT',
     'MODEL_CAPACITY_LIMIT',
-    'TRAINING_TIME_BUDGET',
   ]);
   const diagnostic = prediction.diagnostics;
   return (
@@ -83,9 +70,12 @@ async function historicalMedianForecast(db, ownerId, planId, nowMs) {
     `WITH selected AS(
     SELECT s.sequence,s.actual_ms FROM estimation_samples s
     WHERE s.owner_id=? AND s.plan_id<>? AND s.eligibility='ELIGIBLE' AND ${ATLM_LATEST_SAMPLE_SQL}
-      AND s.source_available_at<=? ORDER BY s.sequence LIMIT ?
+      AND s.source_available_at<=? AND NOT EXISTS(SELECT 1 FROM estimation_jobs j
+        WHERE j.owner_id=s.owner_id AND j.job_key='refresh:'||s.plan_id AND j.status='FAILED'
+          AND j.generation>j.processed_generation)
+    ORDER BY s.sequence LIMIT ?
   ) SELECT COALESCE((SELECT dataset_revision FROM estimation_owner_state WHERE owner_id=?),0) AS revision,
-    EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND kind='REFRESH_SAMPLE' AND generation>processed_generation) AS dirty,
+    EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND kind='REFRESH_SAMPLE' AND generation>processed_generation AND status<>'FAILED') AS dirty,
     (SELECT json_group_array(json_object('sequence',sequence,'actualMs',actual_ms)) FROM selected) AS rows_json`,
     ownerId,
     planId,
@@ -181,6 +171,7 @@ async function calculateAtlmEstimate(db, ownerId, args, nowMs) {
     status: prediction.status,
     pointMs: prediction.pointMs ?? null,
     modelId: prediction.modelId ?? null,
+    ...(prediction.modelRevisionId ? { modelRevisionId: prediction.modelRevisionId } : {}),
     modelVersion: prediction.modelVersion ?? null,
     ...(prediction.modelRevision ? { modelRevision: prediction.modelRevision } : {}),
     requirementsDigest: target.requirementsDigest,
@@ -208,24 +199,28 @@ const CURRENT_FORECAST_MAX_READ_ATTEMPTS = 3;
 
 const CURRENT_FORECAST_INPUT_SQL = `SELECT input.*,
   json_array(status,first_started_at,deleted_at,requirements_json,sequence,dataset_revision,
-    active_model_id,model_status,last_training_diagnostics_json,training_generation,history_jobs_json) AS start_key,
-  json_array(status,first_started_at,deleted_at,requirements_json,
-  sequence,dataset_revision,active_model_id,model_status,last_training_diagnostics_json,training_generation,jobs_json) AS snapshot_key
+    active_model_id,activation_version,model_status,source_problem,history_jobs_json) AS start_key,
+  json_array(status,first_started_at,deleted_at,requirements_json,sequence,dataset_revision,
+    active_model_id,activation_version,model_status,source_problem,jobs_json) AS snapshot_key
   FROM (SELECT p.status,p.first_started_at,p.deleted_at,t.requirements_json,
     a.sequence,a.assessment_id,a.revision,a.requirements_digest,a.assessment_json,
-    COALESCE(o.dataset_revision,0) AS dataset_revision,COALESCE(m.model_id,o.active_model_id) AS active_model_id,m.status AS model_status,
-    o.last_training_diagnostics_json,COALESCE(o.training_generation,0) AS training_generation,
-    (SELECT json_group_array(json_array(j.job_key,j.generation,j.processed_generation,j.status))
-      FROM estimation_jobs j WHERE j.owner_id=p.owner_id AND (j.kind<>'REFRESH_SAMPLE'
-        OR EXISTS(SELECT 1 FROM estimation_samples s WHERE s.owner_id=j.owner_id AND s.plan_id=j.plan_id)
-        OR EXISTS(SELECT 1 FROM plans h WHERE h.owner_id=j.owner_id AND h.plan_id=j.plan_id AND h.status='COMPLETED'))) AS history_jobs_json,
-    (SELECT json_group_array(json_array(j.job_key,j.generation,j.processed_generation,j.status))
-      FROM estimation_jobs j WHERE j.owner_id=p.owner_id) AS jobs_json
+    COALESCE(o.dataset_revision,0) AS dataset_revision,active.model_revision_id AS active_model_id,
+    COALESCE(active.activation_version,0) AS activation_version,m.status AS model_status,m.source_problem,
+    (SELECT json_group_array(json_array(job_key,generation,processed_generation,status))
+      FROM (SELECT j.job_key,j.generation,j.processed_generation,j.status
+      FROM estimation_jobs j WHERE j.owner_id=p.owner_id AND
+        (EXISTS(SELECT 1 FROM estimation_samples s WHERE s.owner_id=j.owner_id AND s.plan_id=j.plan_id)
+        OR EXISTS(SELECT 1 FROM plans h WHERE h.owner_id=j.owner_id AND h.plan_id=j.plan_id AND h.status='COMPLETED'))
+      ORDER BY j.job_key)) AS history_jobs_json,
+    (SELECT json_group_array(json_array(job_key,generation,processed_generation,status))
+      FROM (SELECT j.job_key,j.generation,j.processed_generation,j.status
+      FROM estimation_jobs j WHERE j.owner_id=p.owner_id ORDER BY j.job_key)) AS jobs_json
     FROM plans p JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id AND t.step_id IS NULL
     LEFT JOIN assessment_revisions a ON a.sequence=(SELECT MAX(r.sequence) FROM assessment_revisions r
       WHERE r.owner_id=p.owner_id AND r.plan_id=p.plan_id AND r.step_id IS NULL)
     LEFT JOIN estimation_owner_state o ON o.owner_id=p.owner_id
-    LEFT JOIN estimation_serving_models m ON m.owner_id=o.owner_id AND m.pointer_id=o.active_model_id AND m.preferred=1
+    LEFT JOIN estimation_active_revisions active ON active.owner_id=p.owner_id
+    LEFT JOIN estimation_serving_models m ON m.owner_id=active.owner_id AND m.model_id=active.model_revision_id
     WHERE p.owner_id=? AND p.plan_id=?) input`;
 
 async function currentForecastInput(db, ownerId, planId) {
@@ -396,21 +391,12 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
       if (!current || current.fallback.sourceDigest !== serverEstimation.fallback.sourceDigest)
         staleReasons.push('BASELINE_SOURCE_CHANGED');
     }
-    if (serverEstimation.modelId) {
-      const model = await dbFirst(
-        db,
-        `SELECT m.status,
-        m.model_revision IS NULL AND EXISTS(SELECT 1 FROM json_each(m.manifest_json) item LEFT JOIN estimation_samples s
-          ON s.owner_id=m.owner_id AND s.sequence=CAST(item.value AS INTEGER)
-          LEFT JOIN estimation_jobs j ON j.owner_id=s.owner_id AND j.job_key='refresh:'||s.plan_id
-          WHERE s.sequence IS NULL OR j.generation<>s.source_generation
-            OR s.sequence<>(SELECT MAX(latest.sequence) FROM estimation_samples latest WHERE latest.owner_id=s.owner_id AND latest.plan_id=s.plan_id)) AS source_changed
-        FROM estimation_serving_models m WHERE m.owner_id=? AND m.model_id=?`,
-        ownerId,
-        serverEstimation.modelId,
-      );
-      if (!model || model.status === 'INVALIDATED' || model.source_changed)
-        staleReasons.push('MODEL_INVALIDATED');
+    const revisionId = serverEstimation.modelRevisionId ?? serverEstimation.modelId;
+    if (revisionId) {
+      const model = await dbFirst(db,
+        'SELECT status FROM estimation_serving_models WHERE owner_id=? AND model_id=?',
+        ownerId, revisionId);
+      if (!model || ['INVALIDATED', 'ARCHIVED'].includes(model.status)) staleReasons.push('MODEL_INVALIDATED');
     }
   }
   const canRefreshSaved =
@@ -445,7 +431,7 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
       else {
         const model = await atlmReadActiveModel(db, ownerId);
         if (model) {
-          const artifact = atlmTrainingJson(model.artifact_json);
+          const artifact = JSON.parse(model.artifact_json);
           if (!atlmArtifactValid(artifact))
             throw appError('SOURCE_UNAVAILABLE', 'Сохранённая модель ATLM повреждена.', 503, {
               reason: 'INVALID_ARTIFACT',
@@ -456,8 +442,15 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
         }
       }
     } else diagnostics = atlmDiagnostics('MISSING_FEATURES');
-    if (!diagnostics)
-      diagnostics = atlmStatusDiagnostics(await getEstimationModelStatus(db, ownerId, nowMs));
+    if (!diagnostics) {
+      const state = await readAtlmServingState(db, ownerId);
+      if (!state.servingModelRevisionId) {
+        const refresh = await readAtlmSampleRefreshStatus(db, ownerId, nowMs);
+        diagnostics = atlmDiagnostics(state.activeModelRevisionId ? 'MODEL_INVALIDATED'
+          : refresh.pendingCount ? 'SOURCES_PENDING'
+            : refresh.failedCount ? 'SOURCE_REFRESH_FAILED' : 'COLLECTING_DATA');
+      }
+    }
   }
   let calculationMethod = !diagnostics ? { ...ATLM_METHOD } : null;
   if (
@@ -504,183 +497,10 @@ async function getPlanEstimate(db, ownerId, args, nowMs) {
   };
 }
 
-async function getAtlmDataset(db, ownerId, args, nowMs) {
-  validateAssessmentValue(args, ATLM_TOOL_SCHEMAS.GetAtlmDataset);
-  const limit = args.limit ?? 50,
-    ownerScope = await hashCommandInput({ purpose: 'atlm-dataset-cursor-v1', ownerId });
-  let cursor = null;
-  if (args.cursor !== undefined) {
-    try {
-      cursor = JSON.parse(args.cursor);
-    } catch {
-      throw appError('VALIDATION_ERROR', 'Invalid dataset cursor.');
-    }
-    if (
-      !cursor ||
-      typeof cursor !== 'object' ||
-      Array.isArray(cursor) ||
-      Object.keys(cursor).length !== 6 ||
-      cursor.version !== 1 ||
-      cursor.ownerScope !== ownerScope ||
-      !['datasetRevision', 'asOf', 'afterSequence', 'throughSequence'].every(
-        (key) => Number.isSafeInteger(cursor[key]) && cursor[key] >= 0,
-      ) ||
-      cursor.asOf > nowMs ||
-      cursor.afterSequence > cursor.throughSequence
-    )
-      throw appError('VALIDATION_ERROR', 'Invalid dataset cursor.');
-  }
-  const asOf = cursor?.asOf ?? nowMs;
-  // Revision, high-water mark and page share one SQLite read snapshot.
-  const snapshot = await dbFirst(
-    db,
-    `WITH snapshot AS (
-      SELECT COALESCE((SELECT dataset_revision FROM estimation_owner_state WHERE owner_id=?),0) AS revision,
-        COALESCE((SELECT MAX(sequence) FROM estimation_samples WHERE owner_id=? AND observed_at<=?),0) AS through_sequence
-    ), page AS (
-      SELECT s.* FROM estimation_samples s WHERE s.owner_id=? AND s.sequence>? AND s.observed_at<=?
-        AND s.sequence<=COALESCE(?,(SELECT through_sequence FROM snapshot)) ORDER BY s.sequence LIMIT ?
-    ) SELECT revision,through_sequence,
-      (SELECT json_group_array(json_object('sequence',sequence,'plan_id',plan_id,'input_assessment_sequence',input_assessment_sequence,
-        'source_digest',source_digest,'source_generation',source_generation,'eligibility',eligibility,'reasons_json',reasons_json,
-        'features_json',features_json,'issued_prediction_json',issued_prediction_json,'actual_ms',actual_ms,'captured_at',captured_at,
-        'source_available_at',source_available_at,'observed_at',observed_at,'is_first_eligible',is_first_eligible)) FROM page) AS rows_json
-    FROM snapshot`,
-    ownerId,
-    ownerId,
-    asOf,
-    ownerId,
-    cursor?.afterSequence ?? 0,
-    asOf,
-    cursor?.throughSequence ?? null,
-    limit + 1,
-  );
-  if (cursor && cursor.datasetRevision !== snapshot.revision)
-    throw appError('DATASET_CHANGED', messageFor('DATASET_CHANGED'), 409);
-  const rows = JSON.parse(snapshot.rows_json).map(atlmSampleView),
-    hasMore = rows.length > limit;
-  if (hasMore) rows.pop();
-  const nextCursor = hasMore
-    ? JSON.stringify({
-        version: 1,
-        ownerScope,
-        datasetRevision: snapshot.revision,
-        asOf,
-        afterSequence: Number(rows.at(-1).sampleId),
-        throughSequence: cursor?.throughSequence ?? snapshot.through_sequence,
-      })
-    : null;
-  return {
-    formatVersion: 1,
-    featureSchemaVersion: ATLM_FEATURE_VERSION,
-    datasetRevision: snapshot.revision,
-    asOf,
-    rows,
-    hasMore,
-    nextCursor,
-    serverNow: nowMs,
-  };
-}
-
-async function getEstimationTrainingHistory(db, ownerId, args, nowMs) {
-  validateAssessmentValue(args, ATLM_TOOL_SCHEMAS.GetEstimationTrainingHistory);
-  const limit = args.limit ?? 50,
-    ownerScope = await hashCommandInput({ purpose: 'atlm-training-history-v1', ownerId });
-  let cursor = null;
-  if (args.cursor !== undefined) {
-    try {
-      cursor = JSON.parse(args.cursor);
-    } catch {
-      throw appError('VALIDATION_ERROR', 'Invalid training history cursor.');
-    }
-    if (
-      !isPlainRecord(cursor) ||
-      Object.keys(cursor).length !== (cursor.version === 1 ? 5 : 6) ||
-      ![1, 2].includes(cursor.version) ||
-      cursor.ownerScope !== ownerScope ||
-      ![cursor.after, cursor.through, cursor.completed].every(isNonnegativeSafeInteger) ||
-      cursor.after > cursor.through ||
-      (cursor.version === 2 && !isSnapshotDigest(cursor.pendingDigest))
-    )
-      throw appError('VALIDATION_ERROR', 'Invalid training history cursor.');
-    if (cursor.version === 1)
-      throw appError('HISTORY_CHANGED', 'История обучения изменилась; начните просмотр заново.', 409);
-  }
-  const result = await dbFirst(
-    db,
-    `WITH bounds AS (
-      SELECT COALESCE(?,(SELECT COALESCE(MAX(rowid),0) FROM estimation_training_attempts WHERE owner_id=?)) AS high
-    ), counts AS (
-      SELECT high,(SELECT COUNT(*) FROM estimation_training_attempts WHERE owner_id=? AND rowid<=high AND completed_at IS NOT NULL) AS completed FROM bounds
-    ), pending AS (
-      SELECT rowid AS seq,dataset_revision,manifest_json FROM estimation_training_attempts
-      WHERE owner_id=? AND rowid<=(SELECT high FROM counts) AND completed_at IS NULL ORDER BY rowid
-    ), page AS (
-      SELECT rowid AS seq,* FROM estimation_training_attempts WHERE owner_id=? AND rowid>? AND rowid<=(SELECT high FROM counts)
-      ORDER BY rowid LIMIT ?
-    ) SELECT high,completed,
-      (SELECT json_group_array(json_array(seq,dataset_revision,manifest_json)) FROM pending) AS pending_json,
-      (SELECT json_group_array(json_object('seq',seq,'attemptId',attempt_id,'startedAt',started_at,'completedAt',completed_at,
-       'methodVersion',method_version,'featureVersion',feature_version,'datasetRevision',dataset_revision,'manifest',manifest_json,
-       'diagnostics',diagnostics_json,'cases',case_ids_json,'metrics',metrics_json,'selected',selected_json,'reason',reason)) FROM page) AS rows_json FROM counts`,
-    cursor?.through ?? null,
-    ownerId,
-    ownerId,
-    ownerId,
-    ownerId,
-    cursor?.after ?? 0,
-    limit + 1,
-  );
-  const pendingDigest = 'sha256:' + (await hashCommandInput(JSON.parse(result.pending_json)));
-  if (cursor && (result.completed !== cursor.completed || pendingDigest !== cursor.pendingDigest))
-    throw appError('HISTORY_CHANGED', 'История обучения изменилась; начните просмотр заново.', 409);
-  const values = JSON.parse(result.rows_json),
-    hasMore = values.length > limit;
-  if (hasMore) values.pop();
-  const rows = values.map(({ seq, ...row }) => ({
-    ...row,
-    manifest: JSON.parse(row.manifest),
-    diagnostics: parseColumn(row.diagnostics),
-    cases: parseColumn(row.cases),
-    metrics: parseColumn(row.metrics),
-    selected: parseColumn(row.selected),
-  }));
-  const nextCursor = hasMore
-    ? JSON.stringify({
-        version: 2,
-        ownerScope,
-        after: values.at(-1).seq,
-        through: result.high,
-        completed: result.completed,
-        pendingDigest,
-      })
-    : null;
-  return { formatVersion: 1, rows, hasMore, nextCursor, serverNow: nowMs };
-}
-
-async function executeAtlmTool(db, ownerId, name, args, nowMs, clock) {
-  validateAssessmentValue(args, ATLM_TOOL_SCHEMAS[name]);
+async function executeAtlmTool(db, ownerId, name, args, nowMs) {
   if (name === 'CalculateAtlmEstimate') return calculateAtlmEstimate(db, ownerId, args, nowMs);
   if (name === 'GetPlanEstimate') return getPlanEstimate(db, ownerId, args, nowMs);
-  if (name === 'GetAtlmDataset') return getAtlmDataset(db, ownerId, args, nowMs);
-  if (name === 'GetEstimationTrainingHistory')
-    return getEstimationTrainingHistory(db, ownerId, args, nowMs);
-  if (name === 'GetEstimationModelStatus') return getEstimationModelStatus(db, ownerId, nowMs);
-  if (name === 'StartEstimationTraining') {
-    await db.batch([
-      db
-        .prepare(
-          'INSERT OR IGNORE INTO estimation_owner_state(owner_id) SELECT owner_id FROM owners WHERE owner_id=?',
-        )
-        .bind(ownerId),
-      db
-        .prepare(
-          'UPDATE estimation_owner_state SET forced_retrain=1, manual_epoch=manual_epoch+1, updated_at=? WHERE owner_id=?',
-        )
-        .bind(nowMs, ownerId),
-    ]);
-  }
-  return processEstimationTraining(db, ownerId, nowMs, { clock });
+  throw appError('FEATURE_REMOVED', messageFor('FEATURE_REMOVED'), 404);
 }
 
 export {
@@ -691,5 +511,4 @@ export {
   currentForecastInput,
   currentPlanForecast,
   executeAtlmTool,
-  getEstimationTrainingHistory,
 };

@@ -54,7 +54,7 @@ test("ATLM v4 distinguishes confirmed empty facts from missing facts", async () 
 });
 
 test("v4 preprocessing fits imputation and open categories on the training prefix", async () => {
-  const { fitAtlmV4Preprocessor, encodeAtlmV4Features, normalizeAgentTask } = await import("../worker/index.js");
+  const { fitAtlmV4Preprocessor, encodeAtlmV4Features, normalizeAgentTask } = await import("../worker/atlm/model.js");
   const base = normalizeAgentTask(taskV4()).features;
   const prefix = [
     { "components.MODIFY": 0, reuseLevel: 1, modelId: "known" },
@@ -87,7 +87,7 @@ test("v4 preprocessing fits imputation and open categories on the training prefi
 });
 
 test("v4 OLS and ridge use the full feature manifest and log1p target", async () => {
-  const { fitAtlmV4Regression, predictAtlmV4Regression, predictAtlmOls, predictAtlmRidge, fitHybridAtlm, predictHybridAtlm, normalizeAgentTask } = await import("../worker/index.js");
+  const { fitAtlmV4Regression, predictAtlmV4Regression, predictAtlmOls, predictAtlmRidge, fitHybridAtlm, predictHybridAtlm, normalizeAgentTask } = await import("../worker/atlm/model.js");
   const base = normalizeAgentTask(taskV4()).features;
   const rows = [0, 1, 3].map((value, index) => ({
     sampleId: `sample-${index}`, planId: `plan-${index}`, capturedAt: index * 2,

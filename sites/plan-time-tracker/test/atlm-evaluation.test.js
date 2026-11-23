@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeAgentTask, evaluateHybridAtlmChronologically, selectHybridHistory, selectHybridEvaluationCases, summarizeHybridAtlmEvaluation } from '../worker/index.js';
+import { normalizeAgentTask, evaluateHybridAtlmChronologically, selectHybridHistory, selectHybridEvaluationCases, summarizeHybridAtlmEvaluation } from '../worker/atlm/model.js';
 import { taskV4 } from './fixtures/tracker-db.mjs';
 const features=normalizeAgentTask(taskV4()).features;
 const journal=(n=12)=>Array.from({length:n},(_,i)=>({sampleId:String(i+1),planId:`plan-${i}`,capturedAt:i*10000,sourceAvailableAt:i*10000+5000,observedAt:i*10000+5000,eligibility:'ELIGIBLE',features:structuredClone(features),actualMs:60000+i%2}));

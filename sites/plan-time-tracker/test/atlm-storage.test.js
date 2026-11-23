@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readAtlmSampleSource, persistAtlmSample, claimAtlmJob, readAtlmSamples } from "../worker/index.js";
-import { context, command, ok, atlmTask, atlmAssessment, plannedAtlm, completeAtlm, result, check, PLAN, OWNER } from "./fixtures/tracker-db.mjs";
+import { readAtlmSampleSource, persistAtlmSample, claimAtlmJob, readAtlmSamples } from '../worker/atlm/sample.js';
+import { processAtlmSampleRefresh } from '../worker/atlm/sample-refresh.js';
+import { context, command, ok, atlmTask, atlmAssessment, plannedAtlm, completeAtlm, result, PLAN, OWNER } from "./fixtures/tracker-db.mjs";
 const input = c => c.db.sqlite.prepare("SELECT * FROM plan_estimation_inputs WHERE owner_id=? AND plan_id=?").get(OWNER, PLAN);
+const drain = c => processAtlmSampleRefresh(c.db, OWNER, c.now(), { clock: c.now });
 const job = c => c.db.sqlite.prepare("SELECT * FROM estimation_jobs WHERE owner_id=? AND job_key=?").get(OWNER, 'refresh:' + PLAN);
 async function save(c, planId = PLAN) {
   const lease = await claimAtlmJob(c.db, OWNER, 'refresh:' + planId, c.now());
@@ -46,6 +48,8 @@ test("verified completion yields exact full plan duration, genuine zero and one 
     assert.equal(source.eligibility, "ELIGIBLE", JSON.stringify(source)); assert.equal(source.actualMs, 0);
     const saved = await save(c); assert.equal(saved.inserted, true); assert.equal(saved.sample.firstEligible, true);
     assert.equal(saved.sample.features['workUnits.MODIFY'], 1);
+    assert.equal(saved.sample.issuedPrediction.status, 'UNAVAILABLE');
+    assert.deepEqual(saved.sample.issuedPrediction, JSON.parse(input(c).forecast_json));
     const repeated = await persistAtlmSample(c.db, OWNER, saved.src, c.now(), saved.lease); assert.equal(repeated.inserted, false);
     const state = c.db.sqlite.prepare("SELECT * FROM estimation_owner_state WHERE owner_id=?").get(OWNER);
     assert.equal(state.new_sample_count, 1); assert.equal(state.dataset_revision, 1);
@@ -62,7 +66,15 @@ test("A to B to A requirements are excluded; successful same-value writes remain
   await ok(c,"SetStepStatus",{stepId:p.step.stepId,status:"RUNNING"},1);c.advance(2500);await ok(c,"SetStepStatus",{stepId:p.step.stepId,status:"DONE"},2);await ok(c,"FinishPlan",{planId:PLAN},2);
   assert.equal((await readAtlmSampleSource(c.db,OWNER,PLAN,c.now())).eligibility,"ELIGIBLE");
   await ok(c,"UpdatePlanMetadata",{planId:PLAN,title:"Temporary scope"},3);await ok(c,"UpdatePlanMetadata",{planId:PLAN,title:"ATLM synthetic feature"},4);
-  const source=await readAtlmSampleSource(c.db,OWNER,PLAN,c.now());assert(source.reasons.includes("SCOPE_CHANGED"));assert.equal(source.actualMs,2500);
+    const source = await readAtlmSampleSource(c.db, OWNER, PLAN, c.now());
+  assert.ok(source.reasons.includes('SCOPE_CHANGED'));
+  assert.equal(source.scopeChanged, true);
+  assert.equal(source.actualMs, 2500);
+  assert.deepEqual(source.issuedPrediction, JSON.parse(input(c).forecast_json));
+  await drain(c);
+  const [stored] = await readAtlmSamples(c.db, OWNER);
+  assert.equal(stored.eligibility, 'EXCLUDED');
+  assert.deepEqual(stored.issuedPrediction, source.issuedPrediction);
  }finally{c.close();}
 });
 
@@ -81,24 +93,31 @@ test("sample save refuses changed generation, stale fence and expired lease", as
   } finally { c.close(); }
 });
 
-test("used source invalidates active model atomically; deletion and restoration do not invent experience", async () => {
+test('source deletion and restoration append observations without inventing new experience', async () => {
   const c = context();
   try {
     await completeAtlm(c, await plannedAtlm(c));
-    const first = await save(c);
-    c.db.sqlite.prepare("UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+2,lease_until=NULL WHERE owner_id=?").run(OWNER);
-    c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,artifact_json,manifest_json,dataset_digest,train_cutoff,sample_count,created_at) VALUES(?, 'model-a',1,'ACTIVE','{}',?,'digest',?,1,?)").run(OWNER, JSON.stringify([Number(first.sample.sampleId)]), c.now(), c.now());
-    c.db.sqlite.prepare("UPDATE estimation_owner_state SET active_model_id='model-a' WHERE owner_id=?").run(OWNER);
-    c.advance(1); await ok(c, "DeletePlan", { planId: PLAN }, 2);
-    assert.equal(c.db.sqlite.prepare("SELECT status FROM estimation_models").get().status, "INVALIDATED");
-    assert.equal(c.db.sqlite.prepare("SELECT forced_retrain FROM estimation_owner_state").get().forced_retrain, 1);
-    const deleted = await save(c); assert.equal(deleted.sample.eligibility, "EXCLUDED");
-    c.db.sqlite.prepare("UPDATE estimation_jobs SET processed_generation=generation,status='IDLE',executor_epoch=executor_epoch+2,lease_until=NULL WHERE owner_id=?").run(OWNER);
-    c.advance(1); await ok(c, "RestorePlan", { planId: PLAN }, 3);
-    const restored = await save(c); assert.equal(restored.sample.eligibility, "ELIGIBLE"); assert.equal(restored.sample.firstEligible, false);
-    assert.equal(c.db.sqlite.prepare("SELECT new_sample_count FROM estimation_owner_state").get().new_sample_count, 1);
-    assert.equal((await readAtlmSamples(c.db, OWNER)).length, 1);
-    assert.equal((await readAtlmSamples(c.db, OWNER, { latestOnly: false })).length, 3);
+    await drain(c);
+    const [first] = await readAtlmSamples(c.db, OWNER);
+    assert.equal(first.firstEligible, true);
+    c.advance(1);
+    await ok(c, 'DeletePlan', { planId: PLAN }, 2);
+    assert.ok(job(c).generation > first.sourceGeneration);
+    await drain(c);
+    const [deleted] = await readAtlmSamples(c.db, OWNER);
+    assert.equal(deleted.eligibility, 'EXCLUDED');
+    assert.ok(deleted.reasons.includes('PLAN_DELETED'));
+    c.advance(1);
+    await ok(c, 'RestorePlan', { planId: PLAN }, 3);
+    await drain(c);
+    const [restored] = await readAtlmSamples(c.db, OWNER);
+    assert.equal(restored.eligibility, 'ELIGIBLE');
+    assert.equal(restored.firstEligible, false);
+    assert.equal(restored.actualMs, first.actualMs);
+    assert.deepEqual(restored.issuedPrediction, first.issuedPrediction);
+    assert.equal(c.db.sqlite.prepare('SELECT new_sample_count FROM estimation_owner_state').get().new_sample_count, 1);
+    assert.deepEqual(await readAtlmSamples(c.db, OWNER, { latestOnly: false }), [first, deleted, restored]);
+    assert.equal(c.db.sqlite.prepare("SELECT count(*) n FROM estimation_jobs WHERE kind='TRAIN'").get().n, 0);
   } finally { c.close(); }
 });
 
@@ -117,19 +136,20 @@ test("source/outbox write failure rolls the first Start back with its frozen inp
   } finally { c.close(); }
 });
 
-test("queue bookkeeping cannot move source availability; checkpoint yields do not spend retries", async () => {
+test('queue bookkeeping cannot move source availability', async () => {
   const c = context();
   try {
     await completeAtlm(c, await plannedAtlm(c));
-    const first = await readAtlmSampleSource(c.db, OWNER, PLAN, c.now());
-    const claimed = await claimAtlmJob(c.db, OWNER, 'refresh:' + PLAN, c.now());
+    const before = await readAtlmSampleSource(c.db, OWNER, PLAN, c.now());
     c.advance(500);
-    c.db.sqlite.prepare("UPDATE estimation_jobs SET status='QUEUED',executor_epoch=executor_epoch+2,checkpoint_json='{}',updated_at=? WHERE owner_id=?").run(c.now(), OWNER);
-    const continued = await claimAtlmJob(c.db, OWNER, 'refresh:' + PLAN, c.now());
-    assert.equal(continued.attempts, claimed.attempts);
-    assert.equal((await readAtlmSampleSource(c.db, OWNER, PLAN, c.now())).sourceAvailableAt, first.sourceAvailableAt);
-    for (let attempt = 2; attempt <= 4; attempt++) { c.advance(60001); assert.equal((await claimAtlmJob(c.db, OWNER, 'refresh:' + PLAN, c.now())).attempts, attempt); }
-    c.advance(60001); assert.equal(await claimAtlmJob(c.db, OWNER, 'refresh:' + PLAN, c.now()), null);
+    await drain(c);
+    const after = await readAtlmSampleSource(c.db, OWNER, PLAN, c.now());
+    assert.equal(after.sourceAvailableAt, before.sourceAvailableAt);
+    assert.equal(after.sourceGeneration, before.sourceGeneration);
+    assert.equal(after.sourceDigest, before.sourceDigest);
+    const [sample] = await readAtlmSamples(c.db, OWNER);
+    assert.equal(sample.sourceAvailableAt, before.sourceAvailableAt);
+    assert.equal(sample.observedAt, c.now());
   } finally { c.close(); }
 });
 
@@ -196,7 +216,8 @@ test("runtime training inputs remain the original facts after a late assessment"
     await ok(c,'RecordAssessment',await atlmAssessment(c,PLAN,late),0);
     await ok(c,'SetStepStatus',{stepId:plan.step.stepId,status:'RUNNING'},1);c.advance(1000);
     await ok(c,'SetStepStatus',{stepId:plan.step.stepId,status:'DONE'},2);await ok(c,'FinishPlan',{planId:PLAN},1);
-    const {src}=await save(c);
+    await drain(c);
+    const [src] = await readAtlmSamples(c.db, OWNER);
     assert.equal(src.features.modelId,'original-model');assert.equal(src.features.reasoningEffort,'high');assert.equal(src.features.plannedParallelAgents,2);
   }finally{c.close();}
 });

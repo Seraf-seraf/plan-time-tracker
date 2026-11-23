@@ -3,7 +3,7 @@
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { evaluateHybridAtlmChronologically } from "../worker/index.js";
+import { evaluateHybridAtlmChronologically } from "../worker/atlm/model.js";
 
 const MAX_INPUT_BYTES = 8 * 1024 * 1024;
 

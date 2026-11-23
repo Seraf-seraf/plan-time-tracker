@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { payloadHash, claimAtlmJob } from '../worker/index.js';
-import { assessForStart, context, migrations, migration, ok, call, mcp, envelope, command, taskV4, atlmAssessment, PLAN, OWNER } from './fixtures/tracker-db.mjs';
+import { payloadHash } from '../worker/shared/index.js';
+import { claimAtlmJob } from '../worker/atlm/sample.js';
+import { processAtlmSampleRefresh } from '../worker/atlm/sample-refresh.js';
+import { assessForStart, context, migrations, migration, ok, call, mcp, command, taskV4, atlmAssessment, PLAN, OWNER } from './fixtures/tracker-db.mjs';
 
 const resetUrl = new URL('../drizzle/0026_atlm_v4_reset.sql', import.meta.url);
 const snapshot = (db, table) => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all().map(row => ({ ...row }));
@@ -12,12 +14,9 @@ test('v4 reset removes old estimation data while retaining plans, time and recei
   const c = context(index < 0 ? migrations.length : index);
   try {
     c.db.sqlite.exec('PRAGMA foreign_keys=ON');
-    await ok(c, 'CreatePlan', { planId: PLAN, title: 'Preserve plan', planText: '# Plan\n\n## Этап 1. Работа\nТекст',
-      planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } });
+    seedPlan(c, PLAN, OWNER, 'Preserve plan');
     const secondPlan = '77777777-7777-4777-8777-777777777777';
-    const second = await call(c, '/api/commands', envelope('CreatePlan', { planId: secondPlan, title: 'Other owner',
-      planText: '# Other\n\n## Этап 1. Работа\nТекст', planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } }), 'second-owner');
-    assert.equal(second.status, 200);
+    seedPlan(c, secondPlan, 'second-owner', 'Other owner');
     const db = c.db.sqlite, oldCommand = '99999999-9999-4999-8999-999999999999', assessmentId = '88888888-8888-4888-8888-888888888888';
     const oldEnvelope = { schemaVersion: 1, commandId: oldCommand, commandType: 'RecordAssessment', expectedVersion: 0,
       payload: { context: { agentTask: { schemaVersion: 'agent-task-v1', old: 'old-marker' } } } };
@@ -82,6 +81,9 @@ test('v4 reset removes old estimation data while retaining plans, time and recei
     assert.throws(() => db.prepare(`INSERT INTO assessment_revisions(owner_id,assessment_id,revision,plan_id,author_id,recorded_at,command_id,requirements_json,requirements_digest,assessment_json)
       SELECT ?,?,1,?,?,?, ?,requirements_json,'old-digest',? FROM assessment_targets WHERE owner_id=? AND plan_id=? AND step_id IS NULL`)
       .run(OWNER, assessmentId, PLAN, OWNER, c.now(), oldCommand, '{"context":{"agentTask":{"schemaVersion":"agent-task-v1"}}}', OWNER, PLAN), /ASSESSMENT_SCHEMA_RETIRED/);
+    for (const remaining of migrations.slice(index + 1)) {
+      db.exec('BEGIN'); db.exec(migration(remaining)); db.exec('COMMIT');
+    }
     const replay = await call(c, '/api/commands', oldEnvelope);
     assert.equal(replay.value.error.code, 'ASSESSMENT_SCHEMA_RETIRED');
     const { commandType, ...mcpEnvelope } = oldEnvelope;
@@ -93,12 +95,10 @@ test('v4 reset removes old estimation data while retaining plans, time and recei
     assert.equal((await call(c, '/api/commands', altered)).value.error.code, 'IDEMPOTENCY_KEY_REUSED');
     assert.equal(snapshot(db, 'assessment_revisions').length, 0);
     db.prepare('UPDATE estimation_owner_state SET data_reset_at=? WHERE owner_id=?').run(c.now() + 1, OWNER);
-    db.exec(migration('0030_retrospective_model_releases.sql'));
     const estimate = (await mcp(c, 'GetSavedEstimate', { planId: PLAN })).value.result.structuredContent;
     assert.equal(estimate.source, 'HISTORY_RESET');
     assert.equal(estimate.serverEstimation, null);
     assert.equal(estimate.forecastAvailability.reason, 'HISTORY_RESET');
-    db.exec(readFileSync(new URL("../drizzle/0027_agent_task_v4_gate.sql",import.meta.url),"utf8"));
     const freshPlan = '55555555-5555-4555-8555-555555555555';
     await ok(c, 'CreatePlan', { planId: freshPlan, title: 'New plan', planText: '# New\n\n## Этап 1. Работа\nТекст',
       planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } });
@@ -140,8 +140,7 @@ test('a failed reset rolls back schema, receipts and data atomically', async () 
   const index = migrations.indexOf('0026_atlm_v4_reset.sql'), c = context(index < 0 ? migrations.length : index);
   try {
     c.db.sqlite.exec('PRAGMA foreign_keys=ON');
-    await ok(c, 'CreatePlan', { planId: PLAN, title: 'Rollback', planText: '# Plan\n\n## Этап 1. Работа\nТекст',
-      planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } });
+    seedPlan(c, PLAN, OWNER, 'Rollback');
     const db = c.db.sqlite, before = Object.fromEntries(['plans','plan_steps','command_receipts','assessment_targets'].map(table => [table, snapshot(db, table)]));
     db.exec('BEGIN');
     try {
@@ -157,8 +156,7 @@ test('a failed reset rolls back schema, receipts and data atomically', async () 
 test('reset refuses to reuse a fence newer than its reset marker', async () => {
   const index = migrations.indexOf('0026_atlm_v4_reset.sql'), c = context(index < 0 ? migrations.length : index);
   try {
-    await ok(c, 'CreatePlan', { planId: PLAN, title: 'Fence', planText: '# Plan\n\n## Этап 1. Работа\nТекст',
-      planCreatedAt: { precision: 'dateOnly', on: '2027-01-01', timeZone: 'UTC' } });
+    seedPlan(c, PLAN, OWNER, 'Fence');
     const db = c.db.sqlite;
     db.prepare("INSERT INTO estimation_jobs(owner_id,job_key,kind,generation,status,fence,created_at,updated_at) VALUES(?,'train','TRAIN',1,'QUEUED',?,?,?)")
       .run(OWNER, Number.MAX_SAFE_INTEGER, c.now(), c.now());
@@ -183,8 +181,20 @@ test('old recovery cannot complete a new executor lease', async () => {
     assert.throws(() => db.prepare("UPDATE estimation_jobs SET status='FAILED',lease_until=NULL WHERE owner_id=? AND job_key=?")
       .run(OWNER, jobKey), /ATLM_CLIENT_RETIRED/);
     assert.equal(db.prepare('SELECT status FROM estimation_jobs WHERE owner_id=? AND job_key=?').get(OWNER, jobKey).status, 'RUNNING');
-    const result = await mcp(c, 'ContinueTraining');
-    assert.equal(result.value.result.isError, undefined, JSON.stringify(result.value));
+    const refresh = await processAtlmSampleRefresh(c.db, OWNER, c.now(), { clock: c.now });
+    assert.equal(refresh.failedCount, 1);
+    assert.equal(refresh.due, false);
     assert.equal(db.prepare('SELECT status FROM estimation_jobs WHERE owner_id=? AND job_key=?').get(OWNER, jobKey).status, 'FAILED');
   } finally { c.close(); }
 });
+
+function seedPlan(c, planId, ownerId, title) {
+  const db = c.db.sqlite;
+  db.prepare('INSERT INTO owners(owner_id,created_at) VALUES(?,?)').run(ownerId, c.now());
+  db.prepare(`INSERT INTO plans(owner_id,plan_id,title,plan_created_precision,plan_created_on,
+    plan_created_timezone,registered_at,status,created_by)
+    VALUES(?,?,?,'dateOnly','2027-01-01','UTC',?,'PLANNED',?)`).run(ownerId, planId, title, c.now(), ownerId);
+  db.prepare(`INSERT INTO plan_steps(owner_id,plan_id,step_id,ordinal,title,content,created_at,updated_at)
+    VALUES(?,?,?,0,'Работа','Текст',?,?)`).run(ownerId, planId, crypto.randomUUID(), c.now(), c.now());
+  db.prepare("INSERT INTO assessment_targets(owner_id,plan_id,requirements_json) VALUES(?,?,'{}')").run(ownerId, planId);
+}

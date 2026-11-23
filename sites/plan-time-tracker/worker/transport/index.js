@@ -20,7 +20,8 @@ import {
   validateOrigin,
 } from '../shared/index.js';
 import { ATLM_TOOL_SCHEMAS } from '../atlm/sample.js';
-import { executeAtlmTool, getEstimationTrainingHistory } from '../atlm/forecast.js';
+import { executeAtlmTool } from '../atlm/forecast.js';
+import { scheduleAtlmSampleRefresh } from '../atlm/sample-refresh.js';
 import {
   MAX_PLAN_PAGE_SIZE,
   PLAN_STATUSES,
@@ -38,7 +39,6 @@ import {
   readPlanExecutionSnapshot,
   readTrackerCapabilities,
 } from '../tracker/index.js';
-import { scheduleAtlmTraining } from '../atlm/training.js';
 
 function validatePublicCommand(envelope) {
   if (!WRITE_COMMANDS.has(envelope?.commandType) && !TRACKER_COMMANDS.has(envelope?.commandType))
@@ -110,23 +110,6 @@ async function apiRoute(request, env, url, channel, now, clock = () => now, ctx)
   validateOrigin(request);
   const identity = requireOwner(request);
   if (!env.DB) throw appError('INTERNAL_ERROR', 'D1 binding DB не настроен.', 503);
-  if (request.method === 'GET' && url.pathname === '/api/tracker/estimation-training-history') {
-    const args = {};
-    for (const key of url.searchParams.keys())
-      if (!['limit', 'cursor'].includes(key))
-        throw appError('VALIDATION_ERROR', 'Неизвестный параметр истории обучения.');
-    if (url.searchParams.has('limit')) args.limit = Number(url.searchParams.get('limit'));
-    if (url.searchParams.has('cursor')) args.cursor = url.searchParams.get('cursor');
-    return json(await getEstimationTrainingHistory(env.DB, identity.ownerId, args, now));
-  }
-  const readOnlyPost = new Set([
-    '/api/tracker/assessment',
-    '/api/tracker/atlm-estimate',
-    '/api/tracker/atlm-dataset',
-    '/api/tracker/estimation-history',
-  ]);
-  if (request.method !== 'GET' && !readOnlyPost.has(url.pathname))
-    await ensureOwner(env.DB, identity, now);
   if (request.method === 'GET' && url.pathname === '/api/whoami')
     return json({ userId: identity.ownerId, email: identity.email, serverNow: now });
   if (request.method === 'GET' && url.pathname === '/api/settings') {
@@ -138,6 +121,7 @@ async function apiRoute(request, env, url, channel, now, clock = () => now, ctx)
     return json({ timezone: settings?.timezone ?? 'UTC', locale: settings?.locale ?? 'en' });
   }
   if (request.method === 'POST' && url.pathname === '/api/settings') {
+    await ensureOwner(env.DB, identity, now);
     const body = await bodyJson(request);
     const zone = checkTimeZone(body.timezone);
     await env.DB.prepare('UPDATE owners SET timezone=? WHERE owner_id=?')
@@ -169,29 +153,17 @@ async function apiRoute(request, env, url, channel, now, clock = () => now, ctx)
     return json(publicToolReferences(await readTrackerCapabilities(env.DB, identity.ownerId)));
   if (request.method === 'POST' && url.pathname === '/api/tracker/assessment')
     return json(await readAssessment(env.DB, identity.ownerId, await bodyJson(request), now));
-  const atlmPaths = {
-    '/api/tracker/atlm-estimate': 'CalculateAtlmEstimate',
-    '/api/tracker/atlm-dataset': 'GetAtlmDataset',
-    '/api/tracker/estimation-model/process': 'ProcessEstimationTraining',
-    '/api/tracker/estimation-model/start': 'StartEstimationTraining',
-  };
-  if (request.method === 'POST' && atlmPaths[url.pathname])
+  if (request.method === 'POST' && url.pathname === '/api/tracker/atlm-estimate')
     return json(
       await executeAtlmTool(
         env.DB,
         identity.ownerId,
-        atlmPaths[url.pathname],
+        'CalculateAtlmEstimate',
         await bodyJson(request),
         now,
         clock,
       ),
     );
-  if (request.method === 'GET' && url.pathname === '/api/tracker/estimation-model') {
-    if (url.search) throw appError('VALIDATION_ERROR', 'Model status accepts no query parameters.');
-    return json(
-      await executeAtlmTool(env.DB, identity.ownerId, 'GetEstimationModelStatus', {}, now, clock),
-    );
-  }
   const atlmPlanMatch = url.pathname.match(/^\/api\/tracker\/plans\/([^/]+)\/estimate$/);
   if (request.method === 'GET' && atlmPlanMatch) {
     if (url.search) throw appError('VALIDATION_ERROR', 'Plan estimate accepts only planId.');
@@ -259,10 +231,12 @@ async function apiRoute(request, env, url, channel, now, clock = () => now, ctx)
     });
   }
   if (request.method === 'POST' && url.pathname === '/api/commands') {
+    await ensureOwner(env.DB, identity, now);
     const envelope = await bodyJson(request, isPlanDocumentCommand);
     validatePublicCommand(envelope);
     const result = await executeCommand(env.DB, identity, envelope, channel, now);
-    scheduleAtlmTraining(env.DB, identity.ownerId, now, ctx, clock);
+    if (result.applied && (WRITE_COMMANDS.has(envelope.commandType) || envelope.commandType === 'SetStepStatus'))
+      scheduleAtlmSampleRefresh(env.DB, identity.ownerId, now, ctx, clock);
     return json(result);
   }
   if (request.method === 'GET' && url.pathname === '/api/analytics') {
@@ -307,8 +281,6 @@ const TOOL_NAMES = [
   'GetTimeReport',
   ...TRACKER_READ_TOOLS,
   ...TRACKER_COMMANDS,
-  'ProcessEstimationTraining',
-  'StartEstimationTraining',
 ];
 
 const MCP_PUBLIC_NAMES = Object.freeze({
@@ -318,11 +290,6 @@ const MCP_PUBLIC_NAMES = Object.freeze({
   GetCommandReceipt: 'GetCommandResult',
   CalculateAtlmEstimate: 'EstimatePlanTime',
   GetPlanEstimate: 'GetSavedEstimate',
-  GetEstimationModelStatus: 'GetTrainingStatus',
-  StartEstimationTraining: 'StartTraining',
-  ProcessEstimationTraining: 'ContinueTraining',
-  GetAtlmDataset: 'GetTrainingData',
-  GetEstimationTrainingHistory: 'GetTrainingHistory',
   RecordAssessment: 'SaveTaskAssessment',
   GetAssessment: 'GetTaskAssessment',
   GetEstimationHistory: 'GetTimeHistory',
@@ -365,11 +332,6 @@ const MCP_DESCRIPTIONS = Object.freeze({
   GetAssessment: 'Прочитать текущие требования и currentRequirementsDigest по planId и необязательному stepId. Для чтения сохранённой ревизии передайте planId и assessmentId, при необходимости укажите revision.',
   GetEstimationHistory: 'Прочитать оценки и фактическое время в миллисекундах по выбранным планам и этапам. Время в этом ответе относится к родительским планам. Для следующей страницы передайте те же asOf и throughSequence, а nextAfterSequence передайте как afterSequence.',
   GetTimeReport: 'Прочитать фактическое время за период в миллисекундах. totalActiveMs и activeByDay объединяют пересекающиеся интервалы, sumPlanActiveMs суммирует время по планам.',
-  GetEstimationModelStatus: 'Прочитать состояние модели, количество пригодных примеров и причины исключений.',
-  StartEstimationTraining: 'По просьбе пользователя поставить попытку обучения в очередь. Сервер проверяет пригодность данных и качество модели.',
-  ProcessEstimationTraining: 'Продолжить обработку очереди обучения владельца одним ограниченным проходом.',
-  GetAtlmDataset: 'Прочитать версии примеров обучения и причины исключений. Продолжайте по nextCursor. При DATASET_CHANGED начните чтение заново.',
-  GetEstimationTrainingHistory: 'Прочитать попытки обучения и их результаты. Продолжайте чтение того же снимка по nextCursor.',
 });
 
 function mcpTools() {
@@ -381,9 +343,9 @@ function mcpTools() {
         name,
         inputSchema: ATLM_TOOL_SCHEMAS[name],
         annotations: {
-          readOnlyHint: !['ProcessEstimationTraining', 'StartEstimationTraining'].includes(name),
+          readOnlyHint: true,
           destructiveHint: false,
-          idempotentHint: name !== 'StartEstimationTraining',
+          idempotentHint: true,
           openWorldHint: false,
         },
       };
@@ -675,14 +637,10 @@ async function mcpRoute(request, env, now, ctx, clock = () => now) {
       throw appError('FEATURE_REMOVED', 'Инструмент недоступен в текущем контракте.', 410);
     if (name === 'GetTimeReport' && Object.hasOwn(args, 'repositoryIds'))
       throw appError('VALIDATION_ERROR', 'Фильтр удален из текущего контракта.');
-    if (WRITE_COMMANDS.has(name) || TRACKER_COMMANDS.has(name))
+    if (WRITE_COMMANDS.has(name) || TRACKER_COMMANDS.has(name)) {
       validatePublicCommand({ ...args, commandType: name });
-    if (
-      WRITE_COMMANDS.has(name) ||
-      TRACKER_COMMANDS.has(name) ||
-      ['ProcessEstimationTraining', 'StartEstimationTraining'].includes(name)
-    )
       await ensureOwner(env.DB, identity, now);
+    }
     let result;
     if (Object.hasOwn(ATLM_TOOL_SCHEMAS, name))
       result = await executeAtlmTool(
@@ -711,7 +669,8 @@ async function mcpRoute(request, env, now, ctx, clock = () => now) {
     else if (WRITE_COMMANDS.has(name) || TRACKER_COMMANDS.has(name)) {
       const envelope = { ...args, schemaVersion: args.schemaVersion || 1, commandType: name };
       result = await executeCommand(env.DB, identity, envelope, 'mcp', now);
-      scheduleAtlmTraining(env.DB, identity.ownerId, now, ctx, clock);
+      if (result.applied && (WRITE_COMMANDS.has(name) || name === 'SetStepStatus'))
+        scheduleAtlmSampleRefresh(env.DB, identity.ownerId, now, ctx, clock);
     } else throw appError('VALIDATION_ERROR', 'Неизвестный MCP tool.');
     return json({
       jsonrpc: '2.0',

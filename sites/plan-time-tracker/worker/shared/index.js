@@ -32,9 +32,6 @@ const TRACKER_READ_TOOLS = new Set([
   'GetEstimationHistory',
   'CalculateAtlmEstimate',
   'GetPlanEstimate',
-  'GetEstimationModelStatus',
-  'GetAtlmDataset',
-  'GetEstimationTrainingHistory',
 ]);
 
 const ENVIRONMENT_IDS = Object.freeze(['local', 'cloud_workspace']);
@@ -380,6 +377,8 @@ function messageFor(code) {
       ATLM_MODEL_CHANGED:
         'Модель или исходная история изменились во время расчёта. Получите свежую оценку новой командой.',
       DATASET_CHANGED: 'Набор обучающих данных изменился. Начните выгрузку заново.',
+      SOURCE_REFRESH_FAILED: 'Часть исходных наблюдений недоступна после повторных попыток обновления.',
+      SOURCES_PENDING: 'Трекер обновляет исходные наблюдения. Повторите после завершения обновления.',
       ASSESSMENT_SOURCE_NOT_FOUND: 'Исторический источник оценки недоступен.',
       ASSESSMENT_REQUIRED: 'Перед первым запуском сохраните плановую оценку ATLM.',
       ASSESSMENT_INCOMPLETE: 'Заполните обязательные поля и основания оценки.',

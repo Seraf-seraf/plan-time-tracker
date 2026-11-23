@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fitAtlmOls, fitAtlmRidge, predictAtlmRidge, normalizeAgentTask } from '../worker/index.js';
+import { fitAtlmOls, fitAtlmRidge, predictAtlmRidge, normalizeAgentTask } from '../worker/atlm/model.js';
 import { taskV4 } from './fixtures/tracker-db.mjs';
 
 const base = normalizeAgentTask(taskV4()).features;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fitAtlmResidualQuantile, fitAtlmResidualQuantiles, fitHybridAtlm, predictHybridAtlm, predictAtlmResidualQuantile, predictAtlmResidualInterval, evaluateAtlmIntervalCandidates, evaluateHybridAtlmChronologically, combineAtlmQuantileInterval, summarizeAtlmV4Metrics, selectHybridEngine, selectAtlmIntervalEngine, normalizeAgentTask } from '../worker/index.js';
+import { fitAtlmResidualQuantile, fitAtlmResidualQuantiles, fitHybridAtlm, predictHybridAtlm, predictAtlmResidualQuantile, predictAtlmResidualInterval, evaluateAtlmIntervalCandidates, evaluateHybridAtlmChronologically, combineAtlmQuantileInterval, summarizeAtlmV4Metrics, selectHybridEngine, selectAtlmIntervalEngine, normalizeAgentTask } from '../worker/atlm/model.js';
 import { taskV4 } from './fixtures/tracker-db.mjs';
 
 const features=normalizeAgentTask(taskV4()).features;

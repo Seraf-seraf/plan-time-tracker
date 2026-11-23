@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {readFileSync,readdirSync} from 'node:fs';
 import {resolve} from 'node:path';
 import { assessForStart, context,ok,call,command,mcp,running,rows,PLAN,OWNER,migrations,atlmTask,plannedAtlm} from './fixtures/tracker-db.mjs';
-import {getEstimationModelStatus,predictWithActiveModel,normalizeAgentTask,readAtlmSampleSource} from '../worker/index.js';
+import { readAtlmSampleSource } from '../worker/atlm/sample.js';
+import { atlmReadActiveModel } from '../worker/atlm/serving.js';
+import { readAtlmSampleRefreshStatus } from '../worker/atlm/sample-refresh.js';
 
 const retiredTables=['step_attempts','tracker_sessions','tracker_journal','tracker_owner_state','tracker_plan_config','step_results','step_checks','step_acceptances','step_source_snapshots','step_source_checks','step_result_snapshots','step_snapshot_checks','plan_events','plan_document_sections','repositories','commits'];
 const retiredCommands=['CreateStep','UpdateStep','ClaimStepAttempt','RenewStepLease','CloseStepAttempt','StartStep','BlockStep','RecordStepResult','RecordCheck','AppendObservation'];
@@ -148,8 +150,10 @@ for(const [name,paths] of chains)test(`${name} populated migration preserves pla
   assert.deepEqual(c.db.sqlite.prepare('SELECT owner_id,step_id,plan_id,ordinal,title,status,version FROM plan_steps ORDER BY step_id').all(),steps);
   for (const table of ['assessment_revisions','plan_estimation_inputs','estimation_samples','estimation_models','estimation_jobs'])
     assert.equal(c.db.sqlite.prepare(`SELECT COUNT(*) n FROM "${table}"`).get().n,0,table);
-  const status=await getEstimationModelStatus(c.db,fixture.owner,c.now());assert.equal(status.activeModel,null);assert.equal(status.eligibleSampleCount,0);
-  const completed=before.plans.find(p=>p.status==='COMPLETED'),source=await readAtlmSampleSource(c.db,fixture.owner,completed.plan_id,c.now());assert.equal(source.eligibility,'EXCLUDED');assert.equal(source.actualMs,1000);
+  assert.equal(await atlmReadActiveModel(c.db, fixture.owner), null);
+  const status = await readAtlmSampleRefreshStatus(c.db, fixture.owner, c.now());
+  assert.equal(status.pendingCount, 0); assert.equal(status.failedCount, 0);
+  const completed=before.plans.find(p=>p.status==='COMPLETED'),source=await readAtlmSampleSource(c.db,fixture.owner,completed.plan_id,c.now());assert.equal(source.eligibility,'EXCLUDED');assert.equal(source.actualMs,1000);assert.equal(source.scopeChanged,null);assert.equal(source.issuedPrediction,null);
   const current=(await call(c,`/api/tracker/plans/${fixture.runningPlanId}/execution`)).value;assert.equal(current.plan.status,'RUNNING');assert.equal(current.steps[0].status,'RUNNING');assert.equal(current.steps[0].content,'Original expected result');
   c.advance(25);await ok(c,'SetStepStatus',{stepId:current.steps[0].step_id,status:'DONE'},current.steps[0].version);await ok(c,'FinishPlan',{planId:fixture.runningPlanId},current.plan.version);
   assert.equal((await call(c,`/api/plans/${fixture.runningPlanId}`)).value.plan.activeMs,50);

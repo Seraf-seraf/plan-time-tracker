@@ -11,10 +11,6 @@ import {
 } from '../shared/index.js';
 import {
   AGENT_TASK_SCHEMA,
-  ATLM_FEATURE_VERSION,
-  ATLM_METHOD,
-  ATLM_OLS_METHOD,
-  atlmUnavailableInterval,
   normalizeAgentTask,
 } from './model.js';
 
@@ -26,32 +22,38 @@ async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
     `SELECT p.*,
     i.assessment_sequence AS input_assessment_sequence,i.selection_status,i.requirements_json AS input_requirements_json,
     i.requirements_digest AS input_requirements_digest,i.captured_receipt_rowid,i.forecast_json,
-    a.assessment_json,a.recorded_at AS captured_at,t.requirements_json AS current_requirements_json,
+    a.assessment_json,a.assessment_id,a.revision AS assessment_revision,a.recorded_at AS captured_at,
+    t.requirements_json AS current_requirements_json,
+    j.status AS refresh_status,j.last_error AS refresh_error,
+    (SELECT markdown FROM plan_documents d WHERE d.owner_id=p.owner_id AND d.plan_id=p.plan_id) AS markdown,
+    latest.sequence AS sample_sequence,latest.source_generation AS sample_generation,latest.source_digest AS sample_digest,
     COALESCE(j.generation,0) AS source_generation,COALESCE(j.source_changed_at,p.registered_at) AS source_changed_at,
     EXISTS(SELECT 1 FROM plan_steps cfg WHERE cfg.owner_id=p.owner_id AND cfg.plan_id=p.plan_id) AS tracker_enabled,
     (SELECT COUNT(*) FROM tracker_incomplete_steps s WHERE s.owner_id=p.owner_id AND s.plan_id=p.plan_id) AS incomplete_step_count,
-    (SELECT json_group_array(json_object('startMs',w.start_ms,'endMs',w.end_ms)) FROM work_intervals w WHERE w.owner_id=p.owner_id AND w.plan_id=p.plan_id) AS intervals_json,
-    (SELECT json_group_array(json_object('rowid',r.rowid,'type',r.command_type,'at',r.server_now_ms)) FROM command_receipts r
+    (SELECT json_group_array(json_object('intervalId',w.interval_id,'startMs',w.start_ms,'endMs',w.end_ms)) FROM work_intervals w WHERE w.owner_id=p.owner_id AND w.plan_id=p.plan_id) AS intervals_json,
+    (SELECT json_group_array(json_object('rowid',r.rowid,'commandId',r.command_id,'type',r.command_type,'at',r.server_now_ms)) FROM command_receipts r
       WHERE r.owner_id=p.owner_id AND r.plan_id=p.plan_id AND r.outcome_code='OK'
         AND r.command_type IN ('StartPlan','ResumePlan','PausePlan','FinishPlan','DeletePlan')) AS timer_commands_json,
-    (SELECT json_group_array(json_object('stepId',s.step_id,'ordinal',s.ordinal,'title',s.title,'content',s.content,'status',s.status)) FROM plan_steps s WHERE s.owner_id=p.owner_id AND s.plan_id=p.plan_id) AS steps_json,
-    '[]' AS checks_json,
-    (SELECT json_group_array(json_object('rowid',r.rowid,'type',r.command_type,'payload',json(r.payload_json))) FROM command_receipts r
+    (SELECT json_group_array(json_object('stepId',s.step_id,'ordinal',s.ordinal,'title',s.title,'content',s.content,'status',s.status,'version',s.version,'updatedAt',s.updated_at)) FROM plan_steps s WHERE s.owner_id=p.owner_id AND s.plan_id=p.plan_id) AS steps_json,
+    (SELECT json_group_array(json_object('rowid',r.rowid,'commandId',r.command_id,'type',r.command_type,'payload',json(r.payload_json))) FROM command_receipts r
       WHERE r.owner_id=p.owner_id AND r.plan_id=p.plan_id AND r.outcome_code='OK' AND r.rowid>i.captured_receipt_rowid
        AND r.command_type='UpdatePlanMetadata') AS scope_commands_json
     FROM plans p LEFT JOIN plan_estimation_inputs i ON i.owner_id=p.owner_id AND i.plan_id=p.plan_id
     LEFT JOIN assessment_revisions a ON a.owner_id=p.owner_id AND a.plan_id=p.plan_id AND a.sequence=i.assessment_sequence
     LEFT JOIN assessment_targets t ON t.owner_id=p.owner_id AND t.plan_id=p.plan_id AND t.step_id IS NULL
     LEFT JOIN estimation_jobs j ON j.owner_id=p.owner_id AND j.job_key='refresh:'||p.plan_id
+    LEFT JOIN estimation_samples latest ON latest.sequence=(SELECT MAX(sequence) FROM estimation_samples
+      WHERE owner_id=p.owner_id AND plan_id=p.plan_id)
     WHERE p.owner_id=? AND p.plan_id=?`,
     ownerId,
     planId,
   );
   if (!row) throw appError('PLAN_NOT_FOUND', messageFor('PLAN_NOT_FOUND'), 404);
-  const reasons = [],
-    intervals = JSON.parse(row.intervals_json),
-    steps = JSON.parse(row.steps_json),
-    checks = JSON.parse(row.checks_json);
+  const reasons = [];
+  const intervals = JSON.parse(row.intervals_json);
+  const steps = JSON.parse(row.steps_json);
+  const timerEvents = JSON.parse(row.timer_commands_json);
+  const scopeChanges = JSON.parse(row.scope_commands_json);
   let features = null;
   if (row.selection_status !== 'CAPTURED') reasons.push('MISSING_FEATURES');
   else {
@@ -68,12 +70,11 @@ async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
   if (row.status !== 'COMPLETED') reasons.push('PLAN_NOT_COMPLETED');
   if (!row.tracker_enabled || !steps.length || row.incomplete_step_count !== 0)
     reasons.push('RESULT_NOT_VERIFIED');
-  let scopeChanged = Boolean(
-    row.input_requirements_json && row.input_requirements_json !== row.current_requirements_json,
-  );
+  let scopeChanged = row.input_requirements_json === null
+    ? null : row.input_requirements_json !== row.current_requirements_json;
   if (row.input_requirements_json) {
     const original = JSON.parse(row.input_requirements_json);
-    for (const change of JSON.parse(row.scope_commands_json))
+    for (const change of scopeChanges)
       for (const key of ['title', 'description', 'acceptanceCriteria'])
         if (
           Object.hasOwn(original.plan, key) &&
@@ -90,7 +91,7 @@ async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
   let openAt = null,
     timerHistoryValid = true,
     finishedAt = null;
-  for (const event of JSON.parse(row.timer_commands_json).sort((a, b) => a.rowid - b.rowid)) {
+  for (const event of timerEvents.sort((a, b) => a.rowid - b.rowid)) {
     if (!safeTime(event.at) || (finishedAt !== null && event.type !== 'DeletePlan')) {
       timerHistoryValid = false;
       break;
@@ -158,32 +159,7 @@ async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
   );
   if (!safeTime(sourceAvailableAt))
     throw appError('INVALID_ESTIMATION_SOURCE', 'ATLM source timestamps are invalid.', 500);
-  const originalPrediction =
-    row.forecast_json !== null
-      ? JSON.parse(row.forecast_json)
-      : row.assessment_json
-        ? JSON.parse(row.assessment_json).serverEstimation
-        : null;
-  const issuedPrediction =
-    reasons.length === 0 &&
-    originalPrediction?.status === 'AVAILABLE' &&
-    Number.isSafeInteger(originalPrediction.pointMs) &&
-    originalPrediction.pointMs >= 0
-      ? {
-          method: originalPrediction.method,
-          modelId: originalPrediction.modelId ?? null,
-          modelVersion: originalPrediction.modelVersion ?? null,
-          calculatedAt: originalPrediction.calculatedAt,
-          pointMs: originalPrediction.pointMs,
-          pointEngine: originalPrediction.pointEngine ?? null,
-          interval:
-            originalPrediction.interval ??
-            atlmUnavailableInterval('BAYESIAN_PREDICTIVE', 'INTERVAL_NOT_RECORDED'),
-          actualMs,
-          errorMs: originalPrediction.pointMs - actualMs,
-          ...(originalPrediction.hybrid ? { hybrid: originalPrediction.hybrid } : {}),
-        }
-      : null;
+  const issuedPrediction = row.forecast_json === null ? null : JSON.parse(row.forecast_json);
   const source = {
     planId,
     issuedPrediction,
@@ -205,15 +181,42 @@ async function readAtlmSampleSource(db, ownerId, planId, nowMs) {
       observedAt: undefined,
       sourceGeneration: undefined,
       requirements: row.current_requirements_json,
-      intervals: intervals.sort(
-        (a, b) => a.startMs - b.startMs || (a.endMs ?? Infinity) - (b.endMs ?? Infinity),
-      ),
-      steps: steps.sort((a, b) => (a.stepId < b.stepId ? -1 : a.stepId > b.stepId ? 1 : 0)),
-      checks: checks.sort((a, b) =>
-        a.stepId + a.key < b.stepId + b.key ? -1 : a.stepId + a.key > b.stepId + b.key ? 1 : 0,
-      ),
+      intervals: intervals.map(({ startMs, endMs }) => ({ startMs, endMs }))
+        .sort((a, b) => a.startMs - b.startMs || (a.endMs ?? Infinity) - (b.endMs ?? Infinity)),
+      steps: steps.map(({ version, updatedAt, ...content }) => content)
+        .sort((a, b) => (a.stepId < b.stepId ? -1 : a.stepId > b.stepId ? 1 : 0)),
+      checks: [],
     }));
-  return source;
+  return {
+    ...source,
+    status: complete ? 'AVAILABLE' : 'UNAVAILABLE',
+    planStatus: row.status,
+    deletedAt: row.deleted_at,
+    firstStartedAt: row.first_started_at,
+    finishedAt: row.finished_at,
+    plannedFeatures: features,
+    scopeChanged,
+    sampleId: row.sample_sequence === null ? null : String(row.sample_sequence),
+    sampleGeneration: row.sample_generation,
+    sampleDigest: row.sample_digest,
+    refreshStatus: row.refresh_status,
+    refreshError: row.refresh_error,
+    originalAssessment: row.assessment_id ? {
+      assessmentId: row.assessment_id, revision: row.assessment_revision,
+      sequence: row.input_assessment_sequence, value: JSON.parse(row.assessment_json),
+    } : null,
+    evidenceRefs: [
+      ...timerEvents.map((event) => ({ kind: 'COMMAND', id: event.commandId })),
+      ...steps.map((step) => ({ kind: 'STEP', id: step.stepId, version: step.version })),
+    ],
+    evidence: {
+      title: row.title, description: row.description, acceptanceCriteria: row.acceptance_criteria,
+      markdown: row.markdown,
+      originalRequirements: row.input_requirements_json === null ? null : JSON.parse(row.input_requirements_json),
+      currentRequirements: row.current_requirements_json === null ? null : JSON.parse(row.current_requirements_json),
+      steps, intervals, timerEvents, scopeChanges,
+    },
+  };
 }
 
 async function claimAtlmJob(
@@ -228,9 +231,9 @@ async function claimAtlmJob(
     throw appError('VALIDATION_ERROR', 'Invalid ATLM lease.');
   return dbFirst(
     db,
-    `UPDATE estimation_jobs SET status='RUNNING',lease_until=?,updated_at=?,fence=fence+1,executor_epoch=executor_epoch+2,attempts=attempts+CASE WHEN status='QUEUED' AND checkpoint_json IS NOT NULL THEN 0 ELSE 1 END
-    WHERE owner_id=? AND job_key=? AND generation>processed_generation AND next_attempt_at<=?
-      AND status<>'FAILED' AND (attempts<4 OR (status='QUEUED' AND checkpoint_json IS NOT NULL AND attempts<=4))
+    `UPDATE estimation_jobs SET status='RUNNING',lease_until=?,updated_at=?,fence=fence+1,executor_epoch=executor_epoch+2,attempts=attempts+1
+    WHERE owner_id=? AND job_key=? AND kind='REFRESH_SAMPLE' AND generation>processed_generation AND next_attempt_at<=?
+      AND status<>'FAILED' AND attempts<4
       AND (? OR status<>'RUNNING') AND (status<>'RUNNING' OR lease_until<=?) RETURNING *`,
     nowMs + leaseMs,
     nowMs,
@@ -353,42 +356,13 @@ const ATLM_TOOL_SCHEMAS = Object.freeze({
     required: ['planId'],
     properties: { planId: { type: 'string', format: 'uuid' } },
   },
-  GetEstimationModelStatus: { type: 'object', additionalProperties: false, properties: {} },
-  GetEstimationTrainingHistory: {
-    type: 'object',
-    additionalProperties: false,
-    properties: {
-      limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
-      cursor: { type: 'string', minLength: 1, maxLength: 1024 },
-    },
-  },
-  ProcessEstimationTraining: { type: 'object', additionalProperties: false, properties: {} },
-  StartEstimationTraining: { type: 'object', additionalProperties: false, properties: {} },
-  GetAtlmDataset: {
-    type: 'object',
-    additionalProperties: false,
-    properties: {
-      limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 },
-      cursor: { type: 'string', minLength: 1, maxLength: 1024 },
-    },
-  },
 });
 
-const ATLM_ACTIVE_MODEL_FROM = `FROM estimation_serving_models m JOIN estimation_owner_state o
-  ON o.owner_id=m.owner_id AND o.active_model_id=m.pointer_id AND m.preferred=1
-  WHERE m.owner_id=? AND m.status='ACTIVE' AND m.method_version IN ('${ATLM_OLS_METHOD.version}','${ATLM_METHOD.version}') AND m.feature_version='${ATLM_FEATURE_VERSION}'
-    AND (m.model_revision IS NOT NULL OR NOT EXISTS(SELECT 1 FROM json_each(m.manifest_json) item
-      LEFT JOIN estimation_samples s ON s.owner_id=m.owner_id AND s.sequence=CAST(item.value AS INTEGER)
-      WHERE s.sequence IS NULL OR s.eligibility<>'ELIGIBLE'
-        OR s.sequence<>(SELECT MAX(latest.sequence) FROM estimation_samples latest WHERE latest.owner_id=s.owner_id AND latest.plan_id=s.plan_id)
-        OR EXISTS(SELECT 1 FROM estimation_jobs dirty WHERE dirty.owner_id=s.owner_id AND dirty.plan_id=s.plan_id
-          AND dirty.kind='REFRESH_SAMPLE' AND dirty.generation>dirty.processed_generation)))`;
-
-const ATLM_CURRENT_MODEL_SQL = `SELECT 1 ${ATLM_ACTIVE_MODEL_FROM} AND m.model_id=?`;
+const ATLM_LATEST_SAMPLE_SQL =
+  's.sequence=(SELECT MAX(latest.sequence) FROM estimation_samples latest WHERE latest.owner_id=s.owner_id AND latest.plan_id=s.plan_id)';
 
 export {
-  ATLM_ACTIVE_MODEL_FROM,
-  ATLM_CURRENT_MODEL_SQL,
+  ATLM_LATEST_SAMPLE_SQL,
   ATLM_TOOL_SCHEMAS,
   atlmSampleView,
   claimAtlmJob,

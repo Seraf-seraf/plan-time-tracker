@@ -1,9 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { assessForStart, context, call, command, ok, running, result, check, rows, migrations, migration, plannedAtlm, completeAtlm, PLAN, OWNER } from "./fixtures/tracker-db.mjs";
-import { readAtlmSampleSource, claimAtlmJob, persistAtlmSample } from "../worker/index.js";
+import { assessForStart, context, command, ok, rows, migrations, PLAN, OWNER } from "./fixtures/tracker-db.mjs";
 const OTHER = "22222222-2222-4222-8222-222222222222";
-const TABLES = ["plan_estimation_inputs", "estimation_samples", "estimation_models", "estimation_jobs", "estimation_owner_state"];
 
 test("fresh migration supports assessed lifecycle, owner FK isolation and atomic D1 batch rollback", async () => {
   const c = context();
@@ -26,15 +24,21 @@ test("fresh migration supports assessed lifecycle, owner FK isolation and atomic
 });
 
 test("model manifests and active pointers cannot reference another owner's records", async () => {
-  const c = context();
+  const c = context(migrations.indexOf('0031_agent_atlm_revisions.sql'));
   try {
-    await completeAtlm(c, await plannedAtlm(c));
-    const lease = await claimAtlmJob(c.db, OWNER, 'refresh:' + PLAN, c.now());
-    const saved = await persistAtlmSample(c.db, OWNER, await readAtlmSampleSource(c.db, OWNER, PLAN, c.now()), c.now(), lease);
-    c.db.sqlite.prepare("INSERT INTO owners(owner_id,created_at) VALUES('other-owner',0)").run();
-    const statement = c.db.sqlite.prepare("INSERT INTO estimation_models(owner_id,model_id,model_version,status,manifest_json,dataset_digest,train_cutoff,sample_count,created_at) VALUES(?,'model',1,'REJECTED',?,'digest',0,1,0)");
-    assert.throws(() => statement.run('other-owner', JSON.stringify([Number(saved.sample.sampleId)])), /ATLM_MODEL_SOURCE_NOT_FOUND/);
+    const db = c.db.sqlite;
+    db.prepare("INSERT INTO owners(owner_id,created_at) VALUES(?,0),('other-owner',0)").run(OWNER);
+    db.prepare(`INSERT INTO plans(owner_id,plan_id,title,plan_created_precision,plan_created_on,
+      plan_created_timezone,registered_at,status,created_by)
+      VALUES(?,?,'Historical plan','dateOnly','2027-01-01','UTC',0,'PLANNED',?)`).run(OWNER, PLAN, OWNER);
+    db.prepare("INSERT INTO estimation_owner_state(owner_id) VALUES(?)").run(OWNER);
+    const { lastInsertRowid } = db.prepare(`INSERT INTO estimation_samples(owner_id,plan_id,source_digest,
+      source_generation,eligibility,reasons_json,source_available_at,observed_at)
+      VALUES(?,?,'historical-source',0,'EXCLUDED','["MISSING_FEATURES"]',0,0)`).run(OWNER, PLAN);
+    const statement = db.prepare(`INSERT INTO estimation_models(owner_id,model_id,model_version,status,
+      manifest_json,dataset_digest,train_cutoff,sample_count,created_at) VALUES(?,'model',1,'REJECTED',?,'digest',0,1,0)`);
+    assert.throws(() => statement.run('other-owner', JSON.stringify([Number(lastInsertRowid)])), /ATLM_MODEL_SOURCE_NOT_FOUND/);
     statement.run('other-owner', '[]');
-    assert.throws(() => c.db.sqlite.prepare("UPDATE estimation_owner_state SET active_model_id='model' WHERE owner_id=?").run(OWNER), /FOREIGN KEY/);
+    assert.throws(() => db.prepare("UPDATE estimation_owner_state SET active_model_id='model' WHERE owner_id=?").run(OWNER), /FOREIGN KEY/);
   } finally { c.close(); }
 });

@@ -37,7 +37,6 @@ import {
   normalizeAgentTask,
   validateAssessmentValue,
 } from '../atlm/model.js';
-import { ATLM_CURRENT_MODEL_SQL } from '../atlm/sample.js';
 import {
   CURRENT_FORECAST_INPUT_SQL,
   CURRENT_FORECAST_MAX_READ_ATTEMPTS,
@@ -46,7 +45,7 @@ import {
   currentForecastInput,
   currentPlanForecast,
 } from '../atlm/forecast.js';
-import { ATLM_RETRAIN_EVERY_NEW_PLANS, atlmDiagnostics } from '../atlm/training.js';
+import { atlmDiagnostics } from '../atlm/serving.js';
 
 import { isDocumentUpdate, parsePlanDocument } from './plan-document.js';
 import { preparePlanAssessmentTargets, updatePlanDocumentBatch } from './plan-document-update.js';
@@ -596,6 +595,7 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
   }
   let payload = { ...input };
   let predictionPreparationError = null;
+  let predictionInputKey = null;
   if (envelope.commandType === 'RecordAssessment') {
     const target = await assessmentTarget(db, identity.ownerId, input.planId, input.stepId);
     const requirementsJson = target?.requirements_json || '{}';
@@ -610,6 +610,7 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
       : input;
     if (input.predictionRequest) {
       try {
+        predictionInputKey = (await currentForecastInput(db, identity.ownerId, input.planId))?.snapshot_key ?? null;
         const serverEstimation = await calculateAtlmEstimate(
           db,
           identity.ownerId,
@@ -660,27 +661,22 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
     ];
     let write;
     if (envelope.commandType === 'RecordAssessment' && input.predictionRequest) {
-      const serverPrediction = JSON.parse(payload.assessmentJson).serverEstimation;
-      const modelId = serverPrediction?.modelId ?? null;
-      const baselineRevision =
-        serverPrediction?.fallback?.kind === 'HISTORICAL_MEDIAN'
-          ? serverPrediction.fallback.datasetRevision
-          : null;
       write = await db
         .prepare(
-          `INSERT OR IGNORE INTO command_receipts
+          `WITH source AS (${CURRENT_FORECAST_INPUT_SQL})
+        INSERT OR IGNORE INTO command_receipts
         (owner_id,command_id,payload_hash,command_type,plan_id,expected_version,server_now_ms,actor_id,actor_type,payload_json,outcome_code,result_json,recorded_at)
         SELECT ?,?,?,?,?,?,?,?,?,?,CASE
           WHEN NOT EXISTS(SELECT 1 FROM plans WHERE owner_id=? AND plan_id=?) THEN 'PLAN_NOT_FOUND'
           WHEN EXISTS(SELECT 1 FROM plans WHERE owner_id=? AND plan_id=? AND deleted_at IS NOT NULL) THEN 'PLAN_DELETED'
           WHEN EXISTS(SELECT 1 FROM plans WHERE owner_id=? AND plan_id=? AND first_started_at IS NOT NULL) THEN 'ATLM_FORECAST_SCOPE_CHANGED'
           WHEN ? IS NOT NULL THEN ?
-          WHEN ? IS NOT NULL AND NOT EXISTS(${ATLM_CURRENT_MODEL_SQL}) THEN 'ATLM_MODEL_CHANGED'
-          WHEN ? IS NOT NULL AND (COALESCE((SELECT dataset_revision FROM estimation_owner_state WHERE owner_id=?),0)<>?
-            OR EXISTS(SELECT 1 FROM estimation_jobs WHERE owner_id=? AND kind='REFRESH_SAMPLE' AND generation>processed_generation)) THEN 'ATLM_MODEL_CHANGED'
+          WHEN NOT EXISTS(SELECT 1 FROM source WHERE snapshot_key=?) THEN 'ATLM_MODEL_CHANGED'
           ELSE 'PENDING' END,?,?`,
         )
         .bind(
+          identity.ownerId,
+          input.planId,
           ...values,
           identity.ownerId,
           planId,
@@ -690,13 +686,7 @@ async function executeTrackerCommand(db, identity, envelope, channel, nowMs) {
           planId,
           predictionPreparationError,
           predictionPreparationError,
-          modelId,
-          identity.ownerId,
-          modelId,
-          baselineRevision,
-          identity.ownerId,
-          baselineRevision,
-          identity.ownerId,
+          predictionInputKey,
           JSON.stringify({ serverNow: nowMs }),
           nowMs,
         )
@@ -1000,13 +990,13 @@ async function executeCommand(db, identity, envelope, channel, nowMs) {
           ? {
               ...payload,
               atlmStartForecast: {
-                snapshotVersion: 4,
+                snapshotVersion: 5,
                 assessmentSequence: start.sequence,
                 estimation: current.result.serverEstimation,
               },
             }
           : payload;
-      // A change to the assessment, model or training history requires a new command.
+      // A change to the assessment, serving revision or source history requires a new command.
       // A refresh for another unfinished plan can safely trigger a fresh calculation here.
       statement = db
         .prepare(
@@ -1489,22 +1479,9 @@ async function readTrackerCapabilities(db, ownerId) {
         firstStartForecast: 'FROZEN_SNAPSHOT',
         firstStartRequires: 'READY',
         earlyForecastMethod: { ...HISTORICAL_MEDIAN_METHOD },
-        retrainEveryNewPlans: ATLM_RETRAIN_EVERY_NEW_PLANS,
         calculateTool: 'CalculateAtlmEstimate',
         planEstimateTool: 'GetPlanEstimate',
-        modelStatusTool: 'GetEstimationModelStatus',
-        processTool: 'ProcessEstimationTraining',
-        startTrainingTool: 'StartEstimationTraining',
-        datasetTool: 'GetAtlmDataset',
-        historyTool: 'GetEstimationTrainingHistory',
         predictionRequest: { method: 'ATLM', methodVersion: 1 },
-        limits: {
-          maxTrainingSamples: 5000,
-          datasetDefaultLimit: 50,
-          datasetMaxLimit: 100,
-          historyDefaultLimit: 50,
-          historyMaxLimit: 100,
-        },
       },
     },
 

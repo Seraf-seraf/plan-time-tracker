@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {context, command, call, mcp, ok, assessForStart, plannedAtlm, taskV4, PLAN} from './fixtures/tracker-db.mjs';
+import { fitAtlm, normalizeAgentTask } from '../worker/atlm/model.js';
+import {context, command, call, mcp, ok, assessForStart, plannedAtlm, completeAtlm, atlmAssessment, taskV4, OWNER, PLAN} from './fixtures/tracker-db.mjs';
 
 test('first-start errors are receipted, recovery needs a fresh command, frozen input survives replay', async () => {
   const c=context();
@@ -104,3 +105,98 @@ test('documented partial knowledge and known access blockers allow first start',
     await ok(c, 'StartPlan', {planId:PLAN}, 0);
   } finally { c.close(); }
 });
+
+async function registerRaceModel(c) {
+  const db = c.db.sqlite;
+  const modelRevisionId = 'race-model';
+  const features = normalizeAgentTask(taskV4()).features;
+  const examples = [];
+  for (const actualMs of [1000, 2000]) {
+    const plan = await plannedAtlm(c, crypto.randomUUID());
+    await completeAtlm(c, plan, actualMs);
+    examples.push({ planId: plan.planId, sampleId: String(examples.length + 1), features, actualMs,
+      capturedAt: c.now() - actualMs, sourceAvailableAt: c.now() });
+    c.advance(1);
+  }
+  const fitted = await fitAtlm(examples);
+  assert.equal(fitted.status, 'AVAILABLE');
+  const { artifact } = fitted;
+  db.prepare(`INSERT INTO estimation_model_revisions(owner_id,model_revision_id,model_version,origin,
+    method_version,feature_version,registered_at,artifact_json,manifest_json,provenance_json,fit_count,source_count,supported)
+    VALUES(?,?,1,'IMPORTED',?,?,?,?,?,'{}',?,?,1)`)
+    .run(OWNER, modelRevisionId, artifact.method.version, artifact.featureSchemaVersion, c.now(),
+      JSON.stringify(artifact), JSON.stringify(artifact.manifest), artifact.n, examples.length);
+  const insert = db.prepare(`INSERT INTO estimation_model_revision_sources(owner_id,model_revision_id,plan_id,source_generation,ordinal)
+    VALUES(?,?,?,(SELECT generation FROM estimation_jobs WHERE owner_id=? AND job_key='refresh:'||?),?)`);
+  for (const [ordinal, { planId }] of examples.entries()) insert.run(OWNER, modelRevisionId, planId, OWNER, planId, ordinal);
+  return { modelRevisionId, sourcePlanId: examples[0].planId };
+}
+
+function beforeReceipt(c, marker, action) {
+  const prepare = c.db.prepare;
+  const restore = () => { c.db.prepare = prepare; };
+  let ran = false;
+  c.db.prepare = function(sql) {
+    const statement = prepare.call(this, sql);
+    if (!sql.includes('INSERT OR IGNORE INTO command_receipts') || !sql.includes(marker)) return statement;
+    const bind = statement.bind.bind(statement);
+    statement.bind = (...args) => {
+      const bound = bind(...args);
+      const run = bound.run.bind(bound);
+      bound.run = async () => {
+        ran = true;
+        restore();
+        await action();
+        return run();
+      };
+      return bound;
+    };
+    return statement;
+  };
+  return { ran: () => ran, restore };
+}
+
+for (const commandType of ['RecordAssessment', 'StartPlan']) {
+  for (const change of ['activation', 'source generation']) {
+    test(`${commandType} cannot commit a forecast across a change in ${change}`, async () => {
+      const c = context();
+      try {
+        const db = c.db.sqlite;
+        const { modelRevisionId, sourcePlanId } = await registerRaceModel(c);
+        const activate = () => db.prepare('INSERT INTO estimation_active_revisions VALUES(?,?,1)').run(OWNER, modelRevisionId);
+        if (change === 'source generation') activate();
+        await plannedAtlm(c);
+        const before = (await mcp(c, 'GetSavedEstimate', { planId: PLAN })).value.result.structuredContent.serverEstimation;
+        assert.equal(before.modelRevisionId ?? null, change === 'activation' ? null : modelRevisionId);
+        const assessment = commandType === 'RecordAssessment';
+        const payload = assessment
+          ? await atlmAssessment(c, PLAN, taskV4(), {
+            reason: 'Refresh the forecast', predictionRequest: { method: 'ATLM', methodVersion: 1 },
+          })
+          : { planId: PLAN };
+        const beforeRevisions = db.prepare('SELECT count(*) n FROM assessment_revisions WHERE plan_id=?').get(PLAN).n;
+        const race = beforeReceipt(c, assessment ? 'snapshot_key=?) THEN' : 'source.snapshot_key', async () => {
+          if (change === 'activation') activate();
+          else await ok(c, 'DeletePlan', { planId: sourcePlanId }, 2);
+        });
+        const commandId = crypto.randomUUID();
+        let rejected;
+        try { rejected = await command(c, commandType, payload, 0, commandId); }
+        finally { race.restore(); }
+        assert.equal(race.ran(), true, JSON.stringify(rejected.value));
+        const errorCode = assessment ? 'ATLM_MODEL_CHANGED' : 'ASSESSMENT_CONTEXT_CHANGED';
+        assert.equal(rejected.value.error.code, errorCode);
+        assert.equal(db.prepare('SELECT count(*) n FROM assessment_revisions WHERE plan_id=?').get(PLAN).n, beforeRevisions);
+        assert.equal(db.prepare('SELECT count(*) n FROM work_intervals WHERE plan_id=?').get(PLAN).n, 0);
+        assert.equal(db.prepare('SELECT count(*) n FROM plan_estimation_inputs WHERE plan_id=?').get(PLAN).n, 0);
+        await ok(c, commandType, payload, 0);
+        const after = assessment
+          ? JSON.parse(db.prepare('SELECT assessment_json FROM assessment_revisions WHERE plan_id=? ORDER BY sequence DESC').get(PLAN).assessment_json).serverEstimation
+          : JSON.parse(db.prepare('SELECT forecast_json FROM plan_estimation_inputs WHERE plan_id=?').get(PLAN).forecast_json);
+        assert.equal(after.modelRevisionId ?? null, change === 'activation' ? modelRevisionId : null);
+        const replay = await command(c, commandType, payload, 0, commandId);
+        assert.equal(replay.value.error.code, errorCode);
+      } finally { c.close(); }
+    });
+  }
+}

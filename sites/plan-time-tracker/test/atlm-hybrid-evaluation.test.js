@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { selectHybridHistory, selectHybridEngine, evaluateHybridAtlmChronologically,
-  fitHybridAtlm, predictHybridAtlm, fitAtlmRidge, normalizeAgentTask } from '../worker/index.js';
+  fitHybridAtlm, predictHybridAtlm, fitAtlmRidge, normalizeAgentTask } from '../worker/atlm/model.js';
 import { evaluate } from '../scripts/evaluate-atlm.mjs';
 import { taskV4 } from './fixtures/tracker-db.mjs';
 import { atlmReplayPolicyCase } from '../worker/atlm/model.js';
