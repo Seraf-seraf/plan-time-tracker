@@ -16,14 +16,23 @@ test('steps have only current state; status changes create no event or attempt s
  const c=context();try{
   await create(c);await assessForStart(c,PLAN);await ok(c,'StartPlan',{planId:PLAN},0);
   const progress=(await call(c,`/api/tracker/plans/${PLAN}/execution`)).value,step=progress.steps[0];
+  const before=rows(c), invalidPayload={stepId:step.step_id,status:'FAILED'};
+  const rejected=await command(c,'SetStepStatus',invalidPayload,step.version);
+  assert.equal(rejected.status,400);
+  assert.equal(rejected.value.error.code,'VALIDATION_ERROR');
+  const rejectedMcp=await mcp(c,'SetStepStatus',{
+    schemaVersion:1,commandId:crypto.randomUUID(),expectedVersion:step.version,payload:invalidPayload,
+  });
+  assert.equal(rejectedMcp.value.result.isError,true);
+  assert.deepEqual(rows(c),before);
   let version=step.version;
-  for(const status of ['RUNNING','BLOCKED','FAILED','PENDING','DONE']){c.advance(1);await ok(c,'SetStepStatus',{stepId:step.step_id,status},version++);}
+  for(const status of ['RUNNING','BLOCKED','PENDING','DONE']){c.advance(1);await ok(c,'SetStepStatus',{stepId:step.step_id,status},version++);}
   const current=(await call(c,`/api/tracker/plans/${PLAN}/execution`)).value.steps[0];
-  assert.equal(current.status,'DONE');assert.equal(current.version,6);assert.equal(current.content,step.content);
+  assert.equal(current.status,'DONE');assert.equal(current.version,5);assert.equal(current.content,step.content);
   for(const field of ['attempts','execution','resultHistory','currentResult','checks','currentChecks','current_fence'])assert(!Object.hasOwn(current,field),field);
   const tables=c.db.sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(x=>x.name);
   for(const table of retiredTables)assert(!tables.includes(table),table);
-  assert.deepEqual(c.db.sqlite.prepare('SELECT payload_json FROM command_receipts WHERE command_type=?').all('SetStepStatus').map(r=>r.payload_json),Array(5).fill('{}'));
+  assert.deepEqual(c.db.sqlite.prepare('SELECT payload_json FROM command_receipts WHERE command_type=?').all('SetStepStatus').map(r=>r.payload_json),Array(4).fill('{}'));
   assert.equal((await call(c,`/api/plans/${PLAN}`)).value.plan.events,undefined);
   assert.equal((await call(c,`/api/tracker/plans/${PLAN}/status-history`)).status,404);
   assert.equal((await call(c,`/api/tracker/plans/${PLAN}/timeline`)).status,404);
@@ -49,8 +58,8 @@ test('concurrent status writers use CAS and exact replay; another plan and owner
   const id=crypto.randomUUID(),payload={stepId:step,status:'DONE'};
   const responses=await Promise.all([command(c,'SetStepStatus',payload,1,id),command(c,'SetStepStatus',payload,1,id)]);
   assert(responses.every(r=>r.status===200));assert.equal(responses.filter(r=>r.value.replayed).length,1);
-  assert.equal((await command(c,'SetStepStatus',{stepId:step,status:'FAILED'},1)).status,409);
-  assert.equal((await command(c,'SetStepStatus',{stepId:step,status:'FAILED'},2,undefined,'another-owner')).status,404);
+  assert.equal((await command(c,'SetStepStatus',{stepId:step,status:'BLOCKED'},1)).status,409);
+  assert.equal((await command(c,'SetStepStatus',{stepId:step,status:'BLOCKED'},2,undefined,'another-owner')).status,404);
   assert(c.db.sqlite.prepare('SELECT status FROM plan_steps WHERE plan_id=?').all(other).every(s=>s.status==='PENDING'));
   assert.equal(c.db.sqlite.prepare('SELECT COUNT(*) n FROM work_intervals WHERE end_ms IS NULL').get().n,2);
  }finally{c.close();}

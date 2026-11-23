@@ -33,16 +33,20 @@ test('the tracker skill pauses when its confirmed BLOCKED command stops the whol
   assert.match(section, /ваша блокировка остановила весь план[^\n]+BLOCKED[^\n]+на подтверждённой версии[^\n]+RUNNING[^\n]+PausePlan[^\n]+новым UUID[^\n]+payload:\{planId,reason\}/u);
   assert.match(section, /VERSION_CONFLICT[^\n]+заново проверьте условия шага 3[^\n]+новым UUID/u);
   assert.match(section, /При отказе сообщите фактические статусы и причину/u);
-  assert.deepEqual([...track.matchAll(/^- (PENDING|RUNNING|BLOCKED|FAILED|DONE) —/gmu)].map((match) => match[1]),
+  assert.deepEqual([...track.matchAll(/^- ([A-Z_]+) —/gmu)].map((match) => match[1]),
     ['PENDING', 'RUNNING', 'BLOCKED', 'DONE']);
 });
 
 test('the MCP reference matches the public tool inventory and the advertised task schema', async () => {
   const c = context();
   try {
-    const capability = (await invoke(c, 'GetTrackerInfo')).assessments.atlm;
+    const tracker = await invoke(c, 'GetTrackerInfo');
+    const capability = tracker.assessments.atlm;
+    assert.deepEqual(tracker.planDocuments.statuses, ['PENDING', 'RUNNING', 'BLOCKED', 'DONE']);
     const response = await call(c, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' });
     const listing = response.value.result.tools;
+    const statusSchema = listing.find((tool) => tool.name === 'SetStepStatus').inputSchema.properties.payload.properties.status;
+    assert.deepEqual(statusSchema.enum, tracker.planDocuments.statuses);
     const documentedNames = catalog
       .split('\n')
       .filter((line) => line.startsWith('| `'))

@@ -9,7 +9,7 @@
     "test": "node --test test/*.test.js",
     "test:ui": "node test/ui-acceptance.mjs && node test/ui-recovery.mjs && node test/ui-analytics.mjs && node test/ui-parallel.mjs && node test/ui-deletion.mjs && node test/ui-pagination.mjs && node test/ui-atlm.mjs && node test/ui-atlm-intervals.mjs && node test/ui-plan-document.mjs"
   },
-  "version": "0.9.1",
+  "version": "0.9.2",
   "devDependencies": {
     "esbuild": "0.28.2"
   }

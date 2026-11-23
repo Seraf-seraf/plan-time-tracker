@@ -1,3 +1,5 @@
+import { STEP_STATUSES } from '../shared/index.js';
+
 export const UI_TRACKER = String.raw`(()=> {
   const root=document.querySelector("#planDetail");
   if(!root)return;
@@ -7,7 +9,7 @@ export const UI_TRACKER = String.raw`(()=> {
   const make=(tag,text,cls)=>{const element=document.createElement(tag);if(text!==undefined&&text!==null)element.textContent=text;if(cls)element.className=cls;return element;};
   const duration=(value)=>{if(value==null)return "—";let minutes=Math.max(0,Math.round(value/60000));const days=Math.floor(minutes/1440),hours=Math.floor(minutes%1440/60),rest=minutes%60;return days?days+" д "+hours+" ч "+rest+" мин":hours?hours+" ч "+rest+" мин":rest+" мин";};
   const date=(value)=>value==null?"—":new Intl.DateTimeFormat("ru-RU",{dateStyle:"medium",timeStyle:"short",timeZone:document.querySelector("#tz")?.value||Intl.DateTimeFormat().resolvedOptions().timeZone}).format(new Date(value));
-  const statusNames={PENDING:"Ожидает",RUNNING:"Выполняется",BLOCKED:"Заблокирован",FAILED:"Не выполнен",DONE:"Завершён",OPEN:"Активная попытка",CLOSED:"Закрыта",ABANDONED:"Прервана",PASSED:"Пройдена",NOT_RUN:"Не запускалась"};
+  const statusNames={PENDING:"Ожидает",RUNNING:"Выполняется",BLOCKED:"Заблокирован",DONE:"Завершён",OPEN:"Активная попытка",CLOSED:"Закрыта",ABANDONED:"Прервана",PASSED:"Пройдена",NOT_RUN:"Не запускалась"};
   const uuid=()=>crypto.randomUUID();
   async function api(path,options){const response=await fetch(path,{...options,headers:{"content-type":"application/json",...(options&&options.headers||{})},cache:"no-store"});const data=await response.json().catch(()=>({}));if(!response.ok){const error=new Error(data.error&&data.error.message||"HTTP "+response.status);error.status=response.status;error.code=data.error&&data.error.code;error.details=data.error&&data.error.details;throw error;}return data;}
   const pendingCommands=new Map(),rejectedCommands=new Set(),terminalRejectedCommands=new Set(),rejectedVersions=new Map(),retryVersions=new Map();
@@ -23,20 +25,12 @@ export const UI_TRACKER = String.raw`(()=> {
     control.id=id;
     control.required=true;
     label.htmlFor=id;
-    if(!values.includes(selected)){
-      const placeholder=make("option","Выберите статус");
-      placeholder.value="";
-      placeholder.disabled=true;
-      placeholder.hidden=true;
-      placeholder.selected=true;
-      control.append(placeholder);
-    }
     for(const value of values){
       const option=make("option",statusNames[value]);
       option.value=value;
-      option.selected=value===selected;
       control.append(option);
     }
+    control.value=selected;
     wrap.append(label,control);
     return {wrap,control};
   }
@@ -103,7 +97,7 @@ export const UI_TRACKER = String.raw`(()=> {
     const state=stateFor(planId),setExpanded=expanded=>{state.cards.set(step.step_id,expanded);toggle.setAttribute("aria-expanded",String(expanded));body.hidden=!expanded;indicator.textContent=expanded?"▾":"▸";};toggle.setExpanded=setExpanded;setExpanded(state.cards.get(step.step_id)??true);toggle.addEventListener("click",()=>setExpanded(toggle.getAttribute("aria-expanded")!=="true"));
     if(plan.deletedAt==null&&plan.status==="RUNNING"){
       const form=draftForm(make("form",null,"tracker-form step-status-form"),"status:"+step.step_id);
-      const field=selectField("Статус этапа",["PENDING","RUNNING","BLOCKED","DONE"],step.status);
+      const field=selectField("Статус этапа",${JSON.stringify(STEP_STATUSES)},step.status);
       const save=make("button","Сохранить статус"),errorText=make("p",null,"form-error");
       save.type="submit";
       errorText.setAttribute("role","alert");

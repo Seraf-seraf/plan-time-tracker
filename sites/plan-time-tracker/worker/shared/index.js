@@ -1,4 +1,4 @@
-const TRACKER_VERSION = '0.9.1';
+const TRACKER_VERSION = '0.9.2';
 
 const BODY_LIMIT = 128 * 1024;
 
@@ -23,6 +23,8 @@ const WRITE_COMMANDS = new Set([
 const TRACKER_COMMANDS = new Set(['SetStepStatus', 'RecordAssessment']);
 
 const TRACKER_VERSIONED_COMMANDS = new Set(['SetStepStatus']);
+
+const STEP_STATUSES = Object.freeze(['PENDING', 'RUNNING', 'BLOCKED', 'DONE']);
 
 const TRACKER_READ_TOOLS = new Set([
   'GetTrackerCapabilities',
@@ -530,6 +532,7 @@ export {
   AppError,
   ENVIRONMENT_IDS,
   ESTIMATE_ID,
+  STEP_STATUSES,
   TRACKER_COMMANDS,
   TRACKER_READ_TOOLS,
   TRACKER_VERSION,

@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "plan-time-tracker",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Сохраняет планы, считает активное время, прогнозирует длительность задач и помогает локально обучать ATLM.",
   "author": {
     "name": "App developer"

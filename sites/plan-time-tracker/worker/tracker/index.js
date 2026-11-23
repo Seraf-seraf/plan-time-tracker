@@ -3,6 +3,7 @@ import { ATLM_REVISION_LIMITS, ATLM_REVISION_TOOL_SCHEMAS } from '../atlm/revisi
 import {
   AppError,
   ENVIRONMENT_IDS,
+  STEP_STATUSES,
   TRACKER_COMMANDS,
   TRACKER_VERSION,
   UUID,
@@ -516,7 +517,7 @@ function validateTrackerCommand(envelope) {
   assertExactKeys(envelope.payload, new Set(['stepId', 'status']), 'payload');
   if (
     !UUID.test(envelope.payload.stepId || '') ||
-    !['PENDING', 'RUNNING', 'BLOCKED', 'FAILED', 'DONE'].includes(envelope.payload.status)
+    !STEP_STATUSES.includes(envelope.payload.status)
   )
     throw appError('VALIDATION_ERROR', 'Укажите этап и его статус.');
 }
@@ -1499,7 +1500,7 @@ async function readTrackerCapabilities(db, ownerId) {
       createField: 'planText',
       stageHeadings: '## Этап 1. Название',
       statusTool: 'SetStepStatus',
-      statuses: ['PENDING', 'RUNNING', 'BLOCKED', 'FAILED', 'DONE'],
+      statuses: STEP_STATUSES,
       preservesOriginal: false,
       updateTool: 'UpdatePlanMetadata',
       updateStatus: 'PLANNED',

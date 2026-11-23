@@ -5,9 +5,9 @@ const modulePath=process.env.PLAYWRIGHT_MODULE||'playwright';
 const {chromium}=await import(modulePath.startsWith('/')?pathToFileURL(modulePath).href:modulePath);
 const browser=await chromium.launch({executablePath:process.env.CHROMIUM_EXECUTABLE||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
 try{
- for(const scenario of ['RUNNING','BLOCKED','FAILED','PAUSED']){
+ for(const scenario of ['RUNNING','BLOCKED','PAUSED']){
   const c=context();c.advance(Date.now()-c.now());const binding=await running(c);
-  if(['BLOCKED','FAILED'].includes(scenario))await ok(c,'SetStepStatus',{...binding,status:scenario},2);
+  if(scenario==='BLOCKED')await ok(c,'SetStepStatus',{...binding,status:scenario},2);
   if(scenario==='PAUSED')await ok(c,'PausePlan',{planId:PLAN},1);
   const before=c.db.sqlite.prepare('SELECT * FROM work_intervals').all(),page=await browser.newPage({viewport:{width:390,height:1000}}),errors=[],writes=[];
   page.on('pageerror',e=>errors.push(e.message));
@@ -17,5 +17,5 @@ try{
    assert.equal(await card.locator('.step-status-form').count(),scenario==='PAUSED'?0:1);assert.match(await card.innerText(),/Checked source/);assert(!/fence|lease|sha256:|попытк/i.test(await card.innerText()));assert.equal(await page.getByText('История статусов',{exact:true}).count(),0);assert.deepEqual(writes,[]);assert.deepEqual(c.db.sqlite.prepare('SELECT * FROM work_intervals').all(),before);assert.deepEqual(errors,[]);
   }finally{await page.close();c.close();}
  }
- console.log('Current status rendering passed for running, blocked, failed and paused plans without execution attempts.');
+ console.log('Current status rendering passed for running, blocked and paused scenarios.');
 }finally{await browser.close();}
