@@ -277,7 +277,7 @@ async function verifySnapshotWithLargeEvidence(t, sqliteEncoding, legacyFinishes
   assert.equal(c.db.sqlite.prepare('PRAGMA encoding').get().encoding, sqliteEncoding);
   const plan = await completed(c, 60_000);
   await completed(c, 30_000);
-  const detail = '🙂я'.repeat(100_000);
+  const detail = '🙂я'.repeat(150_000);
   c.db.sqlite.prepare(`INSERT INTO command_receipts(owner_id,command_id,payload_hash,command_type,plan_id,
     server_now_ms,actor_id,actor_type,payload_json,outcome_code,recorded_at)
     VALUES(?,?,'hash','AppendObservation',?,?,'agent','agent',?,'OK',?)`)
@@ -328,8 +328,21 @@ async function verifySnapshotWithLargeEvidence(t, sqliteEncoding, legacyFinishes
   const downloads = await Promise.all([0, 1].map(() => tool(c, SNAPSHOT, snapshotRead(snapshotId, 'download'))));
   assert.ok(downloads.every(result => result.state === 'MATERIALIZING'));
   if (legacyFinishesFirst) {
-    const legacy = await legacyDownload();
-    assert.equal(legacy.state, 'READY');
+    let legacy;
+    const hook = beforeBatch(c, 'estimation_revision_file_parts', async () => {
+      for (let attempt = 0; attempt < RETRY_LIMIT; attempt++) {
+        legacy = await legacyDownload();
+        if (legacy.state === 'READY') return;
+      }
+      assert.fail('Legacy export did not finish');
+    });
+    const ready = await tool(c, SNAPSHOT, snapshotRead(snapshotId, 'download'));
+    hook.restore();
+    assert.equal(hook.calls(), 1);
+    assert.equal(ready.state, 'READY');
+    assert.deepEqual(ready.file, legacy.file);
+    assert.equal(c.db.sqlite.prepare('SELECT count(*) AS count FROM estimation_revision_files WHERE file_kind=?')
+      .get('SNAPSHOT').count, 1);
     const part = await tool(c, SNAPSHOT, snapshotRead(snapshotId, 'filePart', { partIndex: 0 }));
     assert.equal(part.fileSha256, legacy.file.sha256);
   }

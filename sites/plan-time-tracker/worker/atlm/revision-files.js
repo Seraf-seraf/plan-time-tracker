@@ -449,13 +449,14 @@ export async function materializeAtlmRevisionFile(db, ownerId, { storageId, publ
   const publishedKey = [ownerId, publishedStorageId ?? storageId, fileKind];
   const publishedGuard = staged ? `WHERE NOT EXISTS(
     SELECT 1 FROM estimation_revision_files WHERE ${fileKeyWhere} AND state='READY')` : '';
-  const start = db.prepare(`INSERT OR IGNORE INTO estimation_revision_files(owner_id,storage_id,file_kind,state,descriptor_json,
+  await db.prepare(`INSERT OR IGNORE INTO estimation_revision_files(owner_id,storage_id,file_kind,state,descriptor_json,
     updated_at) SELECT ?,?,?,'MATERIALIZING',?,? ${publishedGuard}`)
-    .bind(...key, initialExport, nowMs, ...(staged ? publishedKey : []));
-  if (staged) await db.batch([discardPublishedDraft(db, key, publishedKey), start]);
-  else await start.run();
+    .bind(...key, initialExport, nowMs, ...(staged ? publishedKey : [])).run();
   const row = await readExportDraft(db, key, publishedStorageId);
-  if (row.state === 'READY') return readyView(row);
+  if (row.state === 'READY') {
+    if (staged) await discardPublishedDraft(db, key, publishedKey).run();
+    return readyView(row);
+  }
   if (row.state !== 'MATERIALIZING') return exportPending();
   const checkpoint = JSON.parse(row.descriptor_json);
   const next = await exportPass(checkpoint, row.checked_bytes,
@@ -477,7 +478,9 @@ export async function materializeAtlmRevisionFile(db, ownerId, { storageId, publ
   if (next.sha256 && staged) writes.push(...publishStagedExport(db, key, publishedKey, next, checkedParts, nowMs));
   await db.batch(writes);
   const saved = await dbFirst(db, `SELECT state,sha256,byte_length FROM estimation_revision_files WHERE ${fileKeyWhere}`, ...publishedKey);
-  return saved?.state === 'READY' ? readyView(saved) : exportPending();
+  if (saved?.state !== 'READY') return exportPending();
+  if (staged && !next.sha256) await discardPublishedDraft(db, key, publishedKey).run();
+  return readyView(saved);
 }
 
 export async function readAtlmRevisionFilePart(db, ownerId, { storageId, fileKind, partIndex }) {
