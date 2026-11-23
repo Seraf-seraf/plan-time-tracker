@@ -80,6 +80,33 @@ test('completion requires current DONE states; explicit exception, deletion and 
  }finally{c.close();}
 });
 
+test('a confirmed BLOCKED step can pause its plan without stopping another plan', async () => {
+  const c = context();
+  try {
+    const { stepId } = await running(c);
+    const other = crypto.randomUUID();
+    await running(c, [], other);
+
+    c.advance(100);
+    await ok(c, 'SetStepStatus', { stepId, status: 'BLOCKED' }, 2);
+    const beforePause = (await call(c, `/api/tracker/plans/${PLAN}/execution`)).value;
+    assert.equal(beforePause.steps[0].status, 'BLOCKED');
+    assert.equal(beforePause.plan.status, 'RUNNING');
+    await ok(c, 'PausePlan', { planId: PLAN }, beforePause.plan.version);
+
+    c.advance(50);
+    const paused = (await call(c, `/api/tracker/plans/${PLAN}/execution`)).value;
+    assert.equal(paused.steps[0].status, 'BLOCKED');
+    assert.equal(paused.plan.status, 'PAUSED');
+    assert.equal(paused.plan.activeMs, 100);
+    const parallel = (await call(c, `/api/plans/${other}`)).value.plan;
+    assert.equal(parallel.status, 'RUNNING');
+    assert.equal(parallel.activeMs, 150);
+  } finally {
+    c.close();
+  }
+});
+
 const fixture=JSON.parse(readFileSync(new URL('./fixtures/pre-simple-data.json',import.meta.url),'utf8'));
 test('timer transitions reject inconsistent intervals instead of completing or resuming corrupted state',async()=>{
  const c=context();try{
