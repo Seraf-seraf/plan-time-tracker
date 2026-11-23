@@ -24,8 +24,8 @@ test('the tracker skill pauses only after it confirms its own BLOCKED command', 
   const section = track.match(/^### Пауза после BLOCKED\n\n([\s\S]*?)(?=^## )/m)?.[1];
   assert.ok(section, 'the BLOCKED workflow must have explicit instructions');
   assert.match(section, /SetStepStatus[^\n]+BLOCKED[^\n]+верси[а-я]+ этапа/u);
-  assert.match(section, /Подтвердите[^\n]+SetStepStatus[^\n]+GetCommandResult/u);
-  assert.match(section, /SetStepStatus` отклонён[^\n]+PausePlan` не вызывайте/u);
+  assert.match(section, /Если ответ потерялся, вызовите `GetCommandResult` с тем же `commandId` или повторите исходный запрос без изменений/u);
+  assert.match(section, /`PausePlan` только после подтверждения, что `SetStepStatus` записал `BLOCKED`/u);
   assert.match(section, /GetPlanProgress[^\n]+того же плана[^\n]+PAUSED[^\n]+RUNNING[^\n]+PausePlan[^\n]+новым UUID/u);
   assert.match(section, /VERSION_CONFLICT[^\n]+BLOCKED[^\n]+RUNNING/u);
   assert.match(section, /PausePlan` не удался[^\n]+фактические статусы/u);
