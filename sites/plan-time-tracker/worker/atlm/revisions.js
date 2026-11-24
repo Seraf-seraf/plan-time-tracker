@@ -618,9 +618,9 @@ function annotationLineage(row, parent, parentId, nowMs) {
   if (!parent || !row.annotation || canonical(row.annotation) !== canonical(parent.annotation)) {
     return { annotationRecordedAt: row.annotation ? nowMs : null, annotationOrigin: row.annotation ? { kind: 'NEW' } : null };
   }
-  const unchangedSource = row.source.sourceGeneration === parent.source.sourceGeneration
-    && row.source.sourceDigest === parent.source.sourceDigest
-    && row.source.sourceGeneration !== null;
+  const { sourceGeneration, sourceDigest } = row.source;
+  const unchangedSource = isNonnegativeSafeInteger(sourceGeneration) && isSnapshotDigest(sourceDigest)
+    && sourceGeneration === parent.source?.sourceGeneration && sourceDigest === parent.source?.sourceDigest;
   if (!unchangedSource) {
     throw error('LINEAGE_MISMATCH', 409, { reason: 'SOURCE_CHANGED', rowId: row.rowId, parentDatasetRevisionId: parentId });
   }

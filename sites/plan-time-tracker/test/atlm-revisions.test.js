@@ -501,6 +501,36 @@ test('teacher saves reject forged facts, preserve true lineage and keep owner-sc
   assert.deepEqual(c.db.sqlite.prepare('PRAGMA foreign_key_check').all(), []);
 });
 
+test('an annotation cannot be carried when both frozen sources lack a digest', async (t) => {
+  const c = setup(t);
+  await plannedAtlm(c);
+  const snapshot = await capture(c);
+  const [row] = snapshot.rows;
+  assert.equal(row.source.sourceGeneration, 0);
+  assert.equal(row.source.sourceDigest, null);
+  const document = annotations(snapshot);
+  const [decision] = document.rows;
+  assert.equal(decision.eligibility, 'EXCLUDED');
+  decision.annotation = teacherAnnotation(row.rowId).annotation;
+  const { saved } = await save(c, document);
+
+  const next = await capture(c);
+  assert.equal(next.rows[0].planId, row.planId);
+  assert.equal(next.rows[0].source.sourceGeneration, row.source.sourceGeneration);
+  assert.equal(next.rows[0].source.sourceDigest, null);
+  const child = { ...document, snapshotId: next.snapshotId, parentDatasetRevisionId: saved.datasetRevisionId };
+  const args = await upload(c, SAVE_DATASET, {
+    snapshotId: child.snapshotId, parentDatasetRevisionId: child.parentDatasetRevisionId,
+  }, child);
+  refused(await commit(c, SAVE_DATASET, args), 'LINEAGE_MISMATCH');
+
+  child.rows[0].annotation.fieldEvidence.workUnits = 'Checked the plan steps in snapshot ' + next.snapshotId;
+  const reviewed = await save(c, child);
+  const { value } = await download(c, DATASET, { datasetRevisionId: reviewed.saved.datasetRevisionId });
+  assert.deepEqual(value.rows[0].annotationOrigin, { kind: 'NEW' });
+  assert.equal(value.rows[0].eligibility, 'EXCLUDED');
+});
+
 test('registration keeps the pointer unchanged and activation is a replayable CAS including ABA', async (t) => {
   const c = setup(t);
   const { datasetRevisionId, bundleBytes, plans } = await fitBundle(t, c, 2);

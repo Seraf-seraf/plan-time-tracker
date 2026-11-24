@@ -96,6 +96,10 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     for (const name of entries) {
       assert.deepEqual(listing.find((tool) => tool.name === name)?.inputSchema, registry.tools[name]);
     }
+    const saveDescription = listing.find((tool) => tool.name === 'SaveDatasetRevision').description;
+    for (const term of ['ELIGIBLE', 'ACTUAL', 'EXCLUDED', 'snapshotId', 'parentDatasetRevisionId']) {
+      assert.ok(saveDescription.includes(term), 'SaveDatasetRevision must describe ' + term);
+    }
     const retired = ['StartTraining', 'ContinueTraining', 'GetTrainingStatus', 'GetTrainingData', 'GetTrainingHistory'];
     for (const name of retired) {
       assert.equal(listing.some((tool) => tool.name === name), false);

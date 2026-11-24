@@ -12,7 +12,7 @@
 | `SaveTaskAssessment`, `GetTaskAssessment` | Сохранить оценку или прочитать текущие требования и ревизии. |
 | `EstimatePlanTime`, `GetSavedEstimate` | Рассчитать предпросмотр по переданным признакам или прочитать прогноз по сохранённой оценке. |
 | `CreateTrainingSnapshot` | Создать неизменяемый снимок с `mode:'create'`. В `mode:'read'` использовать `view:'list'` для списка или `snapshotId` для остальных видов. |
-| `SaveDatasetRevision` | Передать полную преподавательскую разметку по `snapshotId`, при переносе указать `parentDatasetRevisionId`. Итог `SAVED` содержит ID и digest датасета. |
+| `SaveDatasetRevision` | Для каждой строки сохранить решение `ELIGIBLE` с признаками `ACTUAL`, проверенными по результатам этого плана, или `EXCLUDED` с причиной. Итог `SAVED` содержит ID и digest датасета. |
 | `GetDatasetRevision` | Использовать `view:'list'` с необязательным `snapshotId` для поиска. Для `summary`, `rows`, `download` и `filePart` использовать `datasetRevisionId`. |
 | `RegisterModelRevision` | Сохранить пакет локального обучения по `datasetRevisionId` с артефактом, происхождением данных и отчётом. Итог `REGISTERED` содержит ID модели и допуск к активации. |
 | `ListModelRevisions` | Через `view:'list'` прочитать список и указатель для CAS, через `detail` — конкретную ревизию, через `activations` — историю. Для `download` и `filePart` использовать один `modelRevisionId` и `fileKind`. По умолчанию `BUNDLE`, для выгрузки только артефакта укажите `ARTIFACT`. |
@@ -21,7 +21,7 @@
 
 Для шести операций реестра передавайте `schemaVersion:1`. Для следующей страницы передавайте `nextCursor` как `cursor`. `view:'rows'` для снимка и датасета возвращает компактный перечень. Чтобы получить полные строки, доказательства снимка или исходные байты экспорта, дождитесь `READY` через `view:'download'` и читайте части по `partIndex` из `structuredContent` режима `filePart`.
 
-`SaveDatasetRevision` и `RegisterModelRevision` используют `prepare`, `putPart` и `commit` с неизменными `commandId`, `file` и ID источника. Действия по ответу сервера и восстановление после потери ответа описаны в [передаче файлов ATLM](atlm.md#файлы-и-восстановление).
+На фазах `prepare`, `putPart` и `commit` сохраняйте исходные `commandId` и `file`. Для `SaveDatasetRevision` также сохраняйте `snapshotId` и `parentDatasetRevisionId`, для `RegisterModelRevision` — `datasetRevisionId`. [Передача файлов и восстановление после потери ответа](atlm.md#файлы-и-восстановление).
 
 Для CAS прочитайте `ListModelRevisions({schemaVersion:1,view:'list'})`. Используйте `activeModelRevisionId` и `activationVersion` как ожидаемые значения. `servingModelRevisionId` показывает модель, фактически доступную для новых прогнозов.
 
