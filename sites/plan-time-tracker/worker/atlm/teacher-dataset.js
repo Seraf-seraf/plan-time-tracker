@@ -181,7 +181,24 @@ function mergeAtlmTeacherAnnotations(snapshotRows, decisions, { teacherReviewed 
     if (eligibility === 'EXCLUDED') {
       if (!reasons.length) throw datasetError('Excluded rows require reasons.', rowId);
       const excluded = annotation === null ? null : normalizedAnnotation(annotation, rowId, teacherReviewed).annotation;
-      if (teacherReviewed) validateReviewedExclusion(source, planId, excluded, reasons, rowId, exclusionEvidence);
+      if (teacherReviewed) {
+        const deleted = source.deletedAt !== null;
+        const unfinished = source.planStatus !== 'COMPLETED';
+        const userSkip = reasons.includes('USER_REQUESTED_SKIP');
+        if ((userSkip || (!deleted && !unfinished))
+          && (!userSkip || !recordedEvidence(exclusionEvidence?.userDecision))) {
+          throw appError('INVALID_TEACHER_DATASET',
+            'Если фактическое активное время или признаки не подтверждены, уточните их у пользователя. Для пользовательского исключения добавьте USER_REQUESTED_SKIP и укажите явное решение по этому плану в exclusionEvidence.userDecision.',
+            422, { reason: 'USER_DECISION_REQUIRED', planId, rowId, reasons });
+        }
+        if (!userSkip && !((deleted && reasons.includes('PLAN_DELETED'))
+          || (unfinished && reasons.includes('PLAN_NOT_COMPLETED')))) {
+          throw appError('INVALID_TEACHER_DATASET',
+            'Для удалённого или незавершённого плана укажите причину, которая соответствует статусу в снимке.',
+            422, { reason: 'PLAN_STATUS_REASON_REQUIRED', planId, rowId, reasons });
+        }
+        validateReviewedExclusion(source, planId, excluded, reasons, rowId, exclusionEvidence);
+      }
       return { rowId, planId, groupId, eligibility, reasons, annotation: excluded, source, features: null,
         ...(exclusionEvidence === undefined ? {} : { exclusionEvidence }) };
     }

@@ -91,6 +91,11 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     assert.equal(registry.schemaVersion, 1);
     assert.equal(registry.trainingExecution, 'LOCAL');
     assert.equal(registry.activation, 'EXPLICIT');
+    const agentCount = registry.teacherDataset.featurePolicies['execution.plannedParallelAgents'];
+    for (const guide of [train, features]) {
+      assert.ok(guide.includes(agentCount.whenUnconfirmed.evidencePath));
+      assert.ok(guide.includes(`\`${agentCount.whenUnconfirmed.basis}\``));
+    }
     assert.match(train, /registry\.teacherRecipeIds/u);
     const recipeSection = train.split('## Локальный рецепт и проверка\n')[1];
     const recipe = JSON.parse(recipeSection.match(/```json\n([\s\S]*?)```/u)[1]);
@@ -124,8 +129,8 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     assert.equal(eligible.annotation.actualTime.actualMs, 180000);
     assert.ok(eligible.annotation.actualTime.evidence);
     assert.equal(excluded.eligibility, 'EXCLUDED');
-    assert.deepEqual(excluded.reasons, ['ACTUAL_TIME_UNVERIFIED']);
-    assert.ok(excluded.exclusionEvidence);
+    assert.deepEqual(excluded.reasons, ['USER_REQUESTED_SKIP']);
+    assert.ok(excluded.exclusionEvidence.userDecision);
     const frozen = [eligible, excluded].map(({ rowId }, index) => ({
       rowId, planId: rowId, rawReasons: ['SOURCE_REFRESH_FAILED'],
       source: {
@@ -139,6 +144,9 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     assert.equal(reviewed[0].annotation.actualTime.actualMs, 180000);
     assert.equal(reviewed[0].source.actualMs, null);
     assert.equal(reviewed[1].eligibility, 'EXCLUDED');
+    const silentSkip = { ...excluded, reasons: ['ACTUAL_FEATURES_UNVERIFIED'], exclusionEvidence: undefined };
+    assert.throws(() => mergeAtlmTeacherAnnotations(frozen, [eligible, silentSkip], { teacherReviewed: true }),
+      (error) => error.details?.reason === 'USER_DECISION_REQUIRED' && error.details.rowId === excluded.rowId);
     assert.doesNotMatch(train, /backtestUse|holdoutUse|historicalAvailability/u);
     const saveDescription = listing.find((tool) => tool.name === 'SaveDatasetRevision').description;
     for (const term of ['ELIGIBLE', 'ACTUAL', 'EXCLUDED', 'snapshotId', 'parentDatasetRevisionId']) {

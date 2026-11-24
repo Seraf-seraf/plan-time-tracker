@@ -57,6 +57,24 @@ test('teacher facts and fitter inputs retain the measured target and use actual 
   }]);
 });
 
+test('teacher agent-count evidence and exact confirmed values survive both dataset contracts', () => {
+  const evidencePath = 'execution.plannedParallelAgents';
+  for (const teacherReviewed of [false, true]) {
+    for (const [agentCount, proof] of [
+      [3, 'The execution log confirms three concurrent agents.'],
+      [1, 'Exact count unknown. Use the main agent as the lower bound.'],
+    ]) {
+      const decision = teacherAnnotation(frozen.rowId, null);
+      decision.annotation.agentTask.execution.plannedParallelAgents = agentCount;
+      decision.annotation.agentTask.evidence[evidencePath] = proof;
+      const [row] = mergeAtlmTeacherAnnotations([frozen], [decision], { teacherReviewed });
+      const [trainingRow] = buildAtlmTeacherTrainingRows([row], undefined, { teacherReviewed });
+      assert.equal(row.annotation.agentTask.evidence[evidencePath], proof);
+      assert.equal(trainingRow.features.plannedParallelAgents, agentCount);
+    }
+  }
+});
+
 test('each frozen row needs one decision and uploads cannot overwrite authoritative fields', () => {
   assert.throws(() => mergeAtlmTeacherAnnotations([frozen], []), /membership/i);
   assert.throws(() => mergeAtlmTeacherAnnotations([frozen], [

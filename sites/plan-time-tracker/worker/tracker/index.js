@@ -1499,6 +1499,28 @@ async function readTrackerCapabilities(db, ownerId) {
             featureSource: 'annotation.agentTask',
             measuredTimeOverride: 'annotation.actualTime',
             timeUnit: 'milliseconds',
+            completedPlanExclusion: {
+              requiredReason: 'USER_REQUESTED_SKIP',
+              userDecisionEvidencePath: 'exclusionEvidence.userDecision',
+              missingDecisionReason: 'USER_DECISION_REQUIRED',
+              userDecisionRequiredForAllUserSkips: true,
+            },
+            statusExclusion: {
+              deleted: 'PLAN_DELETED',
+              unfinished: 'PLAN_NOT_COMPLETED',
+              missingStatusReason: 'PLAN_STATUS_REASON_REQUIRED',
+            },
+            featurePolicies: {
+              'execution.plannedParallelAgents': {
+                scope: 'ACTUAL',
+                whenConfirmed: 'USE_EXACT',
+                whenUnconfirmed: {
+                  value: 1,
+                  basis: 'LOWER_BOUND',
+                  evidencePath: 'annotation.agentTask.evidence["execution.plannedParallelAgents"]',
+                },
+              },
+            },
             instructions: 'Проверьте каждый завершённый неудалённый план. По коду и материалам плана уточните все признаки. Для исправления или добавления фактического активного времени запишите actualMs и evidence в annotation.actualTime. Подтверждённый ноль допустим. Исходные замечания снимка служат подсказками для проверки. Учтите явные уточнения пользователя.',
           },
           trainingExecution: 'LOCAL',

@@ -105,6 +105,32 @@ test("forecast and registry MCP discovery use the same strict branches as runtim
     assert.equal(atlm.registry.defaultTeacherRecipeId, "atlm-teacher-hybrid-v4");
     assert.equal(atlm.registry.teacherDataset.annotationContract, "atlm-teacher-annotations-v2");
     assert.equal(atlm.registry.teacherDataset.exportContract, "atlm-teacher-dataset-v2");
+    assert.deepEqual(atlm.registry.teacherDataset.completedPlanExclusion, {
+      requiredReason: "USER_REQUESTED_SKIP",
+      userDecisionEvidencePath: "exclusionEvidence.userDecision",
+      missingDecisionReason: "USER_DECISION_REQUIRED",
+      userDecisionRequiredForAllUserSkips: true,
+    });
+    assert.deepEqual(atlm.registry.teacherDataset.statusExclusion, {
+      deleted: "PLAN_DELETED",
+      unfinished: "PLAN_NOT_COMPLETED",
+      missingStatusReason: "PLAN_STATUS_REASON_REQUIRED",
+    });
+    const agentCountPath = "execution.plannedParallelAgents";
+    assert.deepEqual(atlm.registry.teacherDataset.featurePolicies[agentCountPath], {
+      scope: "ACTUAL",
+      whenConfirmed: "USE_EXACT",
+      whenUnconfirmed: {
+        value: 1,
+        basis: "LOWER_BOUND",
+        evidencePath: 'annotation.agentTask.evidence["execution.plannedParallelAgents"]',
+      },
+    });
+    const executionSchema = atlm.agentTaskSchema.properties.execution;
+    assert.ok(executionSchema.required.includes("plannedParallelAgents"));
+    assert.deepEqual(executionSchema.properties.plannedParallelAgents, {
+      type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER,
+    });
     const snapshots = tools.get("CreateTrainingSnapshot");
     const repair = snapshots.inputSchema.oneOf.find(shape => shape.properties.mode?.enum.includes("repair"));
     assert.ok(repair.required.includes("planIds"));
@@ -114,6 +140,9 @@ test("forecast and registry MCP discovery use the same strict branches as runtim
     assert.match(tools.get("SaveDatasetRevision").description, /USER_REQUESTED_SKIP по planId/);
     assert.match(tools.get("SaveDatasetRevision").description, /annotation\.actualTime=\{actualMs,evidence\}/);
     assert.match(tools.get("SaveDatasetRevision").description, /ELIGIBLE, даже если в исходном наблюдении была ошибка/);
+    assert.match(tools.get("SaveDatasetRevision").description, /точное подтверждённое число.*включая основного/);
+    assert.match(tools.get("SaveDatasetRevision").description,
+      /если точное число неизвестно, укажите 1 как нижнюю границу.*annotation\.agentTask\.evidence\["execution\.plannedParallelAgents"\]/i);
     assert.equal(atlm.retrainEveryNewPlans, undefined);
   } finally { c.close(); }
 });

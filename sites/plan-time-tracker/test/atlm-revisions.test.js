@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { materializeAtlmRevisionFile } from '../worker/atlm/revision-files.js';
-import { summarizeAtlmTeacherMode } from '../worker/atlm/teacher-dataset.js';
+import { readAtlmTeacherDataset, summarizeAtlmTeacherMode } from '../worker/atlm/teacher-dataset.js';
 import { createWorker } from '../worker/index.js';
 import { teacherAnnotation } from './fixtures/atlm-revisions.mjs';
 import { completeAtlm, context, mcp, ok, OWNER, plannedAtlm, taskV4 } from './fixtures/tracker-db.mjs';
@@ -990,8 +990,8 @@ test('v4 requires evidence-backed teacher decisions and registers the newly revi
   assert.equal(byPlan.get(incomplete.planId).source.actualMs, 6_000);
 
   const row = (planId) => teacherAnnotation(byPlan.get(planId).rowId, null);
-  const ignore = (planId, reason, exclusionEvidence) => ({
-    rowId: byPlan.get(planId).rowId, groupId: null, eligibility: 'EXCLUDED', reasons: [reason], annotation: null,
+  const ignore = (planId, reasons, exclusionEvidence) => ({
+    rowId: byPlan.get(planId).rowId, groupId: null, eligibility: 'EXCLUDED', reasons, annotation: null,
     ...(exclusionEvidence === undefined ? {} : { exclusionEvidence }),
   });
   const recovered = row(missing.planId);
@@ -1001,25 +1001,57 @@ test('v4 requires evidence-backed teacher decisions and registers the newly revi
   const corrected = row(amended.planId);
   corrected.annotation.actualTime = { actualMs: 0, evidence: 'The interval contained waiting only.' };
   const exclusions = [
-    ignore(disputed.planId, 'ACTUAL_TIME_UNVERIFIED', 'The journal disproves the frozen total. No separate measure remains.'),
-    ignore(skipped.planId, 'USER_REQUESTED_SKIP'),
-    ignore(unfinished.planId, 'PLAN_NOT_COMPLETED'),
+    ignore(disputed.planId, ['ACTUAL_TIME_UNVERIFIED', 'USER_REQUESTED_SKIP'], {
+      userDecision: 'The user authorized exclusion of this plan in their saved decision.',
+      timing: 'The journal disproves the frozen total. No separate measure remains.',
+    }),
+    ignore(skipped.planId, ['USER_REQUESTED_SKIP'], {
+      userDecision: 'The user explicitly excluded this plan under the standing rule for this plan ID.',
+    }),
+    ignore(unfinished.planId, ['PLAN_NOT_COMPLETED']),
   ];
   const document = {
     schemaVersion: 1, contract: 'atlm-teacher-annotations-v2', snapshotId: snapshot.snapshotId, parentDatasetRevisionId: null,
     rows: [recovered, corrected, row(incomplete.planId), ...exclusions],
   };
-  const bad = structuredClone(document);
-  delete bad.rows[3].exclusionEvidence;
-  const unverified = await upload(c, SAVE_DATASET, { snapshotId: snapshot.snapshotId }, bad);
-  refused(await commit(c, SAVE_DATASET, unverified), 'INVALID_TEACHER_DATASET');
+  const silentTimeExclusion = structuredClone(document);
+  silentTimeExclusion.rows[3].reasons = ['ACTUAL_TIME_UNVERIFIED'];
+  silentTimeExclusion.rows[3].exclusionEvidence = { timing: exclusions[0].exclusionEvidence.timing };
+  const silentFeatureExclusion = structuredClone(document);
+  silentFeatureExclusion.rows[4].reasons = ['ACTUAL_FEATURES_UNVERIFIED'];
+  delete silentFeatureExclusion.rows[4].exclusionEvidence;
+  const genericEvidence = structuredClone(document);
+  genericEvidence.rows[4].exclusionEvidence = 'The teacher cannot verify this plan.';
+  for (const [invalid, plan] of [
+    [silentTimeExclusion, disputed], [silentFeatureExclusion, skipped], [genericEvidence, skipped],
+  ]) {
+    const args = await upload(c, SAVE_DATASET, { snapshotId: snapshot.snapshotId }, invalid);
+    const failure = refused(await commit(c, SAVE_DATASET, args), 'INVALID_TEACHER_DATASET');
+    assert.equal(failure.details.reason, 'USER_DECISION_REQUIRED');
+    assert.equal(failure.details.planId, plan.planId);
+    assert.equal(failure.details.rowId, byPlan.get(plan.planId).rowId);
+    assert.match(failure.message, /уточните их у пользователя/);
+  }
+  const falseStatus = structuredClone(document);
+  falseStatus.rows[4].reasons.push('PLAN_NOT_COMPLETED');
+  const falseStatusArgs = await upload(c, SAVE_DATASET, { snapshotId: snapshot.snapshotId }, falseStatus);
+  assert.match(refused(await commit(c, SAVE_DATASET, falseStatusArgs), 'INVALID_TEACHER_DATASET').message,
+    /Exclusion does not match/);
+  const datasetList = await tool(c, DATASET, { view: 'list', snapshotId: snapshot.snapshotId });
+  assert.deepEqual(datasetList.rows, []);
   const forged = structuredClone(document);
   forged.rows[0].annotation.actualTime.evidence.journal.id = skipped.planId;
   const forgedArgs = await upload(c, SAVE_DATASET, { snapshotId: snapshot.snapshotId }, forged);
   const forgedResult = refused(await commit(c, SAVE_DATASET, forgedArgs), 'INVALID_TEACHER_DATASET');
   assert.equal(forgedResult.details.reason, 'TRACKER_EVIDENCE_NOT_FOUND');
+  const forgedApproval = structuredClone(document);
+  forgedApproval.rows[4].exclusionEvidence.userDecision = { kind: 'PLAN', id: disputed.planId };
+  const approvalArgs = await upload(c, SAVE_DATASET, { snapshotId: snapshot.snapshotId }, forgedApproval);
+  assert.equal(refused(await commit(c, SAVE_DATASET, approvalArgs), 'INVALID_TEACHER_DATASET').details.reason,
+    'TRACKER_EVIDENCE_NOT_FOUND');
 
   const first = await save(c, document);
+  assert.deepEqual(accepted(await commit(c, SAVE_DATASET, first.args)), { ...first.saved, replayed: true });
   const before = await fitSavedBundle(t, c, first.saved, 4);
   assert.equal(before.dataset.contract, 'atlm-teacher-dataset-v2');
   assert.equal(before.bundle.artifact.n, 3);
@@ -1029,7 +1061,12 @@ test('v4 requires evidence-backed teacher decisions and registers the newly revi
   assert.equal(trained.get(missing.planId).annotation.actualTime.actualMs, 2_000);
   assert.equal(trained.get(amended.planId).source.actualMs, 3_000);
   assert.equal(trained.get(amended.planId).annotation.actualTime.actualMs, 0);
-  assert.equal(trained.get(disputed.planId).exclusionEvidence, exclusions[0].exclusionEvidence);
+  assert.deepEqual(trained.get(disputed.planId).exclusionEvidence, exclusions[0].exclusionEvidence);
+  const olderV4 = structuredClone(before.dataset);
+  const formerlyUnresolved = olderV4.rows.find((item) => item.planId === disputed.planId);
+  formerlyUnresolved.reasons = ['ACTUAL_TIME_UNVERIFIED'];
+  formerlyUnresolved.exclusionEvidence = exclusions[0].exclusionEvidence.timing;
+  assert.deepEqual(readAtlmTeacherDataset(olderV4).trainingRows, readAtlmTeacherDataset(before.dataset).trainingRows);
 
   await ok(c, 'UpdatePlanMetadata', { planId: amended.planId, title: 'Rechecked source' }, 2);
   c.advance(1);
@@ -1054,4 +1091,54 @@ test('v4 requires evidence-backed teacher decisions and registers the newly revi
   const activation = { modelRevisionId: result.modelRevisionId, expectedActiveModelRevisionId: null,
     expectedActivationVersion: 0, reason: 'Explicit v4 activation', commandId: crypto.randomUUID() };
   assert.equal((await tool(c, ACTIVATE, activation)).activeModelRevisionId, result.modelRevisionId);
+});
+
+test('v4 status exclusions cannot create a false user skip that survives later completion', async (t) => {
+  const c = setup(t);
+  const unfinished = await plannedAtlm(c, crypto.randomUUID());
+  const deleted = await plannedAtlm(c, crypto.randomUUID());
+  await ok(c, 'DeletePlan', { planId: deleted.planId }, 0);
+  const snapshot = await capture(c);
+  const statusReasons = new Map([[unfinished.planId, 'PLAN_NOT_COMPLETED'], [deleted.planId, 'PLAN_DELETED']]);
+  const document = {
+    schemaVersion: 1, contract: 'atlm-teacher-annotations-v2', snapshotId: snapshot.snapshotId, parentDatasetRevisionId: null,
+    rows: snapshot.rows.map((row) => ({
+      rowId: row.rowId, groupId: null, eligibility: 'EXCLUDED', reasons: [statusReasons.get(row.planId)], annotation: null,
+    })),
+  };
+  for (const planId of statusReasons.keys()) {
+    const rowId = snapshot.rows.find((row) => row.planId === planId).rowId;
+    for (const [reason, errorReason] of [
+      ['USER_REQUESTED_SKIP', 'USER_DECISION_REQUIRED'],
+      ['ACTUAL_FEATURES_UNVERIFIED', 'PLAN_STATUS_REASON_REQUIRED'],
+    ]) {
+      const invalid = structuredClone(document);
+      const row = invalid.rows.find((item) => item.rowId === rowId);
+      row.reasons = [reason];
+      if (reason === 'USER_REQUESTED_SKIP') row.reasons.push(statusReasons.get(planId));
+      const args = await upload(c, SAVE_DATASET, { snapshotId: snapshot.snapshotId }, invalid);
+      const failure = refused(await commit(c, SAVE_DATASET, args), 'INVALID_TEACHER_DATASET');
+      assert.equal(failure.details.reason, errorReason);
+      assert.equal(failure.details.planId, planId);
+    }
+  }
+  assert.deepEqual((await tool(c, DATASET, { view: 'list', snapshotId: snapshot.snapshotId })).rows, []);
+
+  const first = await save(c, document);
+  const { value: prior } = await download(c, DATASET, { datasetRevisionId: first.saved.datasetRevisionId });
+  assert.ok(prior.rows.every((row) => !row.reasons.includes('USER_REQUESTED_SKIP')));
+  const archived = structuredClone(prior);
+  archived.rows[0].reasons = ['USER_REQUESTED_SKIP'];
+  assert.deepEqual(readAtlmTeacherDataset(archived).trainingRows, []);
+
+  await completeAtlm(c, unfinished, 1_000);
+  const current = await capture(c);
+  const allowed = await save(c, {
+    ...document, snapshotId: current.snapshotId, parentDatasetRevisionId: first.saved.datasetRevisionId,
+    rows: current.rows.map((row) => row.planId === unfinished.planId
+      ? teacherAnnotation(row.rowId, null)
+      : document.rows.find((item) => item.rowId === row.rowId)),
+  });
+  const { value: reviewed } = await download(c, DATASET, { datasetRevisionId: allowed.saved.datasetRevisionId });
+  assert.deepEqual(readAtlmTeacherDataset(reviewed).trainingRows.map((row) => row.planId), [unfinished.planId]);
 });
