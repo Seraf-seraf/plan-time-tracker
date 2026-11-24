@@ -160,6 +160,88 @@ async function capture(c) {
   return (await download(c, SNAPSHOT, { mode: 'read', snapshotId })).value;
 }
 
+test('snapshot source repair requeues safely and verifies old measurements from the original journal', async (t) => {
+  const c = setup(t);
+  const healthy = await completed(c, 1_000);
+  await capture(c);
+  const missing = await completed(c, 2_000);
+  await ok(c, 'UpdatePlanMetadata', { planId: missing.planId, title: 'Verified source update' }, 2);
+  const sourceChangedAt = c.now();
+  c.advance(10);
+  const failed = await completed(c, 3_000);
+  const pending = await completed(c, 4_000);
+  const protectedPlan = await completed(c, 5_000);
+  const badJournal = await completed(c, 6_000);
+  const deleted = await completed(c, 7_000);
+  await ok(c, 'DeletePlan', { planId: deleted.planId }, 2);
+  const unfinished = await plannedAtlm(c, crypto.randomUUID());
+  const unknown = crypto.randomUUID();
+  const db = c.db.sqlite;
+  db.prepare('UPDATE work_intervals SET start_ms=start_ms+1 WHERE owner_id=? AND plan_id=?')
+    .run(OWNER, badJournal.planId);
+  const removeJob = db.prepare('DELETE FROM estimation_jobs WHERE owner_id=? AND plan_id=?');
+  for (const plan of [missing, protectedPlan, badJournal]) {
+    assert.equal(removeJob.run(OWNER, plan.planId).changes, 1);
+  }
+  const jobFor = db.prepare('SELECT * FROM estimation_jobs WHERE owner_id=? AND plan_id=?');
+  db.prepare(`UPDATE estimation_jobs SET status='FAILED',attempts=4,last_error='SOURCE_REFRESH_FAILED'
+    WHERE owner_id=? AND plan_id=?`).run(OWNER, failed.planId);
+  const failure = jobFor.get(OWNER, failed.planId);
+  const healthyJob = jobFor.get(OWNER, healthy.planId);
+  const pendingJob = jobFor.get(OWNER, pending.planId);
+  const issued = db.prepare('SELECT forecast_json FROM plan_estimation_inputs WHERE owner_id=? AND plan_id=?');
+  const forecastBefore = issued.get(OWNER, missing.planId);
+
+  db.prepare(`INSERT INTO estimation_model_revisions(owner_id,model_revision_id,origin,method_version,feature_version,
+    registered_at,artifact_json,manifest_json,provenance_json,fit_count,source_count,supported)
+    VALUES(?,'supported-source','IMPORTED','agent-v5-operations','agent-task-v4',?,'{}','[]','{}',1,1,1)`)
+    .run(OWNER, c.now());
+  db.prepare(`INSERT INTO estimation_model_revision_sources(owner_id,model_revision_id,plan_id,source_generation,ordinal)
+    VALUES(?,'supported-source',?,0,0)`).run(OWNER, protectedPlan.planId);
+  const protectedSource = db.prepare("SELECT source_problem FROM estimation_serving_models WHERE owner_id=? AND model_id='supported-source'");
+  assert.equal(protectedSource.get(OWNER).source_problem, null);
+
+  const requested = [
+    [missing.planId, 'QUEUED'], [failed.planId, 'REQUEUED'], [pending.planId, 'ALREADY_PENDING'],
+    [healthy.planId, 'SOURCE_ALREADY_OBSERVED'], [protectedPlan.planId, 'PROTECTED_MODEL_SOURCE'],
+    [badJournal.planId, 'QUEUED'], [deleted.planId, 'NOT_APPLICABLE'], [unfinished.planId, 'NOT_APPLICABLE'],
+    [unknown, 'PLAN_NOT_FOUND'],
+  ];
+  const command = { mode: 'repair', commandId: crypto.randomUUID(), planIds: requested.map(([planId]) => planId) };
+  await expectError(c, SNAPSHOT, { ...command, planIds: [missing.planId, missing.planId] }, 'VALIDATION_ERROR');
+  const outsideOwner = await tool(c, SNAPSHOT, { ...command, planIds: [missing.planId] }, OTHER);
+  assert.deepEqual(outsideOwner.rows, [{ planId: missing.planId, status: 'PLAN_NOT_FOUND' }]);
+  const simultaneous = await Promise.all([tool(c, SNAPSHOT, command), tool(c, SNAPSHOT, command)]);
+  const repaired = simultaneous.find((result) => !result.replayed);
+  assert.ok(repaired);
+  assert.equal(simultaneous.filter((result) => result.replayed).length, 1);
+  assert.equal(repaired.state, 'REPAIR_QUEUED');
+  assert.deepEqual(repaired.rows, requested.map(([planId, status]) => ({ planId, status })));
+  assert.deepEqual(await tool(c, SNAPSHOT, command), { ...repaired, replayed: true });
+  await expectError(c, SNAPSHOT, { ...command, planIds: [healthy.planId] }, 'IDEMPOTENCY_KEY_REUSED');
+  assert.equal(jobFor.get(OWNER, missing.planId).source_changed_at, sourceChangedAt);
+  assert.deepEqual(jobFor.get(OWNER, healthy.planId), healthyJob);
+  assert.deepEqual(jobFor.get(OWNER, pending.planId), pendingJob);
+  const requeued = jobFor.get(OWNER, failed.planId);
+  assert.equal(requeued.generation, failure.generation);
+  assert.equal(requeued.source_changed_at, failure.source_changed_at);
+  assert.equal(requeued.attempts, 0);
+  assert.equal(requeued.last_error, null);
+  assert.equal(jobFor.get(OWNER, protectedPlan.planId), undefined);
+  assert.equal(protectedSource.get(OWNER).source_problem, null);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM estimation_samples WHERE owner_id=? AND plan_id=?')
+    .get(OWNER, missing.planId).n, 0);
+
+  const snapshot = await capture(c);
+  const rows = new Map(snapshot.rows.map((row) => [row.planId, row]));
+  assert.equal(rows.get(missing.planId).source.actualMs, 2_000);
+  assert.equal(rows.get(missing.planId).source.sourceAvailableAt, sourceChangedAt);
+  assert.equal(rows.get(failed.planId).source.actualMs, 3_000);
+  assert.ok(rows.get(badJournal.planId).rawReasons.includes('INCOMPLETE_MEASUREMENT'));
+  assert.equal(rows.get(badJournal.planId).source.actualMs, null);
+  assert.deepEqual(issued.get(OWNER, missing.planId), forecastBefore);
+});
+
 async function fitBundle(t, c, count, afterComplete = async () => {}, { perPlan = false } = {}) {
   const plans = [];
   for (let i = 0; i < count; i++) {

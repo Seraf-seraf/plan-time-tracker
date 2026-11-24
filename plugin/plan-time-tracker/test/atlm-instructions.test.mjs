@@ -93,6 +93,7 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     const recipeSection = train.split('## Локальный рецепт и проверка\n')[1];
     const recipe = JSON.parse(recipeSection.match(/```json\n([\s\S]*?)```/u)[1]);
     assert.equal(recipe.recipeId, 'atlm-teacher-hybrid-v2');
+    assert.equal(registry.defaultTeacherRecipeId, recipe.recipeId);
     assert.ok(registry.teacherRecipeIds.includes(recipe.recipeId));
     assert.deepEqual(recipe.selection, { mode: 'ALL_ELIGIBLE' });
     assert.deepEqual(parseAtlmTeacherRecipe(recipe, recipe.datasetRevisionId, recipe.datasetDigest), recipe);
@@ -104,6 +105,10 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     for (const name of entries) {
       assert.deepEqual(listing.find((tool) => tool.name === name)?.inputSchema, registry.tools[name]);
     }
+    const repair = registry.tools.CreateTrainingSnapshot.oneOf.find((branch) => branch.properties.mode.enum.includes('repair'));
+    assert.deepEqual([...repair.required].sort(), ['commandId', 'mode', 'planIds', 'schemaVersion']);
+    assert.equal(repair.properties.planIds.maxItems, 25);
+    assert.match(train, /CreateTrainingSnapshot\(\{schemaVersion:1,mode:'repair',commandId,planIds\}\)/u);
     const saveDescription = listing.find((tool) => tool.name === 'SaveDatasetRevision').description;
     for (const term of ['ELIGIBLE', 'ACTUAL', 'EXCLUDED', 'snapshotId', 'parentDatasetRevisionId']) {
       assert.ok(saveDescription.includes(term), 'SaveDatasetRevision must describe ' + term);

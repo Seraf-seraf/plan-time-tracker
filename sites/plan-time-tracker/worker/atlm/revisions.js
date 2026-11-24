@@ -33,6 +33,7 @@ const DEFAULT_PAGE_SIZE = 25;
 const VALIDATION_BATCH_ROWS = 32;
 const MIN_ROLLING_REGRESSION_ROWS = 2;
 const UNGROUPED_TEACHER_ROW = '';
+const ATLM_TRAINING_REPAIR_MAX_PLANS = 25;
 const DOCUMENT_MAX_DEPTH = 32;
 const SNAPSHOT_CONTRACT = 'atlm-training-snapshot';
 const SNAPSHOT_READ_BYTES = 2 * ATLM_PART_BYTES;
@@ -83,6 +84,8 @@ function uploadBranches(properties, optional = []) {
 const REVISION_BRANCHES = Object.freeze({
   CreateTrainingSnapshot: [
     branch({ mode: enumString('create'), commandId: uuid }),
+    branch({ mode: enumString('repair'), commandId: uuid,
+      planIds: { type: 'array', items: uuid, minItems: 1, maxItems: ATLM_TRAINING_REPAIR_MAX_PLANS, uniqueItems: true } }),
     ...readBranches('snapshotId', ['summary', 'rows', 'download', 'filePart', 'list'], {}, { mode: enumString('read') }),
   ],
   SaveDatasetRevision: uploadBranches({ snapshotId: id, parentDatasetRevisionId: { ...id, type: ['string', 'null'] } },
@@ -239,6 +242,72 @@ async function readSnapshot(db, ownerId, snapshotId) {
 function sourcesPending(status, nowMs) {
   return error('SOURCES_PENDING', 409, { ...status, retryable: true,
     retryAfterMs: status.nextAttemptAt === null ? null : Math.max(0, status.nextAttemptAt - nowMs) });
+}
+
+async function repairSnapshotSources(db, ownerId, args, nowMs) {
+  if (new Set(args.planIds).size !== args.planIds.length)
+    throw appError('VALIDATION_ERROR', 'Укажите каждый план один раз.');
+  const context = await commandContext(db, ownerId, 'CreateTrainingSnapshot', args, nowMs);
+  const replay = finishedResult(await commandReceipt(context));
+  if (replay) return replay;
+
+  const recordDecisions = db.prepare(`
+    UPDATE command_receipts SET result_json=(
+      SELECT json_object('state','REPAIR_QUEUED','rows',json_group_array(json_object('planId',plan_id,'status',status)))
+      FROM (
+        SELECT requested.value AS plan_id,CASE
+          WHEN p.plan_id IS NULL THEN 'PLAN_NOT_FOUND'
+          WHEN p.status<>'COMPLETED' OR p.deleted_at IS NOT NULL OR p.first_started_at IS NULL
+            OR p.finished_at IS NULL THEN 'NOT_APPLICABLE'
+          WHEN j.status='FAILED' AND j.generation>j.processed_generation THEN 'REQUEUED'
+          WHEN j.generation>j.processed_generation THEN 'ALREADY_PENDING'
+          WHEN EXISTS(SELECT 1 FROM estimation_samples s WHERE s.owner_id=p.owner_id AND s.plan_id=p.plan_id)
+            THEN 'SOURCE_ALREADY_OBSERVED'
+          WHEN j.job_key IS NOT NULL THEN 'NOT_APPLICABLE'
+          WHEN EXISTS(
+            SELECT 1 FROM estimation_model_revision_sources s
+            JOIN estimation_model_revisions m USING(owner_id,model_revision_id)
+            WHERE s.owner_id=p.owner_id AND s.plan_id=p.plan_id AND s.source_generation=0
+              AND m.supported=1 AND m.invalidated_reason IS NULL
+          ) THEN 'PROTECTED_MODEL_SOURCE'
+          ELSE 'QUEUED' END AS status
+        FROM json_each(?) requested
+        LEFT JOIN plans p ON p.owner_id=? AND p.plan_id=requested.value
+        LEFT JOIN estimation_jobs j ON j.owner_id=p.owner_id AND j.job_key='refresh:'||p.plan_id
+        ORDER BY requested.key
+      )
+    ) WHERE owner_id=? AND command_id=? AND payload_hash=? AND outcome_code='PENDING'
+  `).bind(JSON.stringify(args.planIds), ownerId, ...pendingArgs(context));
+
+  const approved = `SELECT json_extract(d.value,'$.planId') FROM command_receipts r
+    JOIN json_each(r.result_json,'$.rows') d
+    WHERE r.owner_id=? AND r.command_id=? AND r.payload_hash=? AND r.outcome_code='PENDING'
+      AND json_extract(d.value,'$.status')=?`;
+  const retry = db.prepare(`
+    UPDATE estimation_jobs SET status='QUEUED',attempts=0,next_attempt_at=0,lease_until=NULL,last_error=NULL,updated_at=?
+    WHERE owner_id=? AND plan_id IN (${approved}) AND kind='REFRESH_SAMPLE'
+      AND status='FAILED' AND generation>processed_generation
+  `).bind(nowMs, ownerId, ...pendingArgs(context), 'REQUEUED');
+
+  // A delayed observation is not a plan edit. Preserve the journal's historical source boundary.
+  const enqueue = db.prepare(`
+    INSERT INTO estimation_jobs(owner_id,job_key,kind,plan_id,generation,status,created_at,updated_at,source_changed_at)
+    SELECT p.owner_id,'refresh:'||p.plan_id,'REFRESH_SAMPLE',p.plan_id,1,'QUEUED',?,?,
+      max(p.registered_at,p.finished_at,coalesce((
+        SELECT max(server_now_ms) FROM command_receipts e
+        WHERE e.owner_id=p.owner_id AND e.plan_id=p.plan_id AND e.outcome_code='OK'
+          AND (e.command_type IN ('StartPlan','ResumePlan','PausePlan','FinishPlan','DeletePlan','RestorePlan','SetStepStatus')
+            OR (e.command_type='UpdatePlanMetadata' AND (json_type(e.payload_json,'$.title') IS NOT NULL
+              OR json_type(e.payload_json,'$.description') IS NOT NULL
+              OR json_type(e.payload_json,'$.acceptanceCriteria') IS NOT NULL)))
+      ),0))
+    FROM plans p WHERE p.owner_id=? AND p.plan_id IN (${approved})
+  `).bind(nowMs, nowMs, ownerId, ...pendingArgs(context), 'QUEUED');
+  const finalize = db.prepare(`
+    UPDATE command_receipts SET outcome_code='OK',recorded_at=?
+    WHERE owner_id=? AND command_id=? AND payload_hash=? AND outcome_code='PENDING'
+  `).bind(nowMs, ...pendingArgs(context));
+  return commitResult(context, [reserveCommand(context), recordDecisions, retry, enqueue, finalize]);
 }
 
 async function createSnapshot(db, ownerId, args, nowMs, clock) {
@@ -1089,10 +1158,11 @@ async function readModelFile(db, ownerId, args, nowMs) {
 async function executeAtlmRevisionTool(db, identity, name, args, nowMs, clock) {
   validateTool(name, args);
   const { ownerId } = identity;
-  const writes = (name === 'CreateTrainingSnapshot' && args.mode === 'create')
+  const writes = (name === 'CreateTrainingSnapshot' && args.mode !== 'read')
     || ['SaveDatasetRevision', 'RegisterModelRevision', 'ActivateModelRevision'].includes(name);
   if (writes) await ensureOwner(db, identity, nowMs);
   if (name === 'CreateTrainingSnapshot') {
+    if (args.mode === 'repair') return repairSnapshotSources(db, ownerId, args, nowMs);
     return args.mode === 'create'
       ? createSnapshot(db, ownerId, args, nowMs, clock)
       : readRevisionEntity(db, ownerId, 'SNAPSHOT', args, nowMs);
@@ -1118,4 +1188,7 @@ async function executeAtlmRevisionTool(db, identity, name, args, nowMs, clock) {
   }, registerModel);
 }
 
-export { ATLM_REVISION_LIMITS, ATLM_REVISION_TEACHER_RECIPE_IDS, ATLM_REVISION_TOOL_SCHEMAS, executeAtlmRevisionTool };
+export {
+  ATLM_REVISION_LIMITS, ATLM_REVISION_TEACHER_RECIPE_IDS, ATLM_REVISION_TOOL_SCHEMAS,
+  ATLM_TRAINING_REPAIR_MAX_PLANS, executeAtlmRevisionTool,
+};

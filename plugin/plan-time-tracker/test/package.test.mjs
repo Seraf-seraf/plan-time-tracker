@@ -27,7 +27,7 @@ test("portable package has one manifest with the marketplace identity without de
   assert.ok(existsSync(join(pluginRoot, "skills/assess-task/SKILL.md")));
   assert.ok(existsSync(join(pluginRoot, "skills/train-model/SKILL.md")));
   assert(extension.interface.capabilities.includes("Локальное обучение ATLM"));
-  assert.equal(manifest.version, "0.10.0");
+  assert.equal(manifest.version, "0.10.1");
   const site = join(repositoryRoot, "sites/plan-time-tracker");
   const lock = readJson(join(site, "package-lock.json"));
   assert.equal(readJson(join(site, "package.json")).version, manifest.version);
