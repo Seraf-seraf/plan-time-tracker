@@ -19,11 +19,14 @@ import {
 } from '../worker/atlm/model.js';
 import {
   ATLM_TEACHER_CODE_PATHS,
-  ATLM_TEACHER_TRAINER_VERSION,
+  ATLM_TEACHER_PROTOCOL_V2,
   atlmTeacherCase,
   atlmTeacherFitReference,
   atlmTeacherHoldoutCase,
   atlmTeacherIssuedCase,
+  atlmTeacherPlannedExclusion,
+  atlmTeacherProtocolVersion,
+  atlmTeacherRollingCase,
   atlmTeacherRollingHistory,
   buildAtlmTeacherSplit,
   parseAtlmTeacherRecipe,
@@ -86,10 +89,7 @@ async function codeReference() {
   return { digest: 'sha256:' + (await hashCommandInput(files)), files };
 }
 
-async function replayDevelopment(fitRows, historyFor) {
-  // Each cache lives for one immutable dataset, recipe and fit roster.
-  const baseCache = Object.create(null);
-  const policyCache = Object.create(null);
+async function replayDevelopment(fitRows, historyFor, baseCache, policyCache) {
   const cases = [];
   for (const target of fitRows) {
     const replay = await atlmReplayPolicyCase(target, historyFor, baseCache, policyCache);
@@ -145,22 +145,56 @@ async function fitDevelopment(fitRows, fitReference, historyFor, replay) {
   };
 }
 
+function replayCaseArguments(item) {
+  return {
+    prediction: item.prediction,
+    trainRowCount: item.trainSampleCount,
+    trainDigest: item.trainDatasetDigest,
+    medianPointMs: item.median.pointMs,
+    fallbackReason: item.prediction.pointEngine === 'MEDIAN'
+      ? (item.decision.selectedEngine === 'MEDIAN' ? item.decision.reason : item.atlm.reason)
+      : item.prediction.hybrid?.fallbackReason ?? null,
+  };
+}
+
+async function replayPlanned(targets, rowsById, historyFor, replay, baseCache, policyCache) {
+  const cases = [];
+  for (const [index, target] of targets.entries()) {
+    const row = rowsById.get(target.sampleId);
+    const features = row.source.plannedFeatures;
+    let item = replay.cases[index];
+    if (!atlmTeacherPlannedExclusion(row.source) && canonical(features) !== canonical(target.features)) {
+      item = await atlmReplayPolicyCase(target, historyFor, baseCache, policyCache, undefined, undefined, features);
+      if (item.status === 'UNAVAILABLE') {
+        throw appError(item.reason, 'Planned replay could not construct a valid case.');
+      }
+    }
+    cases.push(atlmTeacherRollingCase(row, 'PLANNED', replayCaseArguments(item)));
+  }
+  return cases;
+}
+
 async function train(dataset, trainingRows, recipe, input, codeRef) {
   const protocol = buildAtlmTeacherSplit(dataset, trainingRows, recipe);
+  const protocolVersion = atlmTeacherProtocolVersion(recipe);
+  const fullFit = protocolVersion === ATLM_TEACHER_PROTOCOL_V2;
   const {
-    split, rowDecisions, selectedRowIds, fitRowIds, holdoutRowIds, purgedRowIds, trainCutoff,
+    split, rowDecisions, selectedRowIds, fitRowIds, holdoutRowIds = [], purgedRowIds = [], trainCutoff,
   } = protocol;
   const rowsById = new Map(dataset.rows.map((row) => [row.rowId, row]));
   const fitIds = new Set(fitRowIds);
   const fitRows = trainingRows.filter((row) => fitIds.has(row.sampleId));
   const fitReference = await atlmTeacherFitReference(fitRows);
   const holdoutRows = holdoutRowIds.map((rowId) => rowsById.get(rowId));
-  progress('SPLIT', {
+  progress(fullFit ? 'ROSTER' : 'SPLIT', fullFit ? {
+    selectedCount: selectedRowIds.length, fitCount: fitRows.length,
+  } : {
     selectedCount: selectedRowIds.length, fitCount: fitRows.length,
     holdoutCount: holdoutRows.length, purgedCount: purgedRowIds.length,
     holdoutReason: split.holdoutReason,
   });
   let replay = { baseCases: [], cases: [] };
+  let plannedCases = [];
   let fitted = {
     fit: { status: 'UNAVAILABLE', reason: 'DATASET_LIMIT_REACHED', limit: ATLM_MAX_ROWS },
     calibration: null,
@@ -168,8 +202,15 @@ async function train(dataset, trainingRows, recipe, input, codeRef) {
   const overFitLimit = fitRows.length > ATLM_MAX_ROWS;
   if (!overFitLimit) {
     const historyFor = atlmTeacherRollingHistory(protocol, fitRows);
+    const historyTimes = new Map(rowDecisions.map((row) => [row.rowId, row.historicalAvailableAt]));
+    const targets = fullFit ? fitRows.map((row) => ({
+      ...row, sourceAvailableAt: historyTimes.get(row.sampleId) ?? row.sourceAvailableAt,
+    })) : fitRows;
+    const baseCache = Object.create(null);
+    const policyCache = Object.create(null);
     progress('REPLAY', { caseCount: fitRows.length });
-    replay = await replayDevelopment(fitRows, historyFor);
+    replay = await replayDevelopment(targets, historyFor, baseCache, policyCache);
+    if (fullFit) plannedCases = await replayPlanned(targets, rowsById, historyFor, replay, baseCache, policyCache);
     progress('FIT', { sampleCount: fitRows.length });
     fitted = await fitDevelopment(fitRows, fitReference, historyFor, replay);
   }
@@ -181,57 +222,63 @@ async function train(dataset, trainingRows, recipe, input, codeRef) {
     throw appError('FIT_ROSTER_MISMATCH', 'The artifact differs from the frozen fit roster.');
   }
   const holdoutReason = split.holdoutReason ?? (artifact ? null : fit.reason);
+  const actualCase = (rowId, args) => {
+    const row = rowsById.get(rowId);
+    return fullFit
+      ? atlmTeacherRollingCase(row, 'ACTUAL', args)
+      : atlmTeacherCase(row, { ...args, featureBasis: 'ACTUAL' });
+  };
   const rollingCases = overFitLimit
-    ? fitRowIds.map((rowId) => atlmTeacherCase(rowsById.get(rowId), {
-      featureBasis: 'ACTUAL', prediction: fit,
-    }))
-    : replay.cases.map((item) => atlmTeacherCase(rowsById.get(item.sampleId), {
-      featureBasis: 'ACTUAL',
-      prediction: item.prediction,
-      trainRowCount: item.trainSampleCount,
-      trainDigest: item.trainDatasetDigest,
-      medianPointMs: item.median.pointMs,
-      fallbackReason: item.prediction.pointEngine === 'MEDIAN'
-        ? (item.decision.selectedEngine === 'MEDIAN' ? item.decision.reason : item.atlm.reason)
-        : item.prediction.hybrid?.fallbackReason ?? null,
-    }));
+    ? fitRowIds.map((rowId) => actualCase(rowId, { prediction: fit }))
+    : replay.cases.map((item) => actualCase(item.sampleId, replayCaseArguments(item)));
+  if (fullFit && overFitLimit) {
+    plannedCases = fitRowIds.map((rowId) =>
+      atlmTeacherRollingCase(rowsById.get(rowId), 'PLANNED', { prediction: fit }));
+  }
   const holdoutMode = (basis) => summarizeAtlmTeacherMode(
     holdoutRows.map((row) => atlmTeacherHoldoutCase(row, basis, artifact, fitReference, holdoutReason)),
     { reason: holdoutReason },
   );
   const evaluation = {
     schemaVersion: 1,
-    protocolVersion: 1,
+    protocolVersion,
     metric: 'PLAN_ACTIVE',
     unit: 'ms',
     split,
     modes: {
-      ROLLING_GROUPED_ACTUAL: summarizeAtlmTeacherMode(rollingCases, {
-        reason: overFitLimit ? fit.reason : null,
+      ...(fullFit ? {
+        ROLLING_PLAN_ACTUAL: summarizeAtlmTeacherMode(rollingCases, {
+          includeGroups: false, reason: overFitLimit ? fit.reason : null,
+        }),
+        ROLLING_PLAN_PLANNED: summarizeAtlmTeacherMode(plannedCases, {
+          includeGroups: false, reason: overFitLimit ? fit.reason : null,
+        }),
+      } : {
+        ROLLING_GROUPED_ACTUAL: summarizeAtlmTeacherMode(rollingCases, {
+          reason: overFitLimit ? fit.reason : null,
+        }),
+        INTERNAL_HOLDOUT_ACTUAL: holdoutMode('ACTUAL'),
+        INTERNAL_HOLDOUT_PLANNED: holdoutMode('PLANNED'),
       }),
-      INTERNAL_HOLDOUT_ACTUAL: holdoutMode('ACTUAL'),
-      INTERNAL_HOLDOUT_PLANNED: holdoutMode('PLANNED'),
       ISSUED_FORECASTS: summarizeAtlmTeacherMode(
-        selectedRowIds.map((rowId) => atlmTeacherIssuedCase(rowsById.get(rowId))),
-        { includeMedian: false },
+        selectedRowIds.map((rowId) => atlmTeacherIssuedCase(rowsById.get(rowId), { includeGroups: !fullFit })),
+        { includeMedian: false, includeGroups: !fullFit },
       ),
     },
     rowDecisions,
   };
   const provenance = {
-    trainerVersion: ATLM_TEACHER_TRAINER_VERSION,
+    trainerVersion: protocolVersion,
     codeRef,
-    recipeDigest: input.recipeDigest,
+    recipeDigest: fullFit ? 'sha256:' + (await hashCommandInput(recipe)) : input.recipeDigest,
     configuration: recipe,
     selectedRowIds,
     fitRowIds,
-    holdoutRowIds,
-    purgedRowIds,
     trainCutoff,
-    holdoutCutoff: split.holdoutCutoff,
-    groups: split.groups,
-    holdoutUse: split.holdoutUse,
-    holdoutUseNote: split.holdoutUseNote,
+    ...(fullFit
+      ? { backtestUse: split.backtestUse, backtestUseNote: split.backtestUseNote }
+      : { holdoutRowIds, purgedRowIds, holdoutCutoff: split.holdoutCutoff, groups: split.groups,
+        holdoutUse: split.holdoutUse, holdoutUseNote: split.holdoutUseNote }),
   };
   const files = {
     'evaluation.json': jsonFile(evaluation),
@@ -359,7 +406,7 @@ async function main(args) {
       datasetDigest,
       recipeId: recipe.recipeId,
       recipeDigest: sha256(recipeBytes),
-      trainerVersion: ATLM_TEACHER_TRAINER_VERSION,
+      trainerVersion: atlmTeacherProtocolVersion(recipe),
       codeDigest: codeRef.digest,
       method: ATLM_METHOD,
       runtime: { node: process.versions.node, platform: process.platform, arch: process.arch },

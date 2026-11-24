@@ -181,7 +181,7 @@ async function activate(c, modelRevisionId, expectedActiveModelRevisionId, expec
   });
 }
 
-test('built MCP transfers a frozen dataset through the local CLI, registers, activates, and rolls back a model', async t => {
+test('built MCP transfers an ungrouped dataset through the v2 CLI, registers, activates, and rolls back a model', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'atlm-agent-flow-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const c = context();
@@ -208,13 +208,13 @@ test('built MCP transfers a frozen dataset through the local CLI, registers, act
   assert.equal(original.modelRevisionId, incumbentId);
   assert.equal(original.status, 'AVAILABLE');
 
-  const actualByPlan = new Map(incumbentSources.map((recorded, index) => [recorded.planId,
-    { recorded, task: baselineTask, group: 'incumbent-source-' + index }]));
+  const actualByPlan = new Map(incumbentSources.map((recorded) => [recorded.planId,
+    { recorded, task: baselineTask }]));
   for (let index = 0; index < completedPlanCount; index++) {
     const task = taskV4();
     task.reuseLevel = index % 4;
     const recorded = await completed(c, 'Completed case ' + index, 10_000 + task.reuseLevel * 2000 + index, task, true);
-    actualByPlan.set(recorded.planId, { recorded, task, group: 'group-' + index });
+    actualByPlan.set(recorded.planId, { recorded, task });
   }
   assert.equal((await modelList(c)).rows.length, 1);
   const commandId = crypto.randomUUID();
@@ -228,7 +228,7 @@ test('built MCP transfers a frozen dataset through the local CLI, registers, act
     const actual = actualByPlan.get(row.planId);
     if (!actual) return { rowId: row.rowId, groupId: null, eligibility: 'EXCLUDED', reasons: ['OUTSIDE_FIXTURE_COHORT'], annotation: null };
     assert.equal(row.source.actualMs, actual.recorded.actualMs);
-    const annotation = teacherAnnotation(row.rowId, actual.group);
+    const annotation = teacherAnnotation(row.rowId, null);
     annotation.annotation.agentTask = actual.task;
     return annotation;
   });
@@ -246,12 +246,15 @@ test('built MCP transfers a frozen dataset through the local CLI, registers, act
   assert.equal(datasetFile.sha256, datasetDigest);
 
   const recipePath = join(directory, 'recipe.json');
-  await writeFile(recipePath, JSON.stringify({ schemaVersion: 1, recipeId: 'atlm-teacher-hybrid-v1',
-    datasetRevisionId, datasetDigest, selection: { mode: 'ALL_ELIGIBLE' }, holdoutUse: 'UNKNOWN',
-    holdoutUseNote: 'No prior evaluation history was supplied for this synthetic run.' }));
+  await writeFile(recipePath, JSON.stringify({ schemaVersion: 1, recipeId: 'atlm-teacher-hybrid-v2',
+    datasetRevisionId, datasetDigest, selection: { mode: 'ALL_ELIGIBLE' }, backtestUse: 'UNKNOWN',
+    backtestUseNote: 'No prior evaluation history was supplied for this synthetic run.' }));
   const result = cli('train-atlm.mjs', ['--dataset', datasetPath, '--recipe', recipePath, '--out', join(directory, 'fit')]);
   assert.equal(result.status, 'READY');
   const bundle = JSON.parse(await readFile(result.registrationPath, 'utf8'));
+  assert.equal(bundle.artifact.n, actualByPlan.size);
+  assert.deepEqual(bundle.provenance.fitRowIds, bundle.provenance.selectedRowIds);
+  assert.equal(bundle.evaluation.protocolVersion, 2);
   const unsupportedPath = join(directory, 'unsupported-bundle.json');
   await writeFile(unsupportedPath, JSON.stringify({ ...bundle, schemaVersion: bundle.schemaVersion + 1 }));
   const unsupportedArgs = await upload(c, modelTool, { datasetRevisionId }, unsupportedPath);
@@ -286,6 +289,8 @@ test('built MCP transfers a frozen dataset through the local CLI, registers, act
   assert.equal(registered.activationVersion, 1);
   assert.equal(registered.rows.filter(row => row.modelRevisionId === modelRevisionId).length, 1);
   const detail = await revision(c, revisionsTool, { view: 'detail', modelRevisionId });
+  assert(detail.evidence.some(row => row.kind === 'ROLLING_PLAN_ACTUAL'));
+  assert(detail.evidence.some(row => row.kind === 'ROLLING_PLAN_PLANNED'));
   const issuedReport = detail.evidence.find(row => row.kind === 'ISSUED_FORECASTS' && row.source === 'evaluation');
   const evidenceQuery = new URLSearchParams({ source: 'evaluation', evidenceId: issuedReport.evidenceId });
   const evidencePage = await call(c, `/api/tracker/model-revisions/${modelRevisionId}/evidence/cases?${evidenceQuery}`);

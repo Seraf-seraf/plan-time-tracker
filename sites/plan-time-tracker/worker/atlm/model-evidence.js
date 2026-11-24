@@ -4,7 +4,7 @@ import {
 import { summarizeAtlmV4Metrics } from './model.js';
 import { readAtlmSampleRefreshStatus } from './sample-refresh.js';
 import { readAtlmServingState } from './serving.js';
-import { ATLM_TEACHER_MODES } from './teacher-dataset.js';
+import { ATLM_TEACHER_MODES, ATLM_TEACHER_MODES_V2, ATLM_TEACHER_PROTOCOL_V2 } from './teacher-dataset.js';
 
 const MODEL_EVIDENCE_PAGE_MAX = 50;
 const DEFAULT_PAGE_SIZE = 20;
@@ -318,17 +318,24 @@ async function evaluationEntries(db, ownerId, revision) {
   const et = [];
   let trainingEvaluation = null;
   if (report.schemaVersion === 1 && report.modes && typeof report.modes === 'object') {
-    for (const kind of ATLM_TEACHER_MODES) {
+    const perPlan = report.protocolVersion === ATLM_TEACHER_PROTOCOL_V2;
+    const kinds = perPlan ? ATLM_TEACHER_MODES_V2 : ATLM_TEACHER_MODES;
+    for (const kind of kinds) {
       const mode = report.modes[kind];
       if (!mode || !mode.summary) continue;
       const summary = {
-        rowCount: mode.summary.rowCount, groupCount: mode.summary.groupCount,
+        rowCount: mode.summary.rowCount,
+        ...(!perPlan ? { groupCount: mode.summary.groupCount } : {}),
         excludedFromScoringCount: mode.summary.excludedFromScoringCount,
         forecastAvailability: availability(mode.summary.forecastAvailability?.numerator, mode.summary.forecastAvailability?.denominator),
         intervalAvailability: availability(mode.summary.intervalAvailability?.numerator, mode.summary.intervalAvailability?.denominator),
         metrics: safeMetrics(mode.summary.metrics),
       };
-      et.push({ kind, status: mode.status, reason: evidenceCode(mode.reason, null), summary, cases: mode.cases ?? [] });
+      const paired = perPlan && Array.isArray(mode.paired?.rowIds) ? {
+        rowCount: mode.paired.rowIds.length, candidate: safeMetrics(mode.paired.candidate),
+        median: safeMetrics(mode.paired.median),
+      } : undefined;
+      et.push({ kind, status: mode.status, reason: evidenceCode(mode.reason, null), summary, paired, cases: mode.cases ?? [] });
     }
   } else if (report.all && Array.isArray(report.cases) && report.unit === 'minutes') {
     const cases = report.cases.map(item => ({ ...item, pointMs: item.revised?.pointMs ?? null }));
@@ -365,6 +372,7 @@ async function evaluationEntries(db, ownerId, revision) {
       kind: entry.kind, origin: revision.origin, source: 'evaluation', modelRevisionId: revision.modelRevisionId,
       status: entry.status, asOf: revision.trainedAt ?? revision.registeredAt,
       sourceDataVersion: row.source_data_version ?? null, summary: entry.summary,
+      ...(entry.paired ? { paired: entry.paired } : {}),
       limitations: [entry.reason, !entry.cases.length && entry.summary.rowCount ? 'CASES_NOT_RECORDED' : null].filter(Boolean),
     },
   })));

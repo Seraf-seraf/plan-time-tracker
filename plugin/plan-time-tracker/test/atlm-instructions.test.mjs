@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { parseAtlmTeacherRecipe } from '../../../sites/plan-time-tracker/worker/atlm/teacher-dataset.js';
 import { call, context, mcp, ok, PLAN } from '../../../sites/plan-time-tracker/test/fixtures/tracker-db.mjs';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -88,6 +89,13 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     assert.equal(registry.schemaVersion, 1);
     assert.equal(registry.trainingExecution, 'LOCAL');
     assert.equal(registry.activation, 'EXPLICIT');
+    assert.match(train, /registry\.teacherRecipeIds/u);
+    const recipeSection = train.split('## Локальный рецепт и проверка\n')[1];
+    const recipe = JSON.parse(recipeSection.match(/```json\n([\s\S]*?)```/u)[1]);
+    assert.equal(recipe.recipeId, 'atlm-teacher-hybrid-v2');
+    assert.ok(registry.teacherRecipeIds.includes(recipe.recipeId));
+    assert.deepEqual(recipe.selection, { mode: 'ALL_ELIGIBLE' });
+    assert.deepEqual(parseAtlmTeacherRecipe(recipe, recipe.datasetRevisionId, recipe.datasetDigest), recipe);
     const listing = (await call(c, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }))
       .value.result.tools;
     const entries = [...train.matchAll(/^\| `([^`]+)` \|/gm)].map(([, name]) => name);

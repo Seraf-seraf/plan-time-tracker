@@ -50,14 +50,20 @@ export const atlmModelOverviewScript = String.raw`
   const number = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
   const signed = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1, signDisplay: 'exceptZero' });
   const millisecondsPerMinute = 60_000;
-  const controls = ['INTERNAL_HOLDOUT_PLANNED', 'INTERNAL_HOLDOUT_ACTUAL', 'ROLLING_GROUPED_ACTUAL', 'ISSUED_FORECASTS'];
+  const rollingPlanControls = ['ROLLING_PLAN_PLANNED', 'ROLLING_PLAN_ACTUAL'];
+  const controls = [...rollingPlanControls, 'INTERNAL_HOLDOUT_PLANNED', 'INTERNAL_HOLDOUT_ACTUAL',
+    'ROLLING_GROUPED_ACTUAL', 'ISSUED_FORECASTS'];
   const evidenceNames = {
+    ROLLING_PLAN_PLANNED: 'Проверка на истории по исходным признакам',
+    ROLLING_PLAN_ACTUAL: 'Проверка на истории по фактическим признакам',
     ROLLING_GROUPED_ACTUAL: 'Проверка на истории',
     INTERNAL_HOLDOUT_ACTUAL: 'Проверка на отложенной выборке',
     INTERNAL_HOLDOUT_PLANNED: 'Проверка на отложенных планах по исходным признакам',
     ISSUED_FORECASTS: 'Выданные прогнозы',
   };
   const methodologies = {
+    ROLLING_PLAN_PLANNED: 'Для каждого плана взяты его исходные признаки и только те примеры, которые были доступны до его первого старта. Ошибка считается по планам с подтверждённым неизменным объёмом.',
+    ROLLING_PLAN_ACTUAL: 'Для каждого плана взяты признаки выполненной работы. История для расчёта прогноза содержит только примеры, доступные до его первого старта. Эта проверка помогает выбрать метод для финального обучения.',
     ROLLING_GROUPED_ACTUAL: 'Модель переобучалась на каждом шаге. Ошибки измерены на следующих по времени задачах по восстановленным фактическим признакам.',
     INTERNAL_HOLDOUT_ACTUAL: 'Сохранённая модель проверена на отложенных группах по восстановленным фактическим признакам.',
     INTERNAL_HOLDOUT_PLANNED: 'Сохранённая модель проверена на отложенных планах с неизменившимся объёмом. Использованы исходные признаки до первого старта.',
@@ -358,6 +364,10 @@ export const atlmModelOverviewScript = String.raw`
     setBusy(report, Boolean(requests.has('detail')));
     const evidence = currentEvidence();
     const options = controlEntries();
+    const perPlanProtocol = options.some((item) => rollingPlanControls.includes(item.kind));
+    if (perPlanProtocol && Number.isFinite(detail.revision?.fitCount)) {
+      selection.append(element('p', 'Планов в финальном обучении ' + count(detail.revision.fitCount), 'model-muted'));
+    }
     const picker = get('report-picker');
     const wasOnPicker = document.activeElement === picker;
     get('report-field').hidden = source !== 'evaluation' || !options.length;
@@ -383,7 +393,7 @@ export const atlmModelOverviewScript = String.raw`
       const metrics = summary.metrics ?? {};
       report.append(element('h4', evidenceName(evidence)));
       if (summary.rowCount === 0) report.append(element('p', source === 'issued' ? emptyEvidence() : 'В этой проверке нет задач.', 'model-muted'));
-      const groupPart = Number.isFinite(summary.groupCount) ? ', групп ' + count(summary.groupCount) : '';
+      const groupPart = !perPlanProtocol && Number.isFinite(summary.groupCount) ? ', групп ' + count(summary.groupCount) : '';
       report.append(element('p', 'Планов ' + count(summary.rowCount) + groupPart, 'model-muted'));
       const { numerator, denominator } = summary.forecastAvailability ?? {};
       if (denominator > 0 && numerator < denominator) {
@@ -401,6 +411,14 @@ export const atlmModelOverviewScript = String.raw`
       if (evidence.limitations?.includes('CASES_NOT_RECORDED'))
         report.append(element('p', 'Список задач этой проверки не сохранён.', 'model-muted'));
       report.append(summaryMetrics(summary));
+      if (evidence.paired?.rowCount > 0) {
+        const paired = evidence.paired;
+        const comparison = element('dl', null, 'model-parameters');
+        comparison.append(fact('Сопоставимые планы', count(paired.rowCount)),
+          fact('Средняя абсолютная ошибка модели', minutes(paired.candidate?.maeMs)),
+          fact('Средняя абсолютная ошибка медианы', minutes(paired.median?.maeMs)));
+        report.append(element('h5', 'Сравнение на одних и тех же планах'), comparison);
+      }
       get('show-cases').hidden = !summary.rowCount || evidence.limitations?.includes('CASES_NOT_RECORDED');
       get('metrics').hidden = false;
       const method = element('dl', null, 'model-parameters');

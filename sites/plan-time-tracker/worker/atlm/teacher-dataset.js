@@ -22,7 +22,7 @@ const TEACHER_DATASET_CONTRACT = 'atlm-teacher-dataset';
 const TEACHER_EXCEPTIONS = new Set([
   'SCOPE_CHANGED', 'MISSING_FEATURES', 'MISSING_REQUIRED_FEATURES', 'INVALID_FEATURES',
 ]);
-const ANNOTATION_FIELDS = ['scope', 'agentTask', 'fieldEvidence', 'codeEvidence'];
+const ANNOTATION_FIELDS = ['scope', 'agentTask', 'fieldEvidence', 'codeEvidence', 'historicalAvailability'];
 const DECISION_FIELDS = ['rowId', 'groupId', 'eligibility', 'reasons', 'annotation'];
 const EXPORT_FIELDS = ['schemaVersion', 'contract', 'datasetRevisionId', 'snapshotId',
   'parentDatasetRevisionId', 'featureSchemaVersion', 'rows', 'origin', 'provenance'];
@@ -30,6 +30,8 @@ const EXPORTED_ROW_FIELDS = ['rowId', 'planId', 'groupId', 'eligibility', 'reaso
   'annotation', 'source', 'features', 'record', 'annotationOrigin', 'annotationRecordedAt'];
 const ATLM_TEACHER_TRAINER_VERSION = 1;
 const ATLM_TEACHER_RECIPE_ID = 'atlm-teacher-hybrid-v1';
+const ATLM_TEACHER_PROTOCOL_V2 = 2;
+const ATLM_TEACHER_RECIPE_ID_V2 = 'atlm-teacher-hybrid-v2';
 const ATLM_TEACHER_CODE_PATHS = Object.freeze([
   'scripts/train-atlm.mjs',
   'worker/atlm/model.js',
@@ -42,6 +44,12 @@ const ATLM_TEACHER_MODES = Object.freeze([
   'INTERNAL_HOLDOUT_PLANNED',
   'ISSUED_FORECASTS',
 ]);
+const ATLM_TEACHER_MODES_V2 = Object.freeze([
+  'ROLLING_PLAN_ACTUAL',
+  'ROLLING_PLAN_PLANNED',
+  'ISSUED_FORECASTS',
+]);
+const REVIEW_DECLARATIONS = new Set(['UNKNOWN', 'FIRST_REPORTED', 'REUSED_AFTER_REVIEW']);
 const HOLDOUT_FRACTION = 0.2;
 const MIN_HOLDOUT_ROWS = 5;
 const MIN_HOLDOUT_GROUPS = 2;
@@ -82,6 +90,14 @@ function normalizedAnnotation(annotation, rowId) {
     || !recordedEvidence(annotation.fieldEvidence) || !recordedEvidence(annotation.codeEvidence)) {
     throw datasetError('Teacher annotation requires ACTUAL scope and field/code evidence.', rowId);
   }
+  if (Object.hasOwn(annotation, 'historicalAvailability')) {
+    const availability = annotation.historicalAvailability;
+    if (!hasExactFields(availability, ['availableAt', 'evidence'])
+      || (availability.availableAt !== null && !isNonnegativeSafeInteger(availability.availableAt))
+      || typeof availability.evidence !== 'string' || !availability.evidence.trim()) {
+      throw datasetError('Historical availability requires a timestamp or null and evidence.', rowId);
+    }
+  }
   const result = normalizeAgentTask(annotation.agentTask);
   if (result.missingFields.length) {
     throw datasetError('Teacher annotation is missing required features.', rowId);
@@ -116,7 +132,7 @@ function mergeAtlmTeacherAnnotations(snapshotRows, decisions) {
     if (!decision || !byId.delete(rowId)) {
       throw datasetError('Missing member of teacher decision roster.', rowId);
     }
-    const { eligibility, groupId, annotation } = decision;
+    const { eligibility, groupId = null, annotation } = decision;
     const reasons = reasonList(decision.reasons, rowId);
     if ((groupId !== null && !validId(groupId)) || !['ELIGIBLE', 'EXCLUDED'].includes(eligibility)) {
       throw datasetError('Invalid group or teacher eligibility.', rowId);
@@ -127,9 +143,7 @@ function mergeAtlmTeacherAnnotations(snapshotRows, decisions) {
         annotation: annotation === null ? null : normalizedAnnotation(annotation, rowId).annotation,
         source, features: null };
     }
-    if (!validId(groupId) || reasons.length) {
-      throw datasetError('An eligible row requires a group and no exclusion reasons.', rowId);
-    }
+    if (reasons.length) throw datasetError('An eligible row cannot have exclusion reasons.', rowId);
     if (!fitSourceValid(source, planId) || rawReasons.some((reason) => !TEACHER_EXCEPTIONS.has(reason))) {
       throw datasetError('Teacher eligibility requires a verified completed source.', rowId);
     }
@@ -150,7 +164,7 @@ function buildAtlmTeacherTrainingRows(rows, selectedRowIds) {
   const result = [];
   for (const row of rows) {
     exactFields(row, EXPORTED_ROW_FIELDS, 'Unexpected export row field.', row?.rowId);
-    const { rowId, planId, groupId, eligibility, source, features } = row;
+    const { rowId, planId, groupId = null, eligibility, source, features } = row;
     if (!validId(rowId) || !validId(planId) || seenRows.has(rowId) || seenPlans.has(planId)) {
       throw datasetError('Invalid or duplicate plan or row identity.', rowId);
     }
@@ -165,7 +179,7 @@ function buildAtlmTeacherTrainingRows(rows, selectedRowIds) {
       if (row.annotation !== null) normalizedAnnotation(row.annotation, rowId);
       continue;
     }
-    if (eligibility !== 'ELIGIBLE' || reasons.length || !validId(groupId) || !fitSourceValid(source, planId)) {
+    if (eligibility !== 'ELIGIBLE' || reasons.length || !fitSourceValid(source, planId)) {
       throw datasetError('Invalid eligible source or decision.', rowId);
     }
     const normalized = normalizedAnnotation(row.annotation, rowId);
@@ -196,7 +210,7 @@ function readAtlmTeacherDataset(value) {
   return { dataset: value, trainingRows: buildAtlmTeacherTrainingRows(value.rows) };
 }
 
-function exactRecipeFields(value, fields) {
+function hasExactFields(value, fields) {
   return isPlainRecord(value) && Object.keys(value).length === fields.length
     && fields.every((key) => Object.hasOwn(value, key));
 }
@@ -205,15 +219,25 @@ function recipeError(code, message, details) {
   return appError(code, message, 400, details);
 }
 
+function atlmTeacherProtocolVersion(recipe) {
+  return recipe?.recipeId === ATLM_TEACHER_RECIPE_ID_V2
+    ? ATLM_TEACHER_PROTOCOL_V2 : ATLM_TEACHER_TRAINER_VERSION;
+}
+
 function parseAtlmTeacherRecipe(recipe, datasetRevisionId, datasetDigest) {
-  if (!exactRecipeFields(recipe, [
+  const planBased = atlmTeacherProtocolVersion(recipe) === ATLM_TEACHER_PROTOCOL_V2;
+  const useField = planBased ? 'backtestUse' : 'holdoutUse';
+  const noteField = planBased ? 'backtestUseNote' : 'holdoutUseNote';
+  if (!hasExactFields(recipe, [
     'schemaVersion', 'recipeId', 'datasetRevisionId', 'datasetDigest', 'selection',
-    'holdoutUse', 'holdoutUseNote',
-  ]) || recipe.schemaVersion !== ATLM_DATASET_VERSION || recipe.recipeId !== ATLM_TEACHER_RECIPE_ID
+    useField, noteField,
+  ]) || recipe.schemaVersion !== ATLM_DATASET_VERSION
+    || (!planBased && recipe.recipeId !== ATLM_TEACHER_RECIPE_ID)
     || !validId(recipe.datasetRevisionId) || !isSnapshotDigest(recipe.datasetDigest)
-    || !['UNKNOWN', 'FIRST_REPORTED', 'REUSED_AFTER_REVIEW'].includes(recipe.holdoutUse)
-    || typeof recipe.holdoutUseNote !== 'string' || !recipe.holdoutUseNote.trim()) {
-    throw recipeError('INVALID_RECIPE', 'Invalid recipe version, fields, or holdout declaration.');
+    || !REVIEW_DECLARATIONS.has(recipe[useField])
+    || typeof recipe[noteField] !== 'string' || !recipe[noteField].trim()) {
+    const declaration = planBased ? 'backtest' : 'holdout';
+    throw recipeError('INVALID_RECIPE', `Invalid recipe version, fields, or ${declaration} declaration.`);
   }
   if (recipe.datasetRevisionId !== datasetRevisionId) {
     throw recipeError('DATASET_REVISION_MISMATCH', 'Recipe dataset identity differs from the export.');
@@ -222,8 +246,9 @@ function parseAtlmTeacherRecipe(recipe, datasetRevisionId, datasetDigest) {
     throw recipeError('DATASET_DIGEST_MISMATCH', 'Recipe digest differs from the dataset bytes.');
   }
   const selection = recipe.selection;
-  if (selection?.mode === 'ALL_ELIGIBLE' && exactRecipeFields(selection, ['mode'])) return recipe;
-  if (selection?.mode !== 'EXPLICIT' || !exactRecipeFields(selection, ['mode', 'rowIds'])
+  if (selection?.mode === 'ALL_ELIGIBLE' && hasExactFields(selection, ['mode'])) return recipe;
+  if (planBased) throw recipeError('INVALID_RECIPE', 'This recipe requires selection of all eligible rows.');
+  if (selection?.mode !== 'EXPLICIT' || !hasExactFields(selection, ['mode', 'rowIds'])
     || !Array.isArray(selection.rowIds)) {
     throw recipeError('INVALID_RECIPE', 'Invalid selection mode or fields.');
   }
@@ -251,10 +276,14 @@ function selectedTeacherGroups(dataset, trainingRows, selection) {
       const code = allRows.has(rowId) ? 'SELECTED_ROW_INELIGIBLE' : 'SELECTED_ROW_UNKNOWN';
       throw recipeError(code, 'A selected row must belong to the eligible roster.', { rowId });
     }
+    const row = allRows.get(rowId);
+    if (!validId(row.groupId) || Object.hasOwn(row.annotation ?? {}, 'historicalAvailability')) {
+      throw recipeError('INVALID_GROUPED_ROW', 'The grouped recipe requires a group and legacy annotation.', { rowId });
+    }
   }
   const groups = new Map();
   for (const row of dataset.rows) {
-    if (!eligible.has(row.rowId)) continue;
+    if (!eligible.has(row.rowId) || !validId(row.groupId)) continue;
     let group = groups.get(row.groupId);
     if (!group) {
       group = { groupId: row.groupId, rowIds: [], role: 'FIT',
@@ -302,7 +331,45 @@ function holdoutBoundary(groups, selectedCount) {
   return { cutoff, reason: null };
 }
 
+function historicalAvailability(row) {
+  const { source, annotation, annotationRecordedAt, features } = row;
+  const explicit = annotation.historicalAvailability;
+  if (explicit) {
+    return explicit.availableAt === null ? null : Math.max(source.sourceAvailableAt, explicit.availableAt);
+  }
+  if (source.scopeChanged === false && canonical(source.plannedFeatures) === canonical(features)) {
+    return source.sourceAvailableAt;
+  }
+  if (isNonnegativeSafeInteger(annotationRecordedAt)) {
+    return Math.max(source.sourceAvailableAt, annotationRecordedAt);
+  }
+  return null;
+}
+
+function buildAtlmTeacherPlanProtocol(dataset, trainingRows, recipe) {
+  const fitRowIds = trainingRows.map((row) => row.sampleId);
+  const fitIds = new Set(fitRowIds);
+  const rowDecisions = dataset.rows.map((row) => {
+    const fitted = fitIds.has(row.rowId);
+    return {
+      rowId: row.rowId, planId: row.planId, eligibility: row.eligibility,
+      role: fitted ? 'FIT' : 'EXCLUDED', reasons: row.reasons,
+      historicalAvailableAt: fitted ? historicalAvailability(row) : null,
+    };
+  });
+  const trainCutoff = trainingRows.reduce((cutoff, row) => Math.max(cutoff ?? 0, row.sourceAvailableAt), null);
+  const split = {
+    protocolVersion: ATLM_TEACHER_PROTOCOL_V2,
+    backtestUse: recipe.backtestUse,
+    backtestUseNote: recipe.backtestUseNote,
+  };
+  return { split, rowDecisions, selectedRowIds: fitRowIds, fitRowIds, trainCutoff };
+}
+
 function buildAtlmTeacherSplit(dataset, trainingRows, recipe) {
+  if (atlmTeacherProtocolVersion(recipe) === ATLM_TEACHER_PROTOCOL_V2) {
+    return buildAtlmTeacherPlanProtocol(dataset, trainingRows, recipe);
+  }
   const { groups, selected } = selectedTeacherGroups(dataset, trainingRows, recipe.selection);
   const boundary = holdoutBoundary(groups, selected.size);
   const groupById = new Map(groups.map((group) => [group.groupId, group]));
@@ -355,6 +422,17 @@ async function atlmTeacherFitReference(trainingRows) {
 }
 
 function atlmTeacherRollingHistory(protocol, trainingRows) {
+  if (protocol.split.protocolVersion === ATLM_TEACHER_PROTOCOL_V2) {
+    const availability = new Map(protocol.rowDecisions.map(({ rowId, historicalAvailableAt }) => [
+      rowId, historicalAvailableAt,
+    ]));
+    const history = trainingRows.flatMap((row) => {
+      const availableAt = availability.get(row.sampleId);
+      return availableAt == null ? [] : [{ ...row, sourceAvailableAt: availableAt }];
+    }).sort((a, b) => compareId(a.planId, b.planId) || compareId(a.sampleId, b.sampleId));
+    return (target) => history.filter((row) =>
+      row.planId !== target.planId && row.sourceAvailableAt < target.capturedAt);
+  }
   const groups = protocol.split.groups.filter((group) => group.role === 'FIT');
   const groupByRow = new Map();
   for (const group of groups) for (const rowId of group.rowIds) groupByRow.set(rowId, group);
@@ -443,12 +521,29 @@ function scopeExclusion(source) {
   return source?.scopeChanged === true ? 'SCOPE_CHANGED' : 'SCOPE_CHANGE_UNKNOWN';
 }
 
+function atlmTeacherPlannedExclusion(source) {
+  return scopeExclusion(source) ?? (source.plannedFeatures == null ? 'PLANNED_FEATURES_UNAVAILABLE' : null);
+}
+
+function atlmTeacherRollingCase(row, basis, args) {
+  const scoringExclusionReason = basis === 'PLANNED' ? atlmTeacherPlannedExclusion(row.source) : null;
+  const { groupId, ...result } = atlmTeacherCase(row, {
+    ...args,
+    featureBasis: basis,
+    scoringExclusionReason,
+    ...(scoringExclusionReason === null ? {} : {
+      prediction: { status: 'UNAVAILABLE', reason: scoringExclusionReason },
+      fallbackReason: null,
+      medianPointMs: null,
+    }),
+  });
+  return result;
+}
+
 function atlmTeacherHoldoutCase(row, basis, artifact, fitReference, reason = null) {
   const planned = basis === 'PLANNED';
   const source = row.source;
-  const scoringExclusionReason = planned
-    ? scopeExclusion(source) ?? (source.plannedFeatures == null ? 'PLANNED_FEATURES_UNAVAILABLE' : null)
-    : null;
+  const scoringExclusionReason = planned ? atlmTeacherPlannedExclusion(source) : null;
   const unavailable = scoringExclusionReason ?? reason ?? 'ARTIFACT_UNAVAILABLE';
   const prediction = artifact && scoringExclusionReason === null
     ? predictAtlm(artifact, planned ? source.plannedFeatures : row.features)
@@ -463,7 +558,7 @@ function atlmTeacherHoldoutCase(row, basis, artifact, fitReference, reason = nul
   });
 }
 
-function atlmTeacherIssuedCase(row) {
+function atlmTeacherIssuedCase(row, { includeGroups = true } = {}) {
   const source = row.source;
   const issued = source?.issuedPrediction;
   const issuedAt = isNonnegativeSafeInteger(issued?.calculatedAt) ? issued.calculatedAt : null;
@@ -478,12 +573,14 @@ function atlmTeacherIssuedCase(row) {
     reason: issued.reason ?? (issued.status === 'AVAILABLE' && !pointRecorded
       ? 'INVALID_ISSUED_POINT' : null),
   } : { status: 'UNAVAILABLE', reason: 'ISSUED_FORECAST_NOT_RECORDED' };
-  return {
+  const result = {
     ...atlmTeacherCase(row, { featureBasis: 'ISSUED', prediction, scoringExclusionReason }),
     issuedModelId: issued?.modelId ?? null,
     issuedModelRevision: issued?.modelRevisionId ?? issued?.modelRevision ?? null,
     issuedAt,
   };
+  if (!includeGroups) delete result.groupId;
+  return result;
 }
 
 function atlmTeacherMedianMetrics(cases) {
@@ -493,14 +590,14 @@ function atlmTeacherMedianMetrics(cases) {
   })));
 }
 
-function summarizeAtlmTeacherMode(cases, { reason = null, includeMedian = true } = {}) {
+function summarizeAtlmTeacherMode(cases, { reason = null, includeMedian = true, includeGroups = true } = {}) {
   const comparable = cases.filter((item) => item.scoringExclusionReason === null);
   const paired = includeMedian && !reason
     ? comparable.filter((item) => item.pointMs !== null && item.medianPointMs !== null) : [];
   const noMetric = reason !== null || comparable.length === 0;
   const summary = {
     rowCount: cases.length,
-    groupCount: new Set(cases.map((item) => item.groupId)).size,
+    ...(includeGroups ? { groupCount: new Set(cases.map((item) => item.groupId)).size } : {}),
     excludedFromScoringCount: cases.length - comparable.length,
     forecastAvailability: {
       numerator: cases.filter((item) => item.pointMs !== null).length,
@@ -521,7 +618,7 @@ function summarizeAtlmTeacherMode(cases, { reason = null, includeMedian = true }
     median: includeMedian && !noMetric ? atlmTeacherMedianMetrics(comparable) : null,
     paired: paired.length ? {
       rowIds: paired.map((item) => item.rowId),
-      groupCount: new Set(paired.map((item) => item.groupId)).size,
+      ...(includeGroups ? { groupCount: new Set(paired.map((item) => item.groupId)).size } : {}),
       candidate: summarizeAtlmV4Metrics(paired),
       median: atlmTeacherMedianMetrics(paired),
     } : null,
@@ -532,7 +629,9 @@ function summarizeAtlmTeacherMode(cases, { reason = null, includeMedian = true }
 export {
   ATLM_DATASET_VERSION, TEACHER_ANNOTATIONS_CONTRACT, TEACHER_DATASET_CONTRACT,
   ATLM_TEACHER_TRAINER_VERSION, ATLM_TEACHER_RECIPE_ID, ATLM_TEACHER_CODE_PATHS, ATLM_TEACHER_MODES,
+  ATLM_TEACHER_PROTOCOL_V2, ATLM_TEACHER_RECIPE_ID_V2, ATLM_TEACHER_MODES_V2,
   buildAtlmTeacherTrainingRows, mergeAtlmTeacherAnnotations, readAtlmTeacherDataset,
-  parseAtlmTeacherRecipe, buildAtlmTeacherSplit, atlmTeacherFitReference, atlmTeacherRollingHistory,
-  atlmTeacherCase, atlmTeacherHoldoutCase, atlmTeacherIssuedCase, summarizeAtlmTeacherMode,
+  atlmTeacherProtocolVersion, parseAtlmTeacherRecipe, buildAtlmTeacherSplit, atlmTeacherFitReference,
+  atlmTeacherRollingHistory, atlmTeacherCase, atlmTeacherPlannedExclusion, atlmTeacherRollingCase,
+  atlmTeacherHoldoutCase, atlmTeacherIssuedCase, summarizeAtlmTeacherMode,
 };

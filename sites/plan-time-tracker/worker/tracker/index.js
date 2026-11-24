@@ -1,5 +1,5 @@
 import { assessmentReadiness, planStartReadiness, readinessFromRow } from '../atlm/readiness.js';
-import { ATLM_REVISION_LIMITS, ATLM_REVISION_TOOL_SCHEMAS } from '../atlm/revisions.js';
+import { ATLM_REVISION_LIMITS, ATLM_REVISION_TEACHER_RECIPE_IDS, ATLM_REVISION_TOOL_SCHEMAS } from '../atlm/revisions.js';
 import {
   AppError,
   ENVIRONMENT_IDS,
@@ -1488,6 +1488,7 @@ async function readTrackerCapabilities(db, ownerId) {
           schemaVersion: 1,
           tools: ATLM_REVISION_TOOL_SCHEMAS,
           limits: ATLM_REVISION_LIMITS,
+          teacherRecipeIds: [...ATLM_REVISION_TEACHER_RECIPE_IDS],
           trainingExecution: 'LOCAL',
           activation: 'EXPLICIT',
         },

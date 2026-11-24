@@ -621,8 +621,9 @@ async function atlmReplayPolicyCase(
   policyCache,
   checkpoint = async () => {},
   beforeWork = async () => {},
+  targetFeatures = null,
 ) {
-  if (policyCache[target.sampleId]) return policyCache[target.sampleId];
+  if (targetFeatures === null && policyCache[target.sampleId]) return policyCache[target.sampleId];
   await beforeWork();
   const history = await historyFor(target),
     prior = [];
@@ -647,7 +648,11 @@ async function atlmReplayPolicyCase(
     prior[index] = replayed;
   }
   let base = baseCache[target.sampleId];
-  if (!base) {
+  if (targetFeatures !== null) {
+    // Project only the target. Earlier decisions and calibration use the actual history.
+    await beforeWork();
+    base = await evaluateHybridBaseCase(history, { ...target, features: targetFeatures });
+  } else if (!base) {
     await beforeWork();
     base = await evaluateHybridBaseCase(history, target);
     baseCache[target.sampleId] = base;
@@ -727,8 +732,10 @@ async function atlmReplayPolicyCase(
     interval,
   };
   const result = { ...base, decision, atlm, prediction, intervalCandidates, intervalDecision };
-  policyCache[target.sampleId] = result;
-  await checkpoint();
+  if (targetFeatures === null) {
+    policyCache[target.sampleId] = result;
+    await checkpoint();
+  }
   return result;
 }
 

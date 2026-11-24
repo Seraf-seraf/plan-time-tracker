@@ -8,7 +8,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { atlmArtifactValid, normalizeAgentTask, predictAtlm } from '../worker/atlm/model.js';
 import { mergeAtlmTeacherAnnotations } from '../worker/atlm/teacher-dataset.js';
-import { canonical } from '../worker/shared/index.js';
+import { canonical, hashCommandInput } from '../worker/shared/index.js';
 import { teacherAnnotation, teacherSource } from './fixtures/atlm-revisions.mjs';
 
 const SITE_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -35,9 +35,9 @@ function issuedForecast(source, pointMs, calculatedAt = source.firstStartedAt) {
   };
 }
 
-function datasetFixture({ changedHoldout = false } = {}) {
+function datasetFixture({ changedHoldout = false, fullFit = false } = {}) {
   const snapshot = [], decisions = [];
-  for (let index = 0; index < 18; index++) {
+  for (let index = 0; index < (fullFit ? 77 : 18); index++) {
     const group = Math.floor(index / 2);
     const rowId = ROW_ID(index), planId = PLAN_ID(index);
     const decision = teacherAnnotation(rowId, 'g-' + group);
@@ -69,6 +69,14 @@ function datasetFixture({ changedHoldout = false } = {}) {
     }
     if (index === 16) source.issuedPrediction = { status: 'UNAVAILABLE', unavailableReason: 'COLLECTING_DATA' };
     if (index === 17) source.issuedPrediction = issuedForecast(source, 150_000, source.firstStartedAt + 1);
+    if (fullFit) {
+      decision.groupId = null;
+      decision.annotation.historicalAvailability = {
+        availableAt: index === 1 ? null : index === 2 ? 8_000_000 : source.sourceAvailableAt,
+        evidence: 'Synthetic journal timestamps for measured and reconstructed fields',
+      };
+      if (index === 4) source.firstStartedAt = 5_100_000;
+    }
     snapshot.push({ rowId, planId, source, rawReasons: [] });
     decisions.push(decision);
   }
@@ -110,6 +118,10 @@ function inputFiles(directory, name, dataset, changes = {}) {
     holdoutUseNote: 'История предыдущего просмотра неизвестна.',
     ...changes,
   };
+  if (recipe.recipeId === 'atlm-teacher-hybrid-v2') {
+    delete recipe.holdoutUse;
+    delete recipe.holdoutUseNote;
+  }
   writeFileSync(datasetPath, bytes);
   writeFileSync(recipePath, JSON.stringify(recipe));
   return { datasetPath, recipePath, recipe };
@@ -137,6 +149,45 @@ function run(files, outputDir, expectedCode) {
 function readJson(directory, filename) {
   return JSON.parse(readFileSync(path.join(directory, filename), 'utf8'));
 }
+
+test('v2 fits all 77 eligible plans and evaluates only the available actual history per plan', async (t) => {
+  const directory = temporary(t);
+  const dataset = datasetFixture({ fullFit: true });
+  const files = inputFiles(directory, 'training', dataset, {
+    recipeId: 'atlm-teacher-hybrid-v2', backtestUse: 'UNKNOWN',
+    backtestUseNote: 'Synthetic history has no prior decision record.',
+  });
+  const outputDir = path.join(directory, 'run');
+  const { progress } = run(files, outputDir, 0);
+  assert.equal(progress.find(({ stage }) => stage === 'ROSTER').fitCount, 77);
+  const { artifact, evaluation, provenance } = readJson(outputDir, 'registration.bundle.json');
+  const expected = dataset.rows.filter(({ eligibility }) => eligibility === 'ELIGIBLE').map(({ rowId }) => rowId);
+  assert.equal(artifact.n, 77);
+  assert.deepEqual(provenance.fitRowIds, expected);
+  assert.deepEqual(provenance.selectedRowIds, expected);
+  assert.deepEqual(new Set(artifact.manifest.map(({ sampleId }) => sampleId)), new Set(expected));
+  assert.equal(provenance.trainerVersion, 2);
+  assert.equal(provenance.recipeDigest, 'sha256:' + await hashCommandInput(files.recipe));
+  assert.equal(evaluation.protocolVersion, 2);
+  const { ROLLING_PLAN_ACTUAL: actual, ROLLING_PLAN_PLANNED: planned, ISSUED_FORECASTS: issued } = evaluation.modes;
+  assert.equal(actual.cases.length, 77);
+  assert.equal(issued.cases.length, 77);
+  assert.deepEqual(actual.cases.map(({ trainDigest }) => trainDigest), planned.cases.map(({ trainDigest }) => trainDigest));
+  assert.equal(actual.cases[0].pointStatus, 'UNAVAILABLE');
+  assert.equal(actual.cases[1].pointEngine, 'MEDIAN');
+  assert.equal(actual.cases[2].trainRowCount, 1);
+  assert.equal(actual.cases[3].trainRowCount, 1);
+  assert.equal(actual.cases[4].trainDigest, actual.cases[3].trainDigest);
+  assert.equal(evaluation.rowDecisions[1].historicalAvailableAt, null);
+  assert.equal(evaluation.rowDecisions[2].historicalAvailableAt, 8_000_000);
+  assert.equal(planned.cases[13].scoringExclusionReason, 'SCOPE_CHANGED');
+  assert.equal(planned.cases[14].scoringExclusionReason, 'SCOPE_CHANGE_UNKNOWN');
+  assert.equal(planned.cases[15].scoringExclusionReason, 'PLANNED_FEATURES_UNAVAILABLE');
+  assert(planned.cases.some((item, index) => item.pointStatus === 'AVAILABLE'
+    && actual.cases[index].pointStatus === 'AVAILABLE' && item.pointMs !== actual.cases[index].pointMs));
+  assert.equal(planned.paired.candidate.caseCount, planned.paired.median.caseCount);
+  assert.equal(Object.hasOwn(planned.paired, 'groupCount'), false);
+});
 
 test('CLI freezes grouped development and holdout, evaluates separate feature bases and preserves the bundle', (t) => {
   const directory = temporary(t);

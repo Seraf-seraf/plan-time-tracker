@@ -132,9 +132,9 @@ async function seedRegistry() {
     VALUES(?,?,11,'IMPORTED',?,?,?,?,?,?,?,?,'{}',?,?,?,?)`);
   const archive = (id, evaluation = null) => register.run(OWNER, id, artifact.method.version, artifact.featureSchemaVersion, c.now(),
     c.now(), null, '[]', null, evaluation ? JSON.stringify(evaluation) : null, 0, 0, null, 0);
-  const controlMode = prediction => ({
+  const controlMode = (prediction, grouped = true) => ({
     status: 'AVAILABLE', summary: {
-      rowCount: 1, groupCount: 1, excludedFromScoringCount: 0,
+      rowCount: 1, ...(grouped ? { groupCount: 1 } : {}), excludedFromScoringCount: 0,
       forecastAvailability: { numerator: 1, denominator: 1 },
       intervalAvailability: { numerator: 0, denominator: 1 },
       metrics: { maeMs: prediction - 60000 },
@@ -163,8 +163,15 @@ async function seedRegistry() {
     acceptExperimental: true, reason: 'Изолированная браузерная проверка' });
   assert.equal(activation.value.result.structuredContent?.activeModelRevisionId, activeId, JSON.stringify(activation.value));
   c.advance(1);
+  const perPlanEvaluation = { schemaVersion: 1, protocolVersion: 2, modes: {
+    ROLLING_PLAN_PLANNED: { ...controlMode(120000, false), paired: {
+      rowIds: ['first'], candidate: { maeMs: 60000 }, median: { maeMs: 120000 },
+    } },
+    ROLLING_PLAN_ACTUAL: controlMode(180000, false),
+    ISSUED_FORECASTS: controlMode(60000, false),
+  } };
   register.run(OWNER, registeredId, artifact.method.version, artifact.featureSchemaVersion, c.now(), c.now(),
-    JSON.stringify(artifact), JSON.stringify(artifact.manifest), artifact.datasetDigest, null,
+    JSON.stringify(artifact), JSON.stringify(artifact.manifest), artifact.datasetDigest, JSON.stringify(perPlanEvaluation),
     artifact.n, examples.length, artifact.trainCutoff, 1);
   for (const [index, example] of examples.entries()) source.run(registeredId, index, OWNER, example.planId);
   for (let index = 0; index < 14; index++) {
@@ -494,6 +501,30 @@ try {
   await settings.getByRole('heading', { name: 'Проверка на отложенной выборке' }).waitFor();
   assert.equal(await history.evaluate(node => node.open), true);
   assert.equal(await cases.evaluate(node => node.open), true);
+
+  await history.getByRole('button', { name: 'Показать ' + registeredId, exact: true }).click();
+  await control.check();
+  await quality.getByText('Планов в финальном обучении 61', { exact: true }).waitFor();
+  const plannedReportTitle = 'Проверка на истории по исходным признакам';
+  const actualReportTitle = 'Проверка на истории по фактическим признакам';
+  await quality.getByRole('heading', { name: plannedReportTitle, exact: true }).waitFor();
+  const report = settings.locator('#atlm-model-report');
+  assert.match(await report.innerText(), /Планов 1\n/);
+  assert.doesNotMatch(await report.innerText(), /групп/u);
+  assert.match(await report.innerText(), /Средняя абсолютная ошибка медианы\s+2 мин/u);
+  await page.setViewportSize({ width: 375, height: 1100 });
+  await quality.screenshot({ path: resolve(artifacts, 'model-per-plan-quality-375.png') });
+  await page.setViewportSize({ width: desktopWidthCssPx, height: 1100 });
+  await reportPicker.selectOption({ label: actualReportTitle });
+  await report.getByRole('heading', { name: actualReportTitle, exact: true }).waitFor();
+  await methodology.locator('summary').click();
+  await methodology.getByText(/доступные до его первого старта/u).waitFor();
+  await methodology.locator('summary').click();
+  await reportPicker.selectOption({ label: savedForecastsTitle });
+  await report.getByRole('heading', { name: savedForecastsTitle, exact: true }).waitFor();
+  await settings.getByRole('button', { name: 'Вернуться к назначенной ревизии' }).click();
+  await control.check();
+  await quality.getByRole('heading', { name: 'Проверка на истории', exact: true }).waitFor();
 
   await ok(c, 'DeletePlan', { planId: changedPlan }, 2);
   await moreRevisions.click();

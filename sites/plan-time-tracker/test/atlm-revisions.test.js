@@ -11,7 +11,7 @@ import { materializeAtlmRevisionFile } from '../worker/atlm/revision-files.js';
 import { summarizeAtlmTeacherMode } from '../worker/atlm/teacher-dataset.js';
 import { createWorker } from '../worker/index.js';
 import { teacherAnnotation } from './fixtures/atlm-revisions.mjs';
-import { completeAtlm, context, mcp, ok, OWNER, plannedAtlm } from './fixtures/tracker-db.mjs';
+import { completeAtlm, context, mcp, ok, OWNER, plannedAtlm, taskV4 } from './fixtures/tracker-db.mjs';
 
 const SNAPSHOT = 'CreateTrainingSnapshot';
 const SAVE_DATASET = 'SaveDatasetRevision';
@@ -113,8 +113,8 @@ async function commit(c, name, args, owner) {
   throw new Error(name + ' did not resolve VALIDATING: ' + JSON.stringify(result));
 }
 
-async function completed(c, elapsedMs) {
-  const plan = await plannedAtlm(c, crypto.randomUUID());
+async function completed(c, elapsedMs, task) {
+  const plan = await plannedAtlm(c, crypto.randomUUID(), task);
   await completeAtlm(c, plan, elapsedMs);
   c.advance(1);
   return plan;
@@ -160,16 +160,35 @@ async function capture(c) {
   return (await download(c, SNAPSHOT, { mode: 'read', snapshotId })).value;
 }
 
-async function fitBundle(t, c, count, afterComplete = async () => {}) {
+async function fitBundle(t, c, count, afterComplete = async () => {}, { perPlan = false } = {}) {
   const plans = [];
   for (let i = 0; i < count; i++) {
-    const plan = await completed(c, 60_000 + i * 10_001);
+    const task = perPlan ? { ...taskV4(), reuseLevel: i % 4 } : undefined;
+    const duration = perPlan ? 60_000 + (i % 4) * 90_000 : 60_000 + i * 10_001;
+    const plan = await completed(c, duration, task);
     await afterComplete(plan, i);
     c.advance(1);
     plans.push(plan);
   }
   const snapshot = await capture(c);
-  const { saved } = await save(c, annotations(snapshot));
+  const decisions = annotations(snapshot);
+  if (perPlan) {
+    const sourceByRow = new Map(snapshot.rows.map((row) => [row.rowId, row.source]));
+    const planById = new Map(plans.map((plan, index) => [plan.planId, { plan, index }]));
+    const startById = new Map(snapshot.rows.map((row) => [row.planId, row.source.firstStartedAt]));
+    for (const decision of decisions.rows) {
+      const { plan, index } = planById.get(sourceByRow.get(decision.rowId).planId);
+      delete decision.groupId;
+      decision.annotation.agentTask = plan.assessment.context.agentTask;
+      if (index === 0) decision.annotation.historicalAvailability = {
+        availableAt: null, evidence: 'The archived evidence has no verifiable date.',
+      };
+      if (index === 1) decision.annotation.historicalAvailability = {
+        availableAt: startById.get(plans[3].planId), evidence: 'This evidence first appeared at the fourth start.',
+      };
+    }
+  }
+  const { saved } = await save(c, decisions);
   assert.equal(saved.state, 'SAVED');
   const { datasetRevisionId } = saved;
   const source = await download(c, DATASET, { datasetRevisionId });
@@ -181,9 +200,11 @@ async function fitBundle(t, c, count, afterComplete = async () => {}) {
   const outputDir = path.join(directory, 'fit');
   writeFileSync(datasetPath, source.bytes);
   writeFileSync(recipePath, JSON.stringify({
-    schemaVersion: 1, recipeId: 'atlm-teacher-hybrid-v1', datasetRevisionId,
+    schemaVersion: 1, recipeId: perPlan ? 'atlm-teacher-hybrid-v2' : 'atlm-teacher-hybrid-v1', datasetRevisionId,
     datasetDigest: source.file.sha256, selection: { mode: 'ALL_ELIGIBLE' },
-    holdoutUse: 'UNKNOWN', holdoutUseNote: 'Synthetic revision contract fixture',
+    ...(perPlan
+      ? { backtestUse: 'UNKNOWN', backtestUseNote: 'Synthetic full roster fixture' }
+      : { holdoutUse: 'UNKNOWN', holdoutUseNote: 'Synthetic revision contract fixture' }),
   }));
   const fit = spawnSync(process.execPath, [
     'scripts/train-atlm.mjs', '--dataset', datasetPath, '--recipe', recipePath, '--out', outputDir,
@@ -191,7 +212,7 @@ async function fitBundle(t, c, count, afterComplete = async () => {}) {
   assert.ifError(fit.error);
   assert.equal(fit.status, 0, fit.stderr);
   const bundleBytes = readFileSync(JSON.parse(fit.stdout).registrationPath);
-  return { datasetRevisionId, bundleBytes, bundle: JSON.parse(bundleBytes), plans };
+  return { datasetRevisionId, bundleBytes, bundle: JSON.parse(bundleBytes), plans, dataset: source.value };
 }
 
 test('snapshot retries pending refresh, preserves failed rows, and remains frozen across pages', async (t) => {
@@ -673,4 +694,79 @@ test('registration rejects forged proof and rolls back if a held-out source chan
     .get(OWNER, args.commandId);
   assert.notEqual(receipt?.outcome_code, 'OK');
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+});
+
+test('v2 registration keeps every verified plan and validates causal, comparable replay', async (t) => {
+  const c = setup(t);
+  const info = accepted((await mcp(c, 'GetTrackerInfo')).value.result);
+  assert.deepEqual(info.assessments.atlm.registry.teacherRecipeIds, ['atlm-teacher-hybrid-v1', 'atlm-teacher-hybrid-v2']);
+  const { datasetRevisionId, bundleBytes, bundle, plans, dataset } = await fitBundle(t, c, 9, async (plan, index) => {
+    if (index === 8) await ok(c, 'UpdatePlanMetadata', { planId: plan.planId, title: 'Changed actual scope' }, 2);
+  }, { perPlan: true });
+  const { provenance, evaluation, artifact } = bundle;
+  assert.equal(provenance.trainerVersion, 2);
+  assert.equal(evaluation.protocolVersion, 2);
+  assert.equal(artifact.n, plans.length);
+  assert.deepEqual(provenance.fitRowIds, provenance.selectedRowIds);
+  assert(dataset.rows.every((row) => row.eligibility === 'ELIGIBLE' && row.groupId === null));
+  const actual = evaluation.modes.ROLLING_PLAN_ACTUAL;
+  const planned = evaluation.modes.ROLLING_PLAN_PLANNED;
+  const caseFor = (mode, index) => mode.cases.find((row) => row.planId === plans[index].planId);
+  assert.equal(caseFor(actual, 2).trainRowCount, 0);
+  assert.equal(caseFor(actual, 3).trainRowCount, 1);
+  assert.equal(caseFor(actual, 4).trainRowCount, 3);
+  assert.equal(caseFor(actual, 8).scoringExclusionReason, null);
+  assert.equal(caseFor(planned, 8).scoringExclusionReason, 'SCOPE_CHANGED');
+  assert.equal(caseFor(planned, 8).pointMs, null);
+  assert.equal(caseFor(planned, 8).medianPointMs, null);
+  assert.equal(Object.hasOwn(planned.summary, 'groupCount'), false);
+
+  const missing = structuredClone(bundle);
+  missing.provenance.fitRowIds.pop();
+  const invalidHistory = structuredClone(bundle);
+  invalidHistory.evaluation.modes.ROLLING_PLAN_PLANNED.cases[0].trainDigest = sha256('forged history');
+  const invalidRecipe = structuredClone(bundle);
+  invalidRecipe.provenance.recipeDigest = sha256('forged recipe');
+  const inconsistentModes = structuredClone(bundle);
+  const forgedPlanned = inconsistentModes.evaluation.modes.ROLLING_PLAN_PLANNED;
+  caseFor(forgedPlanned, 4).fallbackReason = 'FORGED_POLICY';
+  inconsistentModes.evaluation.modes.ROLLING_PLAN_PLANNED =
+    summarizeAtlmTeacherMode(forgedPlanned.cases, { includeGroups: false });
+  for (const [forged, reason] of [[missing, 'INVALID_SELECTED_ROSTER'],
+    [invalidHistory, 'INVALID_ROLLING_REPORT'], [invalidRecipe, 'INVALID_RECIPE_DIGEST'],
+    [inconsistentModes, 'INCONSISTENT_ROLLING_FEATURE_BASIS']]) {
+    const args = await upload(c, REGISTER, { datasetRevisionId }, forged);
+    const failure = refused(await commit(c, REGISTER, args), 'INVALID_ARTIFACT');
+    assert.equal(failure.details.reason, reason);
+  }
+
+  const args = await upload(c, REGISTER, { datasetRevisionId }, bundleBytes);
+  const result = accepted(await commit(c, REGISTER, args));
+  assert.equal(result.state, 'REGISTERED');
+  assert.equal((await tool(c, MODELS, { view: 'list' })).activeModelRevisionId, null);
+  assert.deepEqual(result.evaluationSummary.map(({ kind }) => kind),
+    ['ROLLING_PLAN_ACTUAL', 'ROLLING_PLAN_PLANNED', 'ISSUED_FORECASTS']);
+  const detail = await tool(c, MODELS, { view: 'detail', modelRevisionId: result.modelRevisionId });
+  assert.equal(detail.revision.fitCount, plans.length);
+  const evidence = detail.evidence.find(({ kind }) => kind === 'ROLLING_PLAN_PLANNED');
+  assert.equal(evidence.summary.excludedFromScoringCount, 1);
+  assert.equal(Object.hasOwn(evidence.summary, 'groupCount'), false);
+  assert.equal(evidence.paired.rowCount, planned.paired.rowIds.length);
+  assert.equal(evidence.paired.median.maeMs, planned.paired.median.maeMs);
+  const eligible = planned.paired.rowIds.length >= 5 && planned.paired.candidate.maeMs <= planned.paired.median.maeMs;
+  assert.equal(result.activationEligibility.status, eligible ? 'ELIGIBLE' : 'REQUIRES_EXPERIMENTAL_ACK');
+
+  const modelRevisionId = result.modelRevisionId;
+  const activation = {
+    modelRevisionId, expectedActiveModelRevisionId: null, expectedActivationVersion: 0,
+    reason: 'Verify the v2 activation gate', commandId: crypto.randomUUID(),
+  };
+  if (!eligible) {
+    await expectError(c, ACTIVATE, activation, 'EXPERIMENTAL_CONFIRMATION_REQUIRED');
+  }
+  const applied = await tool(c, ACTIVATE, { ...activation, commandId: crypto.randomUUID(), acceptExperimental: !eligible });
+  assert.equal(applied.decision, eligible ? 'ELIGIBLE' : 'EXPERIMENTAL_ACCEPTED');
+  assert.equal(applied.activeModelRevisionId, modelRevisionId);
+  const replay = accepted(await commit(c, REGISTER, args));
+  assert.equal(replay.modelRevisionId, modelRevisionId);
 });
