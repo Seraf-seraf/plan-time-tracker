@@ -174,14 +174,15 @@ async function assertFinalUploadReplay(c, name, args, path, result) {
 const savedForecast = async (c, planId) => (await tool(c, 'GetSavedEstimate', { planId })).serverEstimation;
 const modelList = c => revision(c, revisionsTool, { view: 'list' });
 
-async function activate(c, modelRevisionId, expectedActiveModelRevisionId, expectedActivationVersion, reason) {
+async function activate(c, modelRevisionId, expectedActiveModelRevisionId, expectedActivationVersion, reason,
+  additional = {}) {
   return revision(c, 'ActivateModelRevision', {
     commandId: crypto.randomUUID(), modelRevisionId, expectedActiveModelRevisionId, expectedActivationVersion,
-    reason, acceptExperimental: true,
+    reason, ...additional,
   });
 }
 
-test('built MCP transfers an ungrouped dataset through the v2 CLI, registers, activates, and rolls back a model', async t => {
+test('built MCP transfers current facts through v3, registers, activates, and rolls back a model', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'atlm-agent-flow-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const c = context();
@@ -246,15 +247,15 @@ test('built MCP transfers an ungrouped dataset through the v2 CLI, registers, ac
   assert.equal(datasetFile.sha256, datasetDigest);
 
   const recipePath = join(directory, 'recipe.json');
-  await writeFile(recipePath, JSON.stringify({ schemaVersion: 1, recipeId: 'atlm-teacher-hybrid-v2',
-    datasetRevisionId, datasetDigest, selection: { mode: 'ALL_ELIGIBLE' }, backtestUse: 'UNKNOWN',
-    backtestUseNote: 'No prior evaluation history was supplied for this synthetic run.' }));
+  await writeFile(recipePath, JSON.stringify({ schemaVersion: 1, recipeId: 'atlm-teacher-hybrid-v3',
+    datasetRevisionId, datasetDigest, selection: { mode: 'ALL_ELIGIBLE' } }));
   const result = cli('train-atlm.mjs', ['--dataset', datasetPath, '--recipe', recipePath, '--out', join(directory, 'fit')]);
   assert.equal(result.status, 'READY');
   const bundle = JSON.parse(await readFile(result.registrationPath, 'utf8'));
   assert.equal(bundle.artifact.n, actualByPlan.size);
   assert.deepEqual(bundle.provenance.fitRowIds, bundle.provenance.selectedRowIds);
-  assert.equal(bundle.evaluation.protocolVersion, 2);
+  assert.equal(bundle.evaluation.protocolVersion, 3);
+  assert.deepEqual(bundle.evaluation.modes, {});
   const unsupportedPath = join(directory, 'unsupported-bundle.json');
   await writeFile(unsupportedPath, JSON.stringify({ ...bundle, schemaVersion: bundle.schemaVersion + 1 }));
   const unsupportedArgs = await upload(c, modelTool, { datasetRevisionId }, unsupportedPath);
@@ -289,26 +290,8 @@ test('built MCP transfers an ungrouped dataset through the v2 CLI, registers, ac
   assert.equal(registered.activationVersion, 1);
   assert.equal(registered.rows.filter(row => row.modelRevisionId === modelRevisionId).length, 1);
   const detail = await revision(c, revisionsTool, { view: 'detail', modelRevisionId });
-  assert(detail.evidence.some(row => row.kind === 'ROLLING_PLAN_ACTUAL'));
-  assert(detail.evidence.some(row => row.kind === 'ROLLING_PLAN_PLANNED'));
-  const issuedReport = detail.evidence.find(row => row.kind === 'ISSUED_FORECASTS' && row.source === 'evaluation');
-  const evidenceQuery = new URLSearchParams({ source: 'evaluation', evidenceId: issuedReport.evidenceId });
-  const evidencePage = await call(c, `/api/tracker/model-revisions/${modelRevisionId}/evidence/cases?${evidenceQuery}`);
-  assert.equal(evidencePage.status, 200);
-  assert.equal(evidencePage.value.modelRevisionId, modelRevisionId);
-  const issuedCases = new Map(evidencePage.value.cases.map(row => [row.planId, row]));
-  assert.equal(issuedCases.size, actualByPlan.size);
-  for (const row of source.rows.filter(item => actualByPlan.has(item.planId))) {
-    const forecast = row.source.issuedPrediction;
-    const issuedCase = issuedCases.get(row.planId);
-    assert.equal(issuedCase.modelRevisionId, forecast?.modelRevisionId ?? null);
-    assert.equal(issuedCase.method, forecast?.method?.id ?? null);
-    assert.equal(issuedCase.pointMs, forecast?.pointMs ?? null);
-  }
-  assert.equal(issuedCases.get(incumbentSources[0].planId).pointMs, null);
-  assert.equal(issuedCases.get(incumbentSources[1].planId).method, 'historical-median');
-  assert.equal([...issuedCases.values()].filter(row => row.modelRevisionId === incumbentId).length, completedPlanCount);
-  assert.equal(detail.evidence.find(row => row.source === 'issued').summary.rowCount, 0);
+  assert.deepEqual(detail.evidence.map(row => [row.kind, row.source]), [['ISSUED_FORECASTS', 'issued']]);
+  assert.equal(detail.evidence[0].summary.rowCount, 0);
   const registeredPath = join(directory, 'registered.json');
   assert.equal((await download(c, revisionsTool, { modelRevisionId, fileKind: 'BUNDLE' }, registeredPath)).sha256, modelArgs.file.sha256);
 
@@ -324,6 +307,19 @@ test('built MCP transfers an ungrouped dataset through the v2 CLI, registers, ac
   assert.equal(issued.modelRevisionId, modelRevisionId);
   assert.notEqual(issued.pointMs, original.pointMs);
   assert.deepEqual(await savedForecast(c, oldPlanId), original);
+  const step = (await tool(c, 'GetPlanProgress', { planId: planned })).steps[0];
+  c.advance(20_000);
+  await write(c, 'SetStepStatus', { stepId: step.step_id, status: 'DONE' }, step.version);
+  await write(c, 'FinishPlan', { planId: planned }, 1);
+  const refreshed = await revision(c, revisionsTool, { view: 'detail', modelRevisionId });
+  const [issuedReport] = refreshed.evidence;
+  assert.equal(issuedReport.summary.rowCount, 1);
+  const evidenceQuery = new URLSearchParams({ source: 'issued', evidenceId: issuedReport.evidenceId });
+  const evidencePage = await call(c, `/api/tracker/model-revisions/${modelRevisionId}/evidence/cases?${evidenceQuery}`);
+  assert.equal(evidencePage.status, 200);
+  assert.equal(evidencePage.value.modelRevisionId, modelRevisionId);
+  assert.deepEqual(evidencePage.value.cases.map(row => [row.planId, row.pointMs, row.actualMs]),
+    [[planned, issued.pointMs, 20_000]]);
 
   const archivedPath = join(directory, 'archived-incumbent.json');
   await download(c, revisionsTool, { modelRevisionId: incumbentId, fileKind: 'BUNDLE' }, archivedPath);
@@ -340,7 +336,8 @@ test('built MCP transfers an ungrouped dataset through the v2 CLI, registers, ac
   assert.equal(afterRefusal.activationVersion, 2);
 
   c.advance(1);
-  const rollback = await activate(c, incumbentId, modelRevisionId, 2, 'Restore the previous revision');
+  const rollback = await activate(c, incumbentId, modelRevisionId, 2, 'Restore the previous revision',
+    { acceptExperimental: true });
   assert.equal(rollback.activeModelRevisionId, incumbentId);
   assert.equal(rollback.activationVersion, 3);
   const fresh = await plan(c, 'New estimate after rollback');

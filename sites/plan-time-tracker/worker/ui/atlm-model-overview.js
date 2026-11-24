@@ -307,8 +307,12 @@ export const atlmModelOverviewScript = String.raw`
       .sort((a, b) => controls.indexOf(a.kind) - controls.indexOf(b.kind));
   }
 
+  function qualitySource() {
+    return detail?.revision?.protocolVersion === 3 ? 'issued' : source;
+  }
+
   function currentEvidence() {
-    if (source === 'issued') return detail?.evidence?.find((item) => item.source === 'issued');
+    if (qualitySource() === 'issued') return detail?.evidence?.find((item) => item.source === 'issued');
     const entries = controlEntries();
     return entries.find((item) => item.evidenceId === controlId)
       ?? entries.find((item) => item.status === 'AVAILABLE') ?? entries[0];
@@ -328,7 +332,7 @@ export const atlmModelOverviewScript = String.raw`
 
   function emptyEvidence() {
     if (!selectedId) return 'Выберите ревизию в истории.';
-    return source === 'issued' ? 'По этой ревизии пока нет завершённых планов с выданным прогнозом.'
+    return qualitySource() === 'issued' ? 'По этой ревизии пока нет завершённых планов с выданным прогнозом.'
       : 'Проверка этой ревизии пока не сохранена.';
   }
 
@@ -357,26 +361,28 @@ export const atlmModelOverviewScript = String.raw`
       }
     }
     if (selectionMessage) selection.append(element('p', selectionMessage, 'model-muted'));
-    get('sources').hidden = !selectedId;
-    get('sources').querySelectorAll('input').forEach((input) => { input.checked = input.value === source; });
+    const fullFitOnly = detail?.revision?.protocolVersion === 3;
+    const displaySource = qualitySource();
+    get('sources').hidden = !selectedId || fullFitOnly;
+    get('sources').querySelectorAll('input').forEach((input) => { input.checked = input.value === displaySource; });
     const report = get('report');
     report.replaceChildren();
     setBusy(report, Boolean(requests.has('detail')));
     const evidence = currentEvidence();
     const options = controlEntries();
-    const perPlanProtocol = options.some((item) => rollingPlanControls.includes(item.kind));
+    const perPlanProtocol = fullFitOnly || options.some((item) => rollingPlanControls.includes(item.kind));
     if (perPlanProtocol && Number.isFinite(detail.revision?.fitCount)) {
       selection.append(element('p', 'Планов в финальном обучении ' + count(detail.revision.fitCount), 'model-muted'));
     }
     const picker = get('report-picker');
     const wasOnPicker = document.activeElement === picker;
-    get('report-field').hidden = source !== 'evaluation' || !options.length;
+    get('report-field').hidden = displaySource !== 'evaluation' || !options.length;
     picker.replaceChildren(...options.map((item) => {
       const option = element('option', evidenceName(item));
       option.value = item.evidenceId;
       return option;
     }));
-    if (source === 'evaluation' && evidence) picker.value = evidence.evidenceId;
+    if (displaySource === 'evaluation' && evidence) picker.value = evidence.evidenceId;
     if (wasOnPicker && get('report-field').hidden) get('quality-heading').focus();
     get('metrics').hidden = true;
     get('show-cases').hidden = true;
@@ -392,7 +398,7 @@ export const atlmModelOverviewScript = String.raw`
       const { summary } = evidence;
       const metrics = summary.metrics ?? {};
       report.append(element('h4', evidenceName(evidence)));
-      if (summary.rowCount === 0) report.append(element('p', source === 'issued' ? emptyEvidence() : 'В этой проверке нет задач.', 'model-muted'));
+      if (summary.rowCount === 0) report.append(element('p', displaySource === 'issued' ? emptyEvidence() : 'В этой проверке нет задач.', 'model-muted'));
       const groupPart = !perPlanProtocol && Number.isFinite(summary.groupCount) ? ', групп ' + count(summary.groupCount) : '';
       report.append(element('p', 'Планов ' + count(summary.rowCount) + groupPart, 'model-muted'));
       const { numerator, denominator } = summary.forecastAvailability ?? {};
@@ -530,10 +536,10 @@ export const atlmModelOverviewScript = String.raw`
     if (!cases.ready) {
       const message = entry?.limitations?.includes('CASES_NOT_RECORDED') ? 'Список задач этой проверки не сохранён.'
         : requests.has('cases') ? 'Загружаем планы…'
-          : entry && !entry.summary.rowCount ? (source === 'issued' ? emptyEvidence() : 'В этой проверке нет задач.') : '';
+          : entry && !entry.summary.rowCount ? (qualitySource() === 'issued' ? emptyEvidence() : 'В этой проверке нет задач.') : '';
       host.replaceChildren(element('p', message, 'model-muted'));
     } else if (!cases.rows.length) {
-      host.replaceChildren(element('p', source === 'issued' ? emptyEvidence() : 'В этой проверке нет задач.', 'model-muted'));
+      host.replaceChildren(element('p', qualitySource() === 'issued' ? emptyEvidence() : 'В этой проверке нет задач.', 'model-muted'));
     } else {
       const labels = [{ text: 'План' }, { text: 'Факт', numeric: true }, { text: 'Прогноз', numeric: true },
         { text: 'Ошибка', numeric: true }, { text: 'Интервал', numeric: true }];

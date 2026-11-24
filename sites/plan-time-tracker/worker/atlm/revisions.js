@@ -4,6 +4,7 @@ import {
 } from '../shared/index.js';
 import {
   ATLM_FEATURE_VERSION, ATLM_METHOD, atlmArtifactValid, isNonnegativeSafeInteger, validateAssessmentValue,
+  selectAtlmIntervalEngine, selectHybridEngine,
 } from './model.js';
 import { processAtlmSampleRefresh, readAtlmSampleRefreshStatus } from './sample-refresh.js';
 import { readAtlmServingState } from './serving.js';
@@ -15,7 +16,8 @@ import {
 } from './revision-files.js';
 import {
   ATLM_DATASET_VERSION, ATLM_TEACHER_CODE_PATHS, ATLM_TEACHER_MODES, ATLM_TEACHER_MODES_V2,
-  ATLM_TEACHER_PROTOCOL_V2, ATLM_TEACHER_RECIPE_ID, ATLM_TEACHER_RECIPE_ID_V2,
+  ATLM_TEACHER_PROTOCOL_V2, ATLM_TEACHER_PROTOCOL_V3, ATLM_TEACHER_RECIPE_ID, ATLM_TEACHER_RECIPE_ID_V2,
+  ATLM_TEACHER_RECIPE_ID_V3,
   ATLM_TEACHER_TRAINER_VERSION,
   TEACHER_ANNOTATIONS_CONTRACT, TEACHER_DATASET_CONTRACT, atlmTeacherCase, atlmTeacherFitReference,
   atlmTeacherHoldoutCase, atlmTeacherIssuedCase, atlmTeacherProtocolVersion, atlmTeacherRollingCase,
@@ -24,7 +26,9 @@ import {
 } from './teacher-dataset.js';
 
 const SCHEMA_VERSION = ATLM_DATASET_VERSION;
-const ATLM_REVISION_TEACHER_RECIPE_IDS = Object.freeze([ATLM_TEACHER_RECIPE_ID, ATLM_TEACHER_RECIPE_ID_V2]);
+const ATLM_REVISION_TEACHER_RECIPE_IDS = Object.freeze([
+  ATLM_TEACHER_RECIPE_ID, ATLM_TEACHER_RECIPE_ID_V2, ATLM_TEACHER_RECIPE_ID_V3,
+]);
 const BASE64_PART_CHARS = Math.ceil(ATLM_PART_BYTES / 3) * 4;
 const COMPACT_REASON_COUNT = 16;
 const COMPACT_MAX_BYTES = 96 * 1024;
@@ -874,6 +878,7 @@ async function validateRollingModes(modes, protocol, fitRows, rowsById, perPlan)
 const MIN_PLANNED_PAIRS = 5;
 const MIN_PLANNED_HOLDOUT_GROUPS = 2;
 function activationPolicy(evaluation) {
+  if (evaluation?.protocolVersion === ATLM_TEACHER_PROTOCOL_V3) return { status: 'ELIGIBLE', reasons: [] };
   const perPlan = evaluation?.protocolVersion === ATLM_TEACHER_PROTOCOL_V2;
   const mode = evaluation?.modes?.[perPlan ? 'ROLLING_PLAN_PLANNED' : 'INTERNAL_HOLDOUT_PLANNED'];
   const paired = mode?.paired;
@@ -892,6 +897,7 @@ function activationPolicy(evaluation) {
 }
 
 function teacherModes(protocolVersion) {
+  if (protocolVersion === ATLM_TEACHER_PROTOCOL_V3) return [];
   return protocolVersion === ATLM_TEACHER_PROTOCOL_V2 ? ATLM_TEACHER_MODES_V2 : ATLM_TEACHER_MODES;
 }
 
@@ -902,6 +908,19 @@ function compactEvaluation(evaluation) {
       .filter(([, value]) => typeof value === 'number' || value === null));
     return { kind, status, reason, ...summary, metrics };
   });
+}
+
+function validateFitOnlyArtifact(artifact) {
+  requireFields(artifact, [
+    'formatVersion', 'kind', 'method', 'featureSchemaVersion', 'metric', 'policyVersion', 'selectedEngine',
+    'selection', 'n', 'p', 'rank', 'manifest', 'datasetDigest', 'trainCutoff', 'candidates',
+    'intervalEngine', 'intervalSelection', 'residualQuantiles',
+  ], 'INVALID_ARTIFACT', 'INVALID_FIT_ONLY_ARTIFACT_FIELDS');
+  if (artifact.residualQuantiles !== null) throw invalidArtifact('INVALID_FIT_ONLY_CALIBRATION');
+  const point = selectHybridEngine(artifact.candidates, []);
+  const interval = selectAtlmIntervalEngine({ BAYESIAN_PREDICTIVE: artifact.candidates.bayesian }, []);
+  assertSame(artifact.selection, point, 'INVALID_FIT_ONLY_POINT_SELECTION');
+  assertSame(artifact.intervalSelection, interval, 'INVALID_FIT_ONLY_INTERVAL_SELECTION');
 }
 
 async function validateBundle(db, ownerId, datasetRecord, text) {
@@ -915,17 +934,18 @@ async function validateBundle(db, ownerId, datasetRecord, text) {
     || value.datasetRevisionId !== datasetRevisionId || value.datasetDigest !== datasetDigest
     || !atlmArtifactValid(artifact)) throw invalidArtifact('INVALID_BUNDLE_ARTIFACT');
 
-  const perPlan = provenance?.trainerVersion === ATLM_TEACHER_PROTOCOL_V2;
+  const trainerVersion = provenance?.trainerVersion;
+  const grouped = trainerVersion === ATLM_TEACHER_TRAINER_VERSION;
+  const perPlan = trainerVersion === ATLM_TEACHER_PROTOCOL_V2;
+  const fitOnly = trainerVersion === ATLM_TEACHER_PROTOCOL_V3;
+  if ((!grouped && !perPlan && !fitOnly) || !isSnapshotDigest(provenance.recipeDigest))
+    throw invalidArtifact('INVALID_PROVENANCE');
   const rosterFields = ['selectedRowIds', 'fitRowIds', 'trainCutoff'];
-  if (!perPlan) rosterFields.push('holdoutRowIds', 'purgedRowIds');
-  const splitFields = perPlan
-    ? ['backtestUse', 'backtestUseNote']
-    : ['holdoutCutoff', 'groups', 'holdoutUse', 'holdoutUseNote'];
+  if (grouped) rosterFields.push('holdoutRowIds', 'purgedRowIds');
+  const splitFields = grouped ? ['holdoutCutoff', 'groups', 'holdoutUse', 'holdoutUseNote']
+    : perPlan ? ['backtestUse', 'backtestUseNote'] : [];
   requireFields(provenance, ['trainerVersion', 'codeRef', 'recipeDigest', 'configuration', ...rosterFields, ...splitFields],
     'INVALID_ARTIFACT', 'INVALID_PROVENANCE');
-  if ((!perPlan && provenance.trainerVersion !== ATLM_TEACHER_TRAINER_VERSION)
-    || !isSnapshotDigest(provenance.recipeDigest))
-    throw invalidArtifact('INVALID_PROVENANCE');
   await validateCodeReference(provenance.codeRef);
 
   const rows = [];
@@ -937,11 +957,11 @@ async function validateBundle(db, ownerId, datasetRecord, text) {
     recipe = parseAtlmTeacherRecipe(provenance.configuration, datasetRevisionId, datasetDigest);
     protocol = buildAtlmTeacherSplit(dataset, trainingRows, recipe);
   } catch {
-    throw invalidArtifact(perPlan ? 'INVALID_RECIPE_OR_SELECTED_ROSTER' : 'INVALID_RECIPE_OR_SELECTED_GROUPS');
+    throw invalidArtifact(grouped ? 'INVALID_RECIPE_OR_SELECTED_GROUPS' : 'INVALID_RECIPE_OR_SELECTED_ROSTER');
   }
   const protocolVersion = atlmTeacherProtocolVersion(recipe);
-  if (protocolVersion !== provenance.trainerVersion) throw invalidArtifact('INVALID_TRAINER_PROTOCOL');
-  if (perPlan) {
+  if (protocolVersion !== trainerVersion) throw invalidArtifact('INVALID_TRAINER_PROTOCOL');
+  if (!grouped) {
     assertSame(provenance.recipeDigest, 'sha256:' + await hashCommandInput(recipe), 'INVALID_RECIPE_DIGEST');
   }
   for (const set of rosterFields)
@@ -964,6 +984,11 @@ async function validateBundle(db, ownerId, datasetRecord, text) {
   assertSame(evaluation.rowDecisions, protocol.rowDecisions, 'INVALID_ROW_DECISIONS');
   assertSame(evaluation.split, protocol.split, 'INVALID_EVALUATION_SPLIT');
   const rowsById = new Map(rows.map((row) => [row.rowId, row]));
+  const selected = protocol.selectedRowIds.map((rowId) => rowsById.get(rowId));
+  if (fitOnly) {
+    validateFitOnlyArtifact(artifact);
+    return { artifact, evaluation, provenance, protocol, selected };
+  }
   const rollingCases = await validateRollingModes(evaluation.modes, protocol, fitRows, rowsById, perPlan);
   const regressionCaseIds = new Set(rollingCases.filter((row) => row.trainRowCount >= MIN_ROLLING_REGRESSION_ROWS).map((row) => row.planId));
   if (artifact.selection.caseIds.some((planId) => !regressionCaseIds.has(planId))) {
@@ -972,7 +997,7 @@ async function validateBundle(db, ownerId, datasetRecord, text) {
   if (artifact.intervalSelection.caseIds.some((planId) => !regressionCaseIds.has(planId))) {
     throw invalidArtifact('INVALID_INTERVAL_CASE_IDS');
   }
-  if (!perPlan) {
+  if (grouped) {
     for (const basis of ['ACTUAL', 'PLANNED']) {
       const cases = protocol.holdoutRowIds.map((rowId) =>
         atlmTeacherHoldoutCase(rowsById.get(rowId), basis, artifact, fitReference, protocol.split.holdoutReason));
@@ -980,7 +1005,6 @@ async function validateBundle(db, ownerId, datasetRecord, text) {
         summarizeAtlmTeacherMode(cases, { reason: protocol.split.holdoutReason }), 'INVALID_HOLDOUT_REPORT');
     }
   }
-  const selected = protocol.selectedRowIds.map((rowId) => rowsById.get(rowId));
   assertSame(evaluation.modes.ISSUED_FORECASTS,
     summarizeAtlmTeacherMode(selected.map((row) => atlmTeacherIssuedCase(row, { includeGroups: !perPlan })),
       { includeMedian: false, includeGroups: !perPlan }), 'INVALID_ISSUED_REPORT');
@@ -1013,7 +1037,8 @@ async function registerModel(context, selector, dataset, text) {
     ' AND ' + ATLM_UPLOAD_READY_SQL + ' AND ' + SOURCE_GUARD,
   ].join('\n')).bind(ownerId, commandId, args.datasetRevisionId, ownerId, ATLM_METHOD.version, ATLM_FEATURE_VERSION,
     nowMs, artifactJson, artifactDigest, JSON.stringify(artifact.manifest), dataset.dataset_digest, JSON.stringify(evaluation),
-    JSON.stringify({ ...provenance, verificationLevel: 'STRUCTURE_AND_PROVENANCE', rollingEvidenceOrigin: 'LOCAL_TRAINER' }),
+    JSON.stringify({ ...provenance, verificationLevel: 'STRUCTURE_AND_PROVENANCE',
+      ...(evaluation.protocolVersion !== ATLM_TEACHER_PROTOCOL_V3 ? { rollingEvidenceOrigin: 'LOCAL_TRAINER' } : {}) }),
     artifact.n, selected.length, protocol.trainCutoff, ...pending, ...ready, sources, ownerId);
   const sourceRows = db.prepare([
     'INSERT INTO estimation_model_revision_sources(owner_id,model_revision_id,plan_id,source_generation,ordinal,dataset_revision_id,row_id)',

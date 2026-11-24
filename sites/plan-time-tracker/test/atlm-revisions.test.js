@@ -242,11 +242,12 @@ test('snapshot source repair requeues safely and verifies old measurements from 
   assert.deepEqual(issued.get(OWNER, missing.planId), forecastBefore);
 });
 
-async function fitBundle(t, c, count, afterComplete = async () => {}, { perPlan = false } = {}) {
+async function fitBundle(t, c, count, afterComplete = async () => {}, { perPlan = false, fitOnly = false } = {}) {
   const plans = [];
+  const fullRoster = perPlan || fitOnly;
   for (let i = 0; i < count; i++) {
-    const task = perPlan ? { ...taskV4(), reuseLevel: i % 4 } : undefined;
-    const duration = perPlan ? 60_000 + (i % 4) * 90_000 : 60_000 + i * 10_001;
+    const task = fullRoster ? { ...taskV4(), reuseLevel: i % 4 } : undefined;
+    const duration = fullRoster ? 60_000 + (i % 4) * 90_000 : 60_000 + i * 10_001;
     const plan = await completed(c, duration, task);
     await afterComplete(plan, i);
     c.advance(1);
@@ -254,7 +255,7 @@ async function fitBundle(t, c, count, afterComplete = async () => {}, { perPlan 
   }
   const snapshot = await capture(c);
   const decisions = annotations(snapshot);
-  if (perPlan) {
+  if (fullRoster) {
     const sourceByRow = new Map(snapshot.rows.map((row) => [row.rowId, row.source]));
     const planById = new Map(plans.map((plan, index) => [plan.planId, { plan, index }]));
     const startById = new Map(snapshot.rows.map((row) => [row.planId, row.source.firstStartedAt]));
@@ -281,12 +282,14 @@ async function fitBundle(t, c, count, afterComplete = async () => {}, { perPlan 
   const recipePath = path.join(directory, 'recipe.json');
   const outputDir = path.join(directory, 'fit');
   writeFileSync(datasetPath, source.bytes);
+  const recipeVersion = fitOnly ? 3 : perPlan ? 2 : 1;
+  const recipeUse = fitOnly ? {} : perPlan
+    ? { backtestUse: 'UNKNOWN', backtestUseNote: 'Synthetic full roster fixture' }
+    : { holdoutUse: 'UNKNOWN', holdoutUseNote: 'Synthetic revision contract fixture' };
   writeFileSync(recipePath, JSON.stringify({
-    schemaVersion: 1, recipeId: perPlan ? 'atlm-teacher-hybrid-v2' : 'atlm-teacher-hybrid-v1', datasetRevisionId,
+    schemaVersion: 1, recipeId: 'atlm-teacher-hybrid-v' + recipeVersion, datasetRevisionId,
     datasetDigest: source.file.sha256, selection: { mode: 'ALL_ELIGIBLE' },
-    ...(perPlan
-      ? { backtestUse: 'UNKNOWN', backtestUseNote: 'Synthetic full roster fixture' }
-      : { holdoutUse: 'UNKNOWN', holdoutUseNote: 'Synthetic revision contract fixture' }),
+    ...recipeUse,
   }));
   const fit = spawnSync(process.execPath, [
     'scripts/train-atlm.mjs', '--dataset', datasetPath, '--recipe', recipePath, '--out', outputDir,
@@ -781,7 +784,9 @@ test('registration rejects forged proof and rolls back if a held-out source chan
 test('v2 registration keeps every verified plan and validates causal, comparable replay', async (t) => {
   const c = setup(t);
   const info = accepted((await mcp(c, 'GetTrackerInfo')).value.result);
-  assert.deepEqual(info.assessments.atlm.registry.teacherRecipeIds, ['atlm-teacher-hybrid-v1', 'atlm-teacher-hybrid-v2']);
+  assert.deepEqual(info.assessments.atlm.registry.teacherRecipeIds,
+    ['atlm-teacher-hybrid-v1', 'atlm-teacher-hybrid-v2', 'atlm-teacher-hybrid-v3']);
+  assert.equal(info.assessments.atlm.registry.defaultTeacherRecipeId, 'atlm-teacher-hybrid-v3');
   const { datasetRevisionId, bundleBytes, bundle, plans, dataset } = await fitBundle(t, c, 9, async (plan, index) => {
     if (index === 8) await ok(c, 'UpdatePlanMetadata', { planId: plan.planId, title: 'Changed actual scope' }, 2);
   }, { perPlan: true });
@@ -851,4 +856,63 @@ test('v2 registration keeps every verified plan and validates causal, comparable
   assert.equal(applied.activeModelRevisionId, modelRevisionId);
   const replay = accepted(await commit(c, REGISTER, args));
   assert.equal(replay.modelRevisionId, modelRevisionId);
+});
+
+test('v3 registers a fit-only bundle and measures real forecasts after explicit activation', async (t) => {
+  const c = setup(t);
+  const { datasetRevisionId, bundle, bundleBytes, plans } = await fitBundle(t, c, 6, undefined, { fitOnly: true });
+  assert.deepEqual(bundle.evaluation.modes, {});
+  assert.equal(bundle.artifact.n, plans.length);
+  assert.deepEqual(bundle.provenance.fitRowIds, bundle.provenance.selectedRowIds);
+
+  const partialFit = structuredClone(bundle);
+  partialFit.provenance.fitRowIds.pop();
+  const historicalReport = structuredClone(bundle);
+  historicalReport.evaluation.modes.ROLLING_PLAN_PLANNED = {};
+  const pointScores = structuredClone(bundle);
+  pointScores.artifact.selection.scores.median = 0;
+  const intervalScores = structuredClone(bundle);
+  intervalScores.artifact.intervalSelection.metrics.BAYESIAN_PREDICTIVE = { meanIntervalScore: 0 };
+  for (const [value, reason] of [
+    [partialFit, 'INVALID_SELECTED_ROSTER'], [historicalReport, 'INVALID_EVALUATION_MODES'],
+    [pointScores, 'INVALID_FIT_ONLY_POINT_SELECTION'], [intervalScores, 'INVALID_FIT_ONLY_INTERVAL_SELECTION'],
+  ]) {
+    const args = await upload(c, REGISTER, { datasetRevisionId }, value);
+    const failure = refused(await commit(c, REGISTER, args), 'INVALID_ARTIFACT');
+    assert.equal(failure.details.reason, reason);
+  }
+
+  const args = await upload(c, REGISTER, { datasetRevisionId }, bundleBytes);
+  const result = accepted(await commit(c, REGISTER, args));
+  const { modelRevisionId } = result;
+  assert.deepEqual(result.evaluationSummary, []);
+  assert.deepEqual(result.activationEligibility, { status: 'ELIGIBLE', reasons: [] });
+  const before = await tool(c, MODELS, { view: 'detail', modelRevisionId });
+  assert.equal(before.activeModelRevisionId, null);
+  assert.equal(before.revision.protocolVersion, 3);
+  assert.equal(before.revision.fitCount, plans.length);
+  assert.equal(before.trainingEvaluation, null);
+  assert.deepEqual(before.evidence.map(({ kind, source, status }) => ({ kind, source, status })),
+    [{ kind: 'ISSUED_FORECASTS', source: 'issued', status: 'UNAVAILABLE' }]);
+
+  const activation = {
+    modelRevisionId, expectedActiveModelRevisionId: null, expectedActivationVersion: 0,
+    reason: 'Verify explicit fit-only activation', commandId: crypto.randomUUID(),
+  };
+  const applied = await tool(c, ACTIVATE, activation);
+  assert.equal(applied.activeModelRevisionId, modelRevisionId);
+  assert.equal(applied.decision, 'ELIGIBLE');
+  assert.deepEqual(await tool(c, ACTIVATE, activation), { ...applied, replayed: true });
+  await expectError(c, ACTIVATE, { ...activation, commandId: crypto.randomUUID() }, 'MODEL_ACTIVATION_CONFLICT');
+
+  const issuedTarget = await completed(c, 2_500);
+  await capture(c);
+  const estimate = accepted((await mcp(c, 'GetSavedEstimate', { planId: issuedTarget.planId })).value.result);
+  assert.equal(estimate.serverEstimation.modelRevisionId, modelRevisionId);
+  const after = await tool(c, MODELS, { view: 'detail', modelRevisionId });
+  assert.equal(after.evidence.length, 1);
+  assert.equal(after.evidence[0].source, 'issued');
+  assert.equal(after.evidence[0].status, 'AVAILABLE');
+  assert.equal(after.evidence[0].summary.metrics.pointCaseCount, 1);
+  assert.equal(after.evidence[0].summary.metrics.totalActualMs, 2_500);
 });

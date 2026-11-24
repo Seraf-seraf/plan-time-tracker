@@ -102,13 +102,15 @@ test("forecast and registry MCP discovery use the same strict branches as runtim
     assert.equal(atlm.predictionScope, "FULL_FROM_FIRST_START");
     assert.equal(atlm.registry.limits.partSize, 49152);
     assert.equal(atlm.registry.limits.maxPageSize, 50);
-    assert.equal(atlm.registry.defaultTeacherRecipeId, "atlm-teacher-hybrid-v2");
+    assert.equal(atlm.registry.defaultTeacherRecipeId, "atlm-teacher-hybrid-v3");
     const snapshots = tools.get("CreateTrainingSnapshot");
     const repair = snapshots.inputSchema.oneOf.find(shape => shape.properties.mode?.enum.includes("repair"));
     assert.ok(repair.required.includes("planIds"));
     assert.equal(repair.properties.planIds.maxItems, 25);
     assert.match(snapshots.description, /свежий снимок.*mode:"repair"/);
+    assert.match(snapshots.description, /по отдельному поручению на восстановление/);
     assert.match(tools.get("SaveDatasetRevision").description, /USER_REQUESTED_SKIP по planId/);
+    assert.match(tools.get("SaveDatasetRevision").description, /исключите удалённые планы и планы без подтверждённого факта/i);
     assert.equal(atlm.retrainEveryNewPlans, undefined);
   } finally { c.close(); }
 });

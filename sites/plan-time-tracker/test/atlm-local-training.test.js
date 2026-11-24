@@ -6,8 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { atlmArtifactValid, normalizeAgentTask, predictAtlm } from '../worker/atlm/model.js';
-import { mergeAtlmTeacherAnnotations } from '../worker/atlm/teacher-dataset.js';
+import { atlmArtifactValid, fitHybridAtlm, normalizeAgentTask, predictAtlm } from '../worker/atlm/model.js';
+import { ATLM_TEACHER_RECIPE_ID_V3, mergeAtlmTeacherAnnotations, readAtlmTeacherDataset } from '../worker/atlm/teacher-dataset.js';
 import { canonical, hashCommandInput } from '../worker/shared/index.js';
 import { teacherAnnotation, teacherSource } from './fixtures/atlm-revisions.mjs';
 
@@ -118,7 +118,7 @@ function inputFiles(directory, name, dataset, changes = {}) {
     holdoutUseNote: 'История предыдущего просмотра неизвестна.',
     ...changes,
   };
-  if (recipe.recipeId === 'atlm-teacher-hybrid-v2') {
+  if (recipe.recipeId === 'atlm-teacher-hybrid-v2' || recipe.recipeId === ATLM_TEACHER_RECIPE_ID_V3) {
     delete recipe.holdoutUse;
     delete recipe.holdoutUseNote;
   }
@@ -187,6 +187,56 @@ test('v2 fits all 77 eligible plans and evaluates only the available actual hist
     && actual.cases[index].pointStatus === 'AVAILABLE' && item.pointMs !== actual.cases[index].pointMs));
   assert.equal(planned.paired.candidate.caseCount, planned.paired.median.caseCount);
   assert.equal(Object.hasOwn(planned.paired, 'groupCount'), false);
+});
+
+test('v3 fits every verified row once with default model policies and no evaluation modes', async (t) => {
+  const directory = temporary(t);
+  const dataset = datasetFixture({ fullFit: true });
+  const files = inputFiles(directory, 'training', dataset, { recipeId: ATLM_TEACHER_RECIPE_ID_V3 });
+  const outputDir = path.join(directory, 'run');
+  const { progress } = run(files, outputDir, 0);
+  assert.deepEqual(progress.map(({ stage }) => stage), ['VALIDATED', 'ROSTER', 'FIT', 'SAVED']);
+  assert.equal(progress.find(({ stage }) => stage === 'FIT').sampleCount, 77);
+  const { artifact, evaluation, provenance } = readJson(outputDir, 'registration.bundle.json');
+  const { trainingRows } = readAtlmTeacherDataset(dataset);
+  const expectedIds = trainingRows.map(({ sampleId }) => sampleId);
+  const cutoff = Math.max(...trainingRows.map(({ sourceAvailableAt }) => sourceAvailableAt));
+  const expected = await fitHybridAtlm(trainingRows, { cutoff });
+  assert.equal(expected.status, 'AVAILABLE');
+  assert.deepEqual(artifact, expected.artifact);
+  assert.equal(artifact.selectedEngine, 'RIDGE');
+  assert.equal(artifact.intervalEngine, 'BAYESIAN_PREDICTIVE');
+  assert.equal(artifact.intervalSelection.validationStatus, 'EXPERIMENTAL');
+  assert.equal(artifact.residualQuantiles, null);
+  assert.deepEqual(artifact.selection.caseIds, []);
+  assert.deepEqual(artifact.intervalSelection.caseIds, []);
+  assert.deepEqual(provenance, {
+    trainerVersion: 3, codeRef: provenance.codeRef,
+    recipeDigest: 'sha256:' + await hashCommandInput(files.recipe),
+    configuration: files.recipe,
+    selectedRowIds: expectedIds, fitRowIds: expectedIds, trainCutoff: cutoff,
+  });
+  assert.deepEqual(evaluation, {
+    schemaVersion: 1, protocolVersion: 3, metric: 'PLAN_ACTIVE', unit: 'ms',
+    split: { protocolVersion: 3 }, modes: {}, rowDecisions: dataset.rows.map((row) => ({
+      rowId: row.rowId, planId: row.planId, eligibility: row.eligibility,
+      role: row.eligibility === 'ELIGIBLE' ? 'FIT' : 'EXCLUDED', reasons: row.reasons,
+    })),
+  });
+});
+
+test('v3 preserves the full roster and solver reason when no model is available', (t) => {
+  const directory = temporary(t);
+  const dataset = datasetFixture();
+  dataset.rows = [dataset.rows[0], dataset.rows.at(-1)];
+  const files = inputFiles(directory, 'training', dataset, { recipeId: ATLM_TEACHER_RECIPE_ID_V3 });
+  const outputDir = path.join(directory, 'run');
+  const { result } = run(files, outputDir, 2);
+  assert.equal(result.reason, 'INSUFFICIENT_DATA');
+  assert.equal(result.registrationPath, null);
+  assert.equal(existsSync(path.join(outputDir, 'registration.bundle.json')), false);
+  assert.deepEqual(readJson(outputDir, 'evaluation.json').modes, {});
+  assert.deepEqual(readJson(outputDir, 'manifest.json').provenance.fitRowIds, ['r-00']);
 });
 
 test('CLI freezes grouped development and holdout, evaluates separate feature bases and preserves the bundle', (t) => {

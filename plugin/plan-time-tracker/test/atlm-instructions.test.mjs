@@ -92,7 +92,7 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     assert.match(train, /registry\.teacherRecipeIds/u);
     const recipeSection = train.split('## Локальный рецепт и проверка\n')[1];
     const recipe = JSON.parse(recipeSection.match(/```json\n([\s\S]*?)```/u)[1]);
-    assert.equal(recipe.recipeId, 'atlm-teacher-hybrid-v2');
+    assert.equal(recipe.recipeId, 'atlm-teacher-hybrid-v3');
     assert.equal(registry.defaultTeacherRecipeId, recipe.recipeId);
     assert.ok(registry.teacherRecipeIds.includes(recipe.recipeId));
     assert.deepEqual(recipe.selection, { mode: 'ALL_ELIGIBLE' });
@@ -108,7 +108,9 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     const repair = registry.tools.CreateTrainingSnapshot.oneOf.find((branch) => branch.properties.mode.enum.includes('repair'));
     assert.deepEqual([...repair.required].sort(), ['commandId', 'mode', 'planIds', 'schemaVersion']);
     assert.equal(repair.properties.planIds.maxItems, 25);
-    assert.match(train, /CreateTrainingSnapshot\(\{schemaVersion:1,mode:'repair',commandId,planIds\}\)/u);
+    assert.match(train, /\{schemaVersion:1,mode:'create',commandId\}[^\n]+новым UUID/u);
+    assert.match(train, /mode:'repair'` выполняется по отдельному поручению/u);
+    assert.doesNotMatch(train, /backtestUse|holdoutUse|historicalAvailability/u);
     const saveDescription = listing.find((tool) => tool.name === 'SaveDatasetRevision').description;
     for (const term of ['ELIGIBLE', 'ACTUAL', 'EXCLUDED', 'snapshotId', 'parentDatasetRevisionId']) {
       assert.ok(saveDescription.includes(term), 'SaveDatasetRevision must describe ' + term);

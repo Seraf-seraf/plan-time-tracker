@@ -32,6 +32,8 @@ const ATLM_TEACHER_TRAINER_VERSION = 1;
 const ATLM_TEACHER_RECIPE_ID = 'atlm-teacher-hybrid-v1';
 const ATLM_TEACHER_PROTOCOL_V2 = 2;
 const ATLM_TEACHER_RECIPE_ID_V2 = 'atlm-teacher-hybrid-v2';
+const ATLM_TEACHER_PROTOCOL_V3 = 3;
+const ATLM_TEACHER_RECIPE_ID_V3 = 'atlm-teacher-hybrid-v3';
 const ATLM_TEACHER_CODE_PATHS = Object.freeze([
   'scripts/train-atlm.mjs',
   'worker/atlm/model.js',
@@ -220,22 +222,26 @@ function recipeError(code, message, details) {
 }
 
 function atlmTeacherProtocolVersion(recipe) {
+  if (recipe?.recipeId === ATLM_TEACHER_RECIPE_ID_V3) return ATLM_TEACHER_PROTOCOL_V3;
   return recipe?.recipeId === ATLM_TEACHER_RECIPE_ID_V2
     ? ATLM_TEACHER_PROTOCOL_V2 : ATLM_TEACHER_TRAINER_VERSION;
 }
 
 function parseAtlmTeacherRecipe(recipe, datasetRevisionId, datasetDigest) {
-  const planBased = atlmTeacherProtocolVersion(recipe) === ATLM_TEACHER_PROTOCOL_V2;
+  const protocolVersion = atlmTeacherProtocolVersion(recipe);
+  const planBased = protocolVersion === ATLM_TEACHER_PROTOCOL_V2;
+  const fitOnly = protocolVersion === ATLM_TEACHER_PROTOCOL_V3;
   const useField = planBased ? 'backtestUse' : 'holdoutUse';
   const noteField = planBased ? 'backtestUseNote' : 'holdoutUseNote';
   if (!hasExactFields(recipe, [
     'schemaVersion', 'recipeId', 'datasetRevisionId', 'datasetDigest', 'selection',
-    useField, noteField,
+    ...(fitOnly ? [] : [useField, noteField]),
   ]) || recipe.schemaVersion !== ATLM_DATASET_VERSION
-    || (!planBased && recipe.recipeId !== ATLM_TEACHER_RECIPE_ID)
+    || (protocolVersion === ATLM_TEACHER_TRAINER_VERSION && recipe.recipeId !== ATLM_TEACHER_RECIPE_ID)
     || !validId(recipe.datasetRevisionId) || !isSnapshotDigest(recipe.datasetDigest)
-    || !REVIEW_DECLARATIONS.has(recipe[useField])
-    || typeof recipe[noteField] !== 'string' || !recipe[noteField].trim()) {
+    || (!fitOnly && (!REVIEW_DECLARATIONS.has(recipe[useField])
+      || typeof recipe[noteField] !== 'string' || !recipe[noteField].trim()))) {
+    if (fitOnly) throw recipeError('INVALID_RECIPE', 'Invalid recipe version or fields.');
     const declaration = planBased ? 'backtest' : 'holdout';
     throw recipeError('INVALID_RECIPE', `Invalid recipe version, fields, or ${declaration} declaration.`);
   }
@@ -247,7 +253,7 @@ function parseAtlmTeacherRecipe(recipe, datasetRevisionId, datasetDigest) {
   }
   const selection = recipe.selection;
   if (selection?.mode === 'ALL_ELIGIBLE' && hasExactFields(selection, ['mode'])) return recipe;
-  if (planBased) throw recipeError('INVALID_RECIPE', 'This recipe requires selection of all eligible rows.');
+  if (planBased || fitOnly) throw recipeError('INVALID_RECIPE', 'This recipe requires selection of all eligible rows.');
   if (selection?.mode !== 'EXPLICIT' || !hasExactFields(selection, ['mode', 'rowIds'])
     || !Array.isArray(selection.rowIds)) {
     throw recipeError('INVALID_RECIPE', 'Invalid selection mode or fields.');
@@ -346,7 +352,8 @@ function historicalAvailability(row) {
   return null;
 }
 
-function buildAtlmTeacherPlanProtocol(dataset, trainingRows, recipe) {
+function buildAtlmTeacherPlanProtocol(dataset, trainingRows, recipe, protocolVersion) {
+  const includeHistory = protocolVersion === ATLM_TEACHER_PROTOCOL_V2;
   const fitRowIds = trainingRows.map((row) => row.sampleId);
   const fitIds = new Set(fitRowIds);
   const rowDecisions = dataset.rows.map((row) => {
@@ -354,21 +361,21 @@ function buildAtlmTeacherPlanProtocol(dataset, trainingRows, recipe) {
     return {
       rowId: row.rowId, planId: row.planId, eligibility: row.eligibility,
       role: fitted ? 'FIT' : 'EXCLUDED', reasons: row.reasons,
-      historicalAvailableAt: fitted ? historicalAvailability(row) : null,
+      ...(includeHistory ? { historicalAvailableAt: fitted ? historicalAvailability(row) : null } : {}),
     };
   });
   const trainCutoff = trainingRows.reduce((cutoff, row) => Math.max(cutoff ?? 0, row.sourceAvailableAt), null);
   const split = {
-    protocolVersion: ATLM_TEACHER_PROTOCOL_V2,
-    backtestUse: recipe.backtestUse,
-    backtestUseNote: recipe.backtestUseNote,
+    protocolVersion,
+    ...(includeHistory ? { backtestUse: recipe.backtestUse, backtestUseNote: recipe.backtestUseNote } : {}),
   };
   return { split, rowDecisions, selectedRowIds: fitRowIds, fitRowIds, trainCutoff };
 }
 
 function buildAtlmTeacherSplit(dataset, trainingRows, recipe) {
-  if (atlmTeacherProtocolVersion(recipe) === ATLM_TEACHER_PROTOCOL_V2) {
-    return buildAtlmTeacherPlanProtocol(dataset, trainingRows, recipe);
+  const protocolVersion = atlmTeacherProtocolVersion(recipe);
+  if (protocolVersion !== ATLM_TEACHER_TRAINER_VERSION) {
+    return buildAtlmTeacherPlanProtocol(dataset, trainingRows, recipe, protocolVersion);
   }
   const { groups, selected } = selectedTeacherGroups(dataset, trainingRows, recipe.selection);
   const boundary = holdoutBoundary(groups, selected.size);
@@ -630,6 +637,7 @@ export {
   ATLM_DATASET_VERSION, TEACHER_ANNOTATIONS_CONTRACT, TEACHER_DATASET_CONTRACT,
   ATLM_TEACHER_TRAINER_VERSION, ATLM_TEACHER_RECIPE_ID, ATLM_TEACHER_CODE_PATHS, ATLM_TEACHER_MODES,
   ATLM_TEACHER_PROTOCOL_V2, ATLM_TEACHER_RECIPE_ID_V2, ATLM_TEACHER_MODES_V2,
+  ATLM_TEACHER_PROTOCOL_V3, ATLM_TEACHER_RECIPE_ID_V3,
   buildAtlmTeacherTrainingRows, mergeAtlmTeacherAnnotations, readAtlmTeacherDataset,
   atlmTeacherProtocolVersion, parseAtlmTeacherRecipe, buildAtlmTeacherSplit, atlmTeacherFitReference,
   atlmTeacherRollingHistory, atlmTeacherCase, atlmTeacherPlannedExclusion, atlmTeacherRollingCase,

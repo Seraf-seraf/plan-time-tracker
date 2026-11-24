@@ -15,6 +15,7 @@ const otherPlan = crypto.randomUUID();
 const activeId = 'atlm-11-r2';
 const priorId = 'atlm-11-r1';
 const registeredId = 'atlm-11-r3';
+const fullFitId = 'atlm-full-fit-v3';
 const longId = 'atlm-' + 'archived-revision-'.repeat(6) + '7';
 for (const planId of [PLAN, otherPlan]) {
   await ok(c, 'CreatePlan', { planId, title: 'Forecast planned', planText: '## Этап 1. Проверить\nГотово.',
@@ -183,7 +184,15 @@ async function seedRegistry() {
   const detail = (await call(c, '/api/tracker/model-revisions?view=detail&modelRevisionId=' + activeId)).value;
   assert.equal(detail.revision.fitCount, 61);
   assert.equal(detail.evidence[0].summary.rowCount, 14);
-  return examples[0].planId;
+  function addFullFitRevision() {
+    c.advance(1);
+    const evaluation = { schemaVersion: 1, protocolVersion: 3, modes: {} };
+    register.run(OWNER, fullFitId, artifact.method.version, artifact.featureSchemaVersion, c.now(), c.now(),
+      JSON.stringify(artifact), JSON.stringify(artifact.manifest), artifact.datasetDigest, JSON.stringify(evaluation),
+      artifact.n, examples.length, artifact.trainCutoff, 1);
+    for (const [index, example] of examples.entries()) source.run(fullFitId, index, OWNER, example.planId);
+  }
+  return { changedPlan: examples[0].planId, addFullFitRevision };
 }
 
 try {
@@ -302,7 +311,7 @@ try {
   releaseHeld();releaseHeld = null;await finished;
   assert.equal(await forecast().getAttribute('data-plan-id'), otherPlan);assert.match(await forecast().innerText(), /Около 7 мин/);assert.doesNotMatch(await forecast().innerText(), /Около 2 мин/);
 
-  const changedPlan = await seedRegistry();
+  const { changedPlan, addFullFitRevision } = await seedRegistry();
   const modelRequests = () => requests.filter(item => item.path.startsWith('/api/tracker/model-revisions'));
   const caseRequests = () => modelRequests().filter(item => item.path.endsWith('/evidence/cases'));
   await navSettings.click();
@@ -522,9 +531,22 @@ try {
   await methodology.locator('summary').click();
   await reportPicker.selectOption({ label: savedForecastsTitle });
   await report.getByRole('heading', { name: savedForecastsTitle, exact: true }).waitFor();
+
+  addFullFitRevision();
+  await navSettings.click();
+  await history.getByRole('button', { name: 'Показать ' + fullFitId, exact: true }).click();
+  await quality.getByText('Планов в финальном обучении 61', { exact: true }).waitFor();
+  await report.getByRole('heading', { name: 'Выданные прогнозы', exact: true }).waitFor();
+  await report.getByText('По этой ревизии пока нет завершённых планов с выданным прогнозом.', { exact: true }).waitFor();
+  await control.waitFor({ state: 'hidden' });
+  await reportPicker.waitFor({ state: 'hidden' });
+  await page.setViewportSize({ width: 375, height: 1100 });
+  await quality.screenshot({ path: resolve(artifacts, 'model-full-fit-quality-375.png') });
+  await page.setViewportSize({ width: desktopWidthCssPx, height: 1100 });
+
   await settings.getByRole('button', { name: 'Вернуться к назначенной ревизии' }).click();
-  await control.check();
   await quality.getByRole('heading', { name: 'Проверка на истории', exact: true }).waitFor();
+  assert.equal(await control.isChecked(), true, 'v3 does not change the chosen report source for legacy revisions');
 
   await ok(c, 'DeletePlan', { planId: changedPlan }, 2);
   await moreRevisions.click();

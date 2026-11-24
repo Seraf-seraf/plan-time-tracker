@@ -3,8 +3,10 @@ import test from 'node:test';
 import { teacherAnnotation, teacherSource } from './fixtures/atlm-revisions.mjs';
 import {
   ATLM_TEACHER_PROTOCOL_V2,
+  ATLM_TEACHER_PROTOCOL_V3,
   ATLM_TEACHER_RECIPE_ID,
   ATLM_TEACHER_RECIPE_ID_V2,
+  ATLM_TEACHER_RECIPE_ID_V3,
   atlmTeacherIssuedCase,
   atlmTeacherRollingCase,
   atlmTeacherRollingHistory,
@@ -135,6 +137,29 @@ test('v2 requires the full roster and uses per-plan history before the strict st
     ['declared-ready', 11_000], ['recorded', 35_000], ['source-ready', 11_000], ['tie', 30_000],
   ]);
   assert.equal(trainingRows.find(({ sampleId }) => sampleId === 'tie').sourceAvailableAt, 21_000);
+});
+
+test('v3 requires the full roster and disregards historical annotation availability', () => {
+  const { backtestUse, backtestUseNote, ...common } = planRecipe;
+  const input = { ...common, recipeId: ATLM_TEACHER_RECIPE_ID_V3 };
+  const { datasetRevisionId, datasetDigest } = input;
+  const recipe = parseAtlmTeacherRecipe(input, datasetRevisionId, datasetDigest);
+  for (const change of [{ backtestUse }, { backtestUseNote }, { selection: { mode: 'EXPLICIT', rowIds: ['repaired'] } }]) {
+    assert.throws(() => parseAtlmTeacherRecipe({ ...input, ...change }, datasetRevisionId, datasetDigest),
+      { code: 'INVALID_RECIPE' });
+  }
+  const rows = [eligibleRow('legacy', 1, { groupId: 'legacy', availableAt: null }),
+    eligibleRow('repaired', 2, { availableAt: 90_000, recordedAt: 100_000 })];
+  const trainingRows = buildAtlmTeacherTrainingRows(rows);
+  assert.deepEqual(buildAtlmTeacherSplit({ rows }, trainingRows, recipe), {
+    split: { protocolVersion: ATLM_TEACHER_PROTOCOL_V3 },
+    selectedRowIds: ['legacy', 'repaired'],
+    fitRowIds: ['legacy', 'repaired'],
+    trainCutoff: 21_000,
+    rowDecisions: rows.map(({ rowId, planId, eligibility, reasons }) => ({
+      rowId, planId, eligibility, reasons, role: 'FIT',
+    })),
+  });
 });
 
 test('v1 excludes rows that cannot be verified with the grouped protocol', () => {

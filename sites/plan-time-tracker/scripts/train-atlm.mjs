@@ -20,6 +20,7 @@ import {
 import {
   ATLM_TEACHER_CODE_PATHS,
   ATLM_TEACHER_PROTOCOL_V2,
+  ATLM_TEACHER_PROTOCOL_V3,
   atlmTeacherCase,
   atlmTeacherFitReference,
   atlmTeacherHoldoutCase,
@@ -174,9 +175,43 @@ async function replayPlanned(targets, rowsById, historyFor, replay, baseCache, p
   return cases;
 }
 
+function assertFitRoster(artifact, fitReference, trainCutoff) {
+  if (artifact && (artifact.datasetDigest !== fitReference.trainDigest
+    || canonical(artifact.manifest) !== canonical(fitReference.manifest)
+    || artifact.trainCutoff !== trainCutoff)) {
+    throw appError('FIT_ROSTER_MISMATCH', 'The artifact differs from the frozen fit roster.');
+  }
+}
+
+async function trainFitOnly(fitRows, protocol, recipe, input, codeRef) {
+  const { split, rowDecisions, selectedRowIds, fitRowIds, trainCutoff } = protocol;
+  progress('ROSTER', { selectedCount: selectedRowIds.length, fitCount: fitRows.length });
+  const fitReference = await atlmTeacherFitReference(fitRows);
+  progress('FIT', { sampleCount: fitRows.length });
+  const fit = await fitHybridAtlm(fitRows, { cutoff: trainCutoff });
+  assertFitRoster(fit.artifact, fitReference, trainCutoff);
+  const evaluation = {
+    schemaVersion: 1, protocolVersion: ATLM_TEACHER_PROTOCOL_V3,
+    metric: 'PLAN_ACTIVE', unit: 'ms', split, modes: {}, rowDecisions,
+  };
+  const provenance = {
+    trainerVersion: ATLM_TEACHER_PROTOCOL_V3,
+    codeRef,
+    recipeDigest: 'sha256:' + (await hashCommandInput(recipe)),
+    configuration: recipe,
+    selectedRowIds,
+    fitRowIds,
+    trainCutoff,
+  };
+  return trainingOutput(input, fit, evaluation, provenance, null);
+}
+
 async function train(dataset, trainingRows, recipe, input, codeRef) {
   const protocol = buildAtlmTeacherSplit(dataset, trainingRows, recipe);
   const protocolVersion = atlmTeacherProtocolVersion(recipe);
+  if (protocolVersion === ATLM_TEACHER_PROTOCOL_V3) {
+    return trainFitOnly(trainingRows, protocol, recipe, input, codeRef);
+  }
   const fullFit = protocolVersion === ATLM_TEACHER_PROTOCOL_V2;
   const {
     split, rowDecisions, selectedRowIds, fitRowIds, holdoutRowIds = [], purgedRowIds = [], trainCutoff,
@@ -216,11 +251,7 @@ async function train(dataset, trainingRows, recipe, input, codeRef) {
   }
   const { fit, calibration } = fitted;
   const artifact = fit.artifact ?? null;
-  if (artifact && (artifact.datasetDigest !== fitReference.trainDigest
-    || canonical(artifact.manifest) !== canonical(fitReference.manifest)
-    || artifact.trainCutoff !== trainCutoff)) {
-    throw appError('FIT_ROSTER_MISMATCH', 'The artifact differs from the frozen fit roster.');
-  }
+  assertFitRoster(artifact, fitReference, trainCutoff);
   const holdoutReason = split.holdoutReason ?? (artifact ? null : fit.reason);
   const actualCase = (rowId, args) => {
     const row = rowsById.get(rowId);
@@ -280,6 +311,11 @@ async function train(dataset, trainingRows, recipe, input, codeRef) {
       : { holdoutRowIds, purgedRowIds, holdoutCutoff: split.holdoutCutoff, groups: split.groups,
         holdoutUse: split.holdoutUse, holdoutUseNote: split.holdoutUseNote }),
   };
+  return trainingOutput(input, fit, evaluation, provenance, calibration);
+}
+
+function trainingOutput(input, fit, evaluation, provenance, calibration) {
+  const artifact = fit.artifact ?? null;
   const files = {
     'evaluation.json': jsonFile(evaluation),
     'manifest.json': jsonFile({
