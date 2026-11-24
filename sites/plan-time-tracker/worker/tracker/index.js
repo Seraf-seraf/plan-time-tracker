@@ -1,6 +1,8 @@
 import { assessmentReadiness, planStartReadiness, readinessFromRow } from '../atlm/readiness.js';
 import { ATLM_REVISION_LIMITS, ATLM_REVISION_TEACHER_RECIPE_IDS, ATLM_REVISION_TOOL_SCHEMAS } from '../atlm/revisions.js';
-import { ATLM_TEACHER_RECIPE_ID_V3 } from '../atlm/teacher-dataset.js';
+import {
+  ATLM_TEACHER_RECIPE_ID_V4, TEACHER_REVIEWED_ANNOTATIONS_CONTRACT, TEACHER_REVIEWED_DATASET_CONTRACT,
+} from '../atlm/teacher-dataset.js';
 import {
   AppError,
   ENVIRONMENT_IDS,
@@ -1490,7 +1492,15 @@ async function readTrackerCapabilities(db, ownerId) {
           tools: ATLM_REVISION_TOOL_SCHEMAS,
           limits: ATLM_REVISION_LIMITS,
           teacherRecipeIds: [...ATLM_REVISION_TEACHER_RECIPE_IDS],
-          defaultTeacherRecipeId: ATLM_TEACHER_RECIPE_ID_V3,
+          defaultTeacherRecipeId: ATLM_TEACHER_RECIPE_ID_V4,
+          teacherDataset: {
+            annotationContract: TEACHER_REVIEWED_ANNOTATIONS_CONTRACT,
+            exportContract: TEACHER_REVIEWED_DATASET_CONTRACT,
+            featureSource: 'annotation.agentTask',
+            measuredTimeOverride: 'annotation.actualTime',
+            timeUnit: 'milliseconds',
+            instructions: 'Проверьте каждый завершённый неудалённый план. По коду и материалам плана уточните все признаки. Для исправления или добавления фактического активного времени запишите actualMs и evidence в annotation.actualTime. Подтверждённый ноль допустим. Исходные замечания снимка служат подсказками для проверки. Учтите явные уточнения пользователя.',
+          },
           trainingExecution: 'LOCAL',
           activation: 'EXPLICIT',
         },

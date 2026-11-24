@@ -160,6 +160,55 @@ async function capture(c) {
   return (await download(c, SNAPSHOT, { mode: 'read', snapshotId })).value;
 }
 
+test('snapshot freezes completed plan identity and timing evidence without an observation', async (t) => {
+  const c = setup(t);
+  const missing = await completed(c, 2_000);
+  const deleted = await completed(c, 3_000);
+  await ok(c, 'DeletePlan', { planId: deleted.planId }, 2);
+  const db = c.db.sqlite;
+  const removeJob = db.prepare('DELETE FROM estimation_jobs WHERE owner_id=? AND plan_id=?');
+  const countSamples = db.prepare('SELECT count(*) AS n FROM estimation_samples WHERE owner_id=? AND plan_id=?');
+  for (const { planId } of [missing, deleted]) {
+    assert.equal(removeJob.run(OWNER, planId).changes, 1);
+    assert.equal(countSamples.get(OWNER, planId).n, 0);
+  }
+
+  const snapshot = await capture(c);
+  const rows = new Map(snapshot.rows.map((row) => [row.planId, row]));
+  const row = rows.get(missing.planId);
+  assert.equal(row.rowId, missing.planId);
+  assert.equal(row.rawEligibility, 'EXCLUDED');
+  assert.deepEqual(row.rawReasons, ['SOURCE_NOT_OBSERVED']);
+  assert.equal(row.source.planId, missing.planId);
+  assert.equal(row.source.planStatus, 'COMPLETED');
+  assert.equal(row.source.deletedAt, null);
+  assert.equal(row.source.sourceGeneration, 0);
+  assert.equal(row.source.status, 'UNAVAILABLE');
+  assert.equal(row.source.sourceDigest, null);
+  assert.equal(row.source.sourceAvailableAt, null);
+  assert.equal(row.source.actualMs, null);
+  assert.equal(row.source.finishedAt - row.source.firstStartedAt, 2_000);
+
+  const { intervals, journal, outcome } = row.evidence;
+  assert.equal(intervals.length, 1);
+  assert.equal(intervals[0].startMs, row.source.firstStartedAt);
+  assert.equal(intervals[0].endMs, row.source.finishedAt);
+  const start = journal.find((item) => item.eventType === 'StartPlan');
+  const finish = journal.find((item) => item.eventType === 'FinishPlan');
+  assert.equal(start.occurredAt, row.source.firstStartedAt);
+  assert.equal(finish.occurredAt, row.source.finishedAt);
+  assert.equal(outcome.commandId, finish.commandId);
+  assert.equal(outcome.finishedAt, row.source.finishedAt);
+  assert(row.source.evidenceRefs.some((item) => item.kind === 'COMMAND' && item.id === finish.commandId));
+  assert.equal(countSamples.get(OWNER, missing.planId).n, 0);
+
+  const excluded = rows.get(deleted.planId);
+  assert.equal(excluded.source.planStatus, 'COMPLETED');
+  assert(excluded.source.deletedAt !== null);
+  assert.equal(excluded.rawEligibility, 'EXCLUDED');
+  assert.deepEqual(excluded.rawReasons, ['PLAN_DELETED', 'SOURCE_NOT_OBSERVED']);
+});
+
 test('snapshot source repair requeues safely and verifies old measurements from the original journal', async (t) => {
   const c = setup(t);
   const healthy = await completed(c, 1_000);
@@ -273,6 +322,11 @@ async function fitBundle(t, c, count, afterComplete = async () => {}, { perPlan 
   }
   const { saved } = await save(c, decisions);
   assert.equal(saved.state, 'SAVED');
+  const recipeVersion = fitOnly ? 3 : perPlan ? 2 : 1;
+  return { ...await fitSavedBundle(t, c, saved, recipeVersion), plans };
+}
+
+async function fitSavedBundle(t, c, saved, recipeVersion) {
   const { datasetRevisionId } = saved;
   const source = await download(c, DATASET, { datasetRevisionId });
   assert.equal(source.file.sha256, saved.datasetDigest);
@@ -282,8 +336,7 @@ async function fitBundle(t, c, count, afterComplete = async () => {}, { perPlan 
   const recipePath = path.join(directory, 'recipe.json');
   const outputDir = path.join(directory, 'fit');
   writeFileSync(datasetPath, source.bytes);
-  const recipeVersion = fitOnly ? 3 : perPlan ? 2 : 1;
-  const recipeUse = fitOnly ? {} : perPlan
+  const recipeUse = recipeVersion >= 3 ? {} : recipeVersion === 2
     ? { backtestUse: 'UNKNOWN', backtestUseNote: 'Synthetic full roster fixture' }
     : { holdoutUse: 'UNKNOWN', holdoutUseNote: 'Synthetic revision contract fixture' };
   writeFileSync(recipePath, JSON.stringify({
@@ -297,7 +350,7 @@ async function fitBundle(t, c, count, afterComplete = async () => {}, { perPlan 
   assert.ifError(fit.error);
   assert.equal(fit.status, 0, fit.stderr);
   const bundleBytes = readFileSync(JSON.parse(fit.stdout).registrationPath);
-  return { datasetRevisionId, bundleBytes, bundle: JSON.parse(bundleBytes), plans, dataset: source.value };
+  return { datasetRevisionId, bundleBytes, bundle: JSON.parse(bundleBytes), dataset: source.value };
 }
 
 test('snapshot retries pending refresh, preserves failed rows, and remains frozen across pages', async (t) => {
@@ -785,8 +838,8 @@ test('v2 registration keeps every verified plan and validates causal, comparable
   const c = setup(t);
   const info = accepted((await mcp(c, 'GetTrackerInfo')).value.result);
   assert.deepEqual(info.assessments.atlm.registry.teacherRecipeIds,
-    ['atlm-teacher-hybrid-v1', 'atlm-teacher-hybrid-v2', 'atlm-teacher-hybrid-v3']);
-  assert.equal(info.assessments.atlm.registry.defaultTeacherRecipeId, 'atlm-teacher-hybrid-v3');
+    ['atlm-teacher-hybrid-v1', 'atlm-teacher-hybrid-v2', 'atlm-teacher-hybrid-v3', 'atlm-teacher-hybrid-v4']);
+  assert.equal(info.assessments.atlm.registry.defaultTeacherRecipeId, 'atlm-teacher-hybrid-v4');
   const { datasetRevisionId, bundleBytes, bundle, plans, dataset } = await fitBundle(t, c, 9, async (plan, index) => {
     if (index === 8) await ok(c, 'UpdatePlanMetadata', { planId: plan.planId, title: 'Changed actual scope' }, 2);
   }, { perPlan: true });
@@ -915,4 +968,90 @@ test('v3 registers a fit-only bundle and measures real forecasts after explicit 
   assert.equal(after.evidence[0].status, 'AVAILABLE');
   assert.equal(after.evidence[0].summary.metrics.pointCaseCount, 1);
   assert.equal(after.evidence[0].summary.metrics.totalActualMs, 2_500);
+});
+
+test('v4 requires evidence-backed teacher decisions and registers the newly reviewed complete roster', async (t) => {
+  const c = setup(t);
+  const missing = await completed(c, 2_000);
+  const amended = await completed(c, 3_000);
+  const disputed = await completed(c, 4_000);
+  const skipped = await completed(c, 5_000);
+  const incomplete = await plannedAtlm(c, crypto.randomUUID());
+  await ok(c, 'StartPlan', { planId: incomplete.planId }, 0);
+  c.advance(6_000);
+  await ok(c, 'FinishPlan', { planId: incomplete.planId, allowIncomplete: true, reason: 'Legacy incomplete stages' }, 1);
+  c.advance(1);
+  const unfinished = await plannedAtlm(c, crypto.randomUUID());
+  c.db.sqlite.prepare('DELETE FROM estimation_jobs WHERE owner_id=? AND plan_id=?').run(OWNER, missing.planId);
+  const snapshot = await capture(c);
+  const byPlan = new Map(snapshot.rows.map((row) => [row.planId, row]));
+  assert.equal(byPlan.get(missing.planId).source.actualMs, null);
+  assert.ok(byPlan.get(incomplete.planId).rawReasons.includes('RESULT_NOT_VERIFIED'));
+  assert.equal(byPlan.get(incomplete.planId).source.actualMs, 6_000);
+
+  const row = (planId) => teacherAnnotation(byPlan.get(planId).rowId, null);
+  const ignore = (planId, reason, exclusionEvidence) => ({
+    rowId: byPlan.get(planId).rowId, groupId: null, eligibility: 'EXCLUDED', reasons: [reason], annotation: null,
+    ...(exclusionEvidence === undefined ? {} : { exclusionEvidence }),
+  });
+  const recovered = row(missing.planId);
+  recovered.annotation.actualTime = {
+    actualMs: 2_000, evidence: { journal: { kind: 'PLAN', id: missing.planId }, basis: 'The archived work log confirms 2 seconds.' },
+  };
+  const corrected = row(amended.planId);
+  corrected.annotation.actualTime = { actualMs: 0, evidence: 'The interval contained waiting only.' };
+  const exclusions = [
+    ignore(disputed.planId, 'ACTUAL_TIME_UNVERIFIED', 'The journal disproves the frozen total. No separate measure remains.'),
+    ignore(skipped.planId, 'USER_REQUESTED_SKIP'),
+    ignore(unfinished.planId, 'PLAN_NOT_COMPLETED'),
+  ];
+  const document = {
+    schemaVersion: 1, contract: 'atlm-teacher-annotations-v2', snapshotId: snapshot.snapshotId, parentDatasetRevisionId: null,
+    rows: [recovered, corrected, row(incomplete.planId), ...exclusions],
+  };
+  const bad = structuredClone(document);
+  delete bad.rows[3].exclusionEvidence;
+  const unverified = await upload(c, SAVE_DATASET, { snapshotId: snapshot.snapshotId }, bad);
+  refused(await commit(c, SAVE_DATASET, unverified), 'INVALID_TEACHER_DATASET');
+  const forged = structuredClone(document);
+  forged.rows[0].annotation.actualTime.evidence.journal.id = skipped.planId;
+  const forgedArgs = await upload(c, SAVE_DATASET, { snapshotId: snapshot.snapshotId }, forged);
+  const forgedResult = refused(await commit(c, SAVE_DATASET, forgedArgs), 'INVALID_TEACHER_DATASET');
+  assert.equal(forgedResult.details.reason, 'TRACKER_EVIDENCE_NOT_FOUND');
+
+  const first = await save(c, document);
+  const before = await fitSavedBundle(t, c, first.saved, 4);
+  assert.equal(before.dataset.contract, 'atlm-teacher-dataset-v2');
+  assert.equal(before.bundle.artifact.n, 3);
+  assert.deepEqual(before.bundle.evaluation.modes, {});
+  const trained = new Map(before.dataset.rows.map((item) => [item.planId, item]));
+  assert.equal(trained.get(missing.planId).source.actualMs, null);
+  assert.equal(trained.get(missing.planId).annotation.actualTime.actualMs, 2_000);
+  assert.equal(trained.get(amended.planId).source.actualMs, 3_000);
+  assert.equal(trained.get(amended.planId).annotation.actualTime.actualMs, 0);
+  assert.equal(trained.get(disputed.planId).exclusionEvidence, exclusions[0].exclusionEvidence);
+
+  await ok(c, 'UpdatePlanMetadata', { planId: amended.planId, title: 'Rechecked source' }, 2);
+  c.advance(1);
+  const next = await capture(c);
+  const reviewed = await save(c, { ...document, snapshotId: next.snapshotId, parentDatasetRevisionId: first.saved.datasetRevisionId });
+  const fresh = await fitSavedBundle(t, c, reviewed.saved, 4);
+  const changed = fresh.dataset.rows.find((item) => item.planId === amended.planId);
+  assert.notEqual(changed.source.sourceGeneration, trained.get(amended.planId).source.sourceGeneration);
+  assert.deepEqual(changed.annotation, trained.get(amended.planId).annotation);
+  assert.deepEqual(changed.annotationOrigin, { kind: 'NEW' });
+  assert.ok(changed.annotationRecordedAt > trained.get(amended.planId).annotationRecordedAt);
+  const stale = await upload(c, REGISTER, { datasetRevisionId: before.datasetRevisionId }, before.bundleBytes);
+  refused(await commit(c, REGISTER, stale), 'MODEL_SOURCES_CHANGED');
+
+  const args = await upload(c, REGISTER, { datasetRevisionId: fresh.datasetRevisionId }, fresh.bundleBytes);
+  const result = accepted(await commit(c, REGISTER, args));
+  assert.deepEqual(result.evaluationSummary, []);
+  const detailed = await tool(c, MODELS, { view: 'detail', modelRevisionId: result.modelRevisionId });
+  assert.equal(detailed.revision.protocolVersion, 4);
+  assert.equal(detailed.revision.fitCount, 3);
+  assert.equal(detailed.evidence.length, 1);
+  const activation = { modelRevisionId: result.modelRevisionId, expectedActiveModelRevisionId: null,
+    expectedActivationVersion: 0, reason: 'Explicit v4 activation', commandId: crypto.randomUUID() };
+  assert.equal((await tool(c, ACTIVATE, activation)).activeModelRevisionId, result.modelRevisionId);
 });

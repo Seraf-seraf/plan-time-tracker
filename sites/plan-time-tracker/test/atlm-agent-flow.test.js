@@ -182,7 +182,13 @@ async function activate(c, modelRevisionId, expectedActiveModelRevisionId, expec
   });
 }
 
-test('built MCP transfers current facts through v3, registers, activates, and rolls back a model', async t => {
+test('built MCP transfers current facts through v3, registers, activates, and rolls back a model',
+  t => exerciseTeacherFlow(t, 3));
+test('built MCP uses corrected time and features of a completed plan through v4 registration and activation',
+  t => exerciseTeacherFlow(t, 4));
+
+async function exerciseTeacherFlow(t, protocolVersion) {
+  const reviewed = protocolVersion === 4;
   const directory = await mkdtemp(join(tmpdir(), 'atlm-agent-flow-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const c = context();
@@ -217,6 +223,14 @@ test('built MCP transfers current facts through v3, registers, activates, and ro
     const recorded = await completed(c, 'Completed case ' + index, 10_000 + task.reuseLevel * 2000 + index, task, true);
     actualByPlan.set(recorded.planId, { recorded, task });
   }
+  const amendedPlan = [...actualByPlan.keys()].at(-1);
+  const missingPlan = [...actualByPlan.keys()].at(-2);
+  if (reviewed) {
+    const failed = c.db.sqlite.prepare(`UPDATE estimation_jobs
+      SET generation=generation+1, status='FAILED', attempts=4, last_error='SOURCE_REFRESH_FAILED'
+      WHERE owner_id=? AND plan_id=?`).run(OWNER, missingPlan);
+    assert.equal(failed.changes, 1);
+  }
   assert.equal((await modelList(c)).rows.length, 1);
   const commandId = crypto.randomUUID();
   const snapshot = await revision(c, snapshotTool, { mode: 'create', commandId });
@@ -227,14 +241,23 @@ test('built MCP transfers current facts through v3, registers, activates, and ro
   const source = JSON.parse(await readFile(snapshotPath, 'utf8'));
   const rows = source.rows.map(row => {
     const actual = actualByPlan.get(row.planId);
-    if (!actual) return { rowId: row.rowId, groupId: null, eligibility: 'EXCLUDED', reasons: ['OUTSIDE_FIXTURE_COHORT'], annotation: null };
-    assert.equal(row.source.actualMs, actual.recorded.actualMs);
+    if (!actual) return { rowId: row.rowId, groupId: null, eligibility: 'EXCLUDED', reasons: ['PLAN_NOT_COMPLETED'], annotation: null };
+    const missing = reviewed && row.planId === missingPlan;
+    assert.equal(row.source.actualMs, missing ? null : actual.recorded.actualMs);
     const annotation = teacherAnnotation(row.rowId, null);
     annotation.annotation.agentTask = actual.task;
+    if (reviewed && row.planId === amendedPlan) {
+      annotation.annotation.agentTask = { ...actual.task, reuseLevel: 0 };
+      annotation.annotation.actualTime = { actualMs: 0, evidence: 'Fixture owner confirmed zero active time.' };
+    }
+    if (missing) {
+      assert.equal(row.rawEligibility, 'EXCLUDED');
+      annotation.annotation.actualTime = { actualMs: actual.recorded.actualMs, evidence: 'Verified active interval from the plan journal.' };
+    }
     return annotation;
   });
   const annotationsPath = join(directory, 'annotations.json');
-  await writeFile(annotationsPath, JSON.stringify({ schemaVersion: 1, contract: 'atlm-teacher-annotations',
+  await writeFile(annotationsPath, JSON.stringify({ schemaVersion: 1, contract: reviewed ? 'atlm-teacher-annotations-v2' : 'atlm-teacher-annotations',
     snapshotId: snapshot.snapshotId, parentDatasetRevisionId: null, rows }));
   const saveArgs = await upload(c, 'SaveDatasetRevision', { snapshotId: snapshot.snapshotId }, annotationsPath);
   const saved = await commit(c, 'SaveDatasetRevision', saveArgs);
@@ -246,15 +269,25 @@ test('built MCP transfers current facts through v3, registers, activates, and ro
   const datasetFile = await download(c, 'GetDatasetRevision', { datasetRevisionId }, datasetPath);
   assert.equal(datasetFile.sha256, datasetDigest);
 
+  if (reviewed) {
+    const exported = JSON.parse(await readFile(datasetPath, 'utf8'));
+    assert.equal(exported.contract, 'atlm-teacher-dataset-v2');
+    const corrected = exported.rows.find(row => row.planId === amendedPlan);
+    assert.equal(corrected.annotation.actualTime.actualMs, 0);
+    assert.ok(corrected.source.actualMs > 0);
+    assert.equal(corrected.annotation.agentTask.reuseLevel, 0);
+    assert.equal(exported.rows.find(row => row.planId === missingPlan).eligibility, 'ELIGIBLE');
+  }
+
   const recipePath = join(directory, 'recipe.json');
-  await writeFile(recipePath, JSON.stringify({ schemaVersion: 1, recipeId: 'atlm-teacher-hybrid-v3',
+  await writeFile(recipePath, JSON.stringify({ schemaVersion: 1, recipeId: 'atlm-teacher-hybrid-v' + protocolVersion,
     datasetRevisionId, datasetDigest, selection: { mode: 'ALL_ELIGIBLE' } }));
   const result = cli('train-atlm.mjs', ['--dataset', datasetPath, '--recipe', recipePath, '--out', join(directory, 'fit')]);
   assert.equal(result.status, 'READY');
   const bundle = JSON.parse(await readFile(result.registrationPath, 'utf8'));
   assert.equal(bundle.artifact.n, actualByPlan.size);
   assert.deepEqual(bundle.provenance.fitRowIds, bundle.provenance.selectedRowIds);
-  assert.equal(bundle.evaluation.protocolVersion, 3);
+  assert.equal(bundle.evaluation.protocolVersion, protocolVersion);
   assert.deepEqual(bundle.evaluation.modes, {});
   const unsupportedPath = join(directory, 'unsupported-bundle.json');
   await writeFile(unsupportedPath, JSON.stringify({ ...bundle, schemaVersion: bundle.schemaVersion + 1 }));
@@ -348,4 +381,4 @@ test('built MCP transfers current facts through v3, registers, activates, and ro
   assert.deepEqual(events.rows.map(row => [row.from, row.to, row.activationVersion]), [
     [modelRevisionId, incumbentId, 3], [incumbentId, modelRevisionId, 2], [null, incumbentId, 1],
   ]);
-});
+}

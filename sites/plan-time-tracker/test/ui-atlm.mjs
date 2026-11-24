@@ -15,7 +15,7 @@ const otherPlan = crypto.randomUUID();
 const activeId = 'atlm-11-r2';
 const priorId = 'atlm-11-r1';
 const registeredId = 'atlm-11-r3';
-const fullFitId = 'atlm-full-fit-v3';
+const fullFitId = 'atlm-full-fit-v4';
 const longId = 'atlm-' + 'archived-revision-'.repeat(6) + '7';
 for (const planId of [PLAN, otherPlan]) {
   await ok(c, 'CreatePlan', { planId, title: 'Forecast planned', planText: '## Этап 1. Проверить\nГотово.',
@@ -186,7 +186,7 @@ async function seedRegistry() {
   assert.equal(detail.evidence[0].summary.rowCount, 14);
   function addFullFitRevision() {
     c.advance(1);
-    const evaluation = { schemaVersion: 1, protocolVersion: 3, modes: {} };
+    const evaluation = { schemaVersion: 1, protocolVersion: 4, modes: {} };
     register.run(OWNER, fullFitId, artifact.method.version, artifact.featureSchemaVersion, c.now(), c.now(),
       JSON.stringify(artifact), JSON.stringify(artifact.manifest), artifact.datasetDigest, JSON.stringify(evaluation),
       artifact.n, examples.length, artifact.trainCutoff, 1);
@@ -546,7 +546,7 @@ try {
 
   await settings.getByRole('button', { name: 'Вернуться к назначенной ревизии' }).click();
   await quality.getByRole('heading', { name: 'Проверка на истории', exact: true }).waitFor();
-  assert.equal(await control.isChecked(), true, 'v3 does not change the chosen report source for legacy revisions');
+  assert.equal(await control.isChecked(), true, 'full-fit reports preserve the chosen source for legacy revisions');
 
   await ok(c, 'DeletePlan', { planId: changedPlan }, 2);
   await moreRevisions.click();

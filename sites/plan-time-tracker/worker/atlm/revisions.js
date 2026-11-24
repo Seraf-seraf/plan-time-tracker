@@ -16,10 +16,11 @@ import {
 } from './revision-files.js';
 import {
   ATLM_DATASET_VERSION, ATLM_TEACHER_CODE_PATHS, ATLM_TEACHER_MODES, ATLM_TEACHER_MODES_V2,
-  ATLM_TEACHER_PROTOCOL_V2, ATLM_TEACHER_PROTOCOL_V3, ATLM_TEACHER_RECIPE_ID, ATLM_TEACHER_RECIPE_ID_V2,
-  ATLM_TEACHER_RECIPE_ID_V3,
+  ATLM_TEACHER_PROTOCOL_V2, ATLM_TEACHER_RECIPE_ID, ATLM_TEACHER_RECIPE_ID_V2,
+  ATLM_TEACHER_RECIPE_ID_V3, ATLM_TEACHER_RECIPE_ID_V4,
   ATLM_TEACHER_TRAINER_VERSION,
-  TEACHER_ANNOTATIONS_CONTRACT, TEACHER_DATASET_CONTRACT, atlmTeacherCase, atlmTeacherFitReference,
+  TEACHER_ANNOTATIONS_CONTRACT, TEACHER_DATASET_CONTRACT, TEACHER_REVIEWED_ANNOTATIONS_CONTRACT,
+  TEACHER_REVIEWED_DATASET_CONTRACT, atlmTeacherCase, atlmTeacherFitOnlyProtocol, atlmTeacherFitReference,
   atlmTeacherHoldoutCase, atlmTeacherIssuedCase, atlmTeacherProtocolVersion, atlmTeacherRollingCase,
   atlmTeacherRollingHistory, buildAtlmTeacherSplit,
   mergeAtlmTeacherAnnotations, parseAtlmTeacherRecipe, readAtlmTeacherDataset, summarizeAtlmTeacherMode,
@@ -27,7 +28,7 @@ import {
 
 const SCHEMA_VERSION = ATLM_DATASET_VERSION;
 const ATLM_REVISION_TEACHER_RECIPE_IDS = Object.freeze([
-  ATLM_TEACHER_RECIPE_ID, ATLM_TEACHER_RECIPE_ID_V2, ATLM_TEACHER_RECIPE_ID_V3,
+  ATLM_TEACHER_RECIPE_ID, ATLM_TEACHER_RECIPE_ID_V2, ATLM_TEACHER_RECIPE_ID_V3, ATLM_TEACHER_RECIPE_ID_V4,
 ]);
 const BASE64_PART_CHARS = Math.ceil(ATLM_PART_BYTES / 3) * 4;
 const COMPACT_REASON_COUNT = 16;
@@ -414,6 +415,8 @@ function datasetRow(row) {
     source: JSON.parse(row.source_json), features: parseColumn(row.features_json, null),
     ...(annotation?.recordedAt !== undefined ? { annotationRecordedAt: annotation.recordedAt } : {}),
     ...(annotation?.origin !== undefined ? { annotationOrigin: annotation.origin } : {}),
+    ...(row.origin === 'NATIVE' && annotation?.exclusionEvidence !== undefined
+      ? { exclusionEvidence: annotation.exclusionEvidence } : {}),
     ...(row.origin === 'IMPORTED' ? { record: JSON.parse(row.record_json) } : {}),
   };
 }
@@ -507,11 +510,16 @@ async function* entityRows(db, ownerId, spec, entityId, project, fields = '*') {
 }
 
 function datasetExportHeader(row) {
+  const provenance = parseColumn(row.provenance_json, null);
+  const teacherReviewed = row.origin === 'NATIVE'
+    && provenance?.annotationsContract === TEACHER_REVIEWED_ANNOTATIONS_CONTRACT;
   return {
-    schemaVersion: SCHEMA_VERSION, contract: TEACHER_DATASET_CONTRACT, datasetRevisionId: row.dataset_revision_id,
+    schemaVersion: SCHEMA_VERSION,
+    contract: teacherReviewed ? TEACHER_REVIEWED_DATASET_CONTRACT : TEACHER_DATASET_CONTRACT,
+    datasetRevisionId: row.dataset_revision_id,
     snapshotId: row.snapshot_id, parentDatasetRevisionId: row.parent_dataset_revision_id,
     featureSchemaVersion: row.feature_version, origin: row.origin,
-    ...(row.origin === 'IMPORTED' ? { provenance: JSON.parse(row.provenance_json) } : {}),
+    ...(row.origin === 'IMPORTED' ? { provenance } : {}),
   };
 }
 
@@ -679,8 +687,8 @@ function* embeddedEvidence(value) {
 
 const TRACKER_REFS = new Set(['COMMAND', 'STEP', 'PLAN', 'ASSESSMENT', 'INTERVAL']);
 function assertAnnotationEvidence(row, frozen, nowMs) {
-  if (!row.annotation) return;
-  if (row.annotation.historicalAvailability?.availableAt > nowMs)
+  if (!row.annotation && row.exclusionEvidence === undefined) return;
+  if (row.annotation?.historicalAvailability?.availableAt > nowMs)
     throw error('INVALID_TEACHER_DATASET', 422, { reason: 'HISTORICAL_EVIDENCE_IN_FUTURE', rowId: row.rowId });
   const known = new Map([
     ['PLAN', new Set([row.planId])],
@@ -689,14 +697,14 @@ function assertAnnotationEvidence(row, frozen, nowMs) {
     ['INTERVAL', new Set(frozen.evidence.intervals.map((interval) => interval.intervalId))],
     ['ASSESSMENT', new Set([row.source.originalAssessment?.assessmentId].filter(Boolean))],
   ]);
-  for (const { kind, id: reference } of embeddedEvidence(row.annotation)) {
+  for (const { kind, id: reference } of embeddedEvidence([row.annotation, row.exclusionEvidence])) {
     if (TRACKER_REFS.has(kind) && !known.get(kind).has(reference))
       throw error('INVALID_TEACHER_DATASET', 422, { reason: 'TRACKER_EVIDENCE_NOT_FOUND', rowId: row.rowId });
   }
 }
 
-function annotationLineage(row, parent, parentId, nowMs) {
-  if (!parent || !row.annotation || canonical(row.annotation) !== canonical(parent.annotation)) {
+function annotationLineage(row, parent, parentId, nowMs, teacherReviewed) {
+  if (teacherReviewed || !parent || !row.annotation || canonical(row.annotation) !== canonical(parent.annotation)) {
     return { annotationRecordedAt: row.annotation ? nowMs : null, annotationOrigin: row.annotation ? { kind: 'NEW' } : null };
   }
   const { sourceGeneration, sourceDigest } = row.source;
@@ -714,7 +722,8 @@ async function saveDataset(context, selector, { snapshot, parent }, text) {
   const document = parseDocument(text, 'INVALID_TEACHER_DATASET');
   requireFields(document, ['schemaVersion', 'contract', 'snapshotId', 'parentDatasetRevisionId', 'rows'],
     'INVALID_TEACHER_DATASET', 'INVALID_DOCUMENT_FIELDS');
-  if (document.schemaVersion !== SCHEMA_VERSION || document.contract !== TEACHER_ANNOTATIONS_CONTRACT
+  const teacherReviewed = document.contract === TEACHER_REVIEWED_ANNOTATIONS_CONTRACT;
+  if (document.schemaVersion !== SCHEMA_VERSION || (!teacherReviewed && document.contract !== TEACHER_ANNOTATIONS_CONTRACT)
     || document.snapshotId !== args.snapshotId || document.parentDatasetRevisionId !== args.parentDatasetRevisionId)
     throw error('LINEAGE_MISMATCH', 409, { snapshotId: args.snapshotId, parentDatasetRevisionId: args.parentDatasetRevisionId });
   const fields = [
@@ -725,16 +734,20 @@ async function saveDataset(context, selector, { snapshot, parent }, text) {
   const frozenRows = [];
   for await (const row of entityRows(db, ownerId, SNAPSHOT_ROWS, args.snapshotId, snapshotRow, fields)) frozenRows.push(row);
   const parents = new Map();
-  if (parent) for await (const row of entityRows(db, ownerId, DATASET_ROWS, parent.dataset_revision_id, datasetRow))
+  if (parent && !teacherReviewed) for await (const row of entityRows(db, ownerId, DATASET_ROWS, parent.dataset_revision_id, datasetRow))
     parents.set(row.planId, row);
-  const rows = mergeAtlmTeacherAnnotations(frozenRows, document.rows).map((row, index) => {
+  const rows = mergeAtlmTeacherAnnotations(frozenRows, document.rows, { teacherReviewed }).map((row, index) => {
     assertAnnotationEvidence(row, frozenRows[index], nowMs);
-    return { ...row, ...annotationLineage(row, parents.get(row.planId), args.parentDatasetRevisionId, nowMs) };
+    const { exclusionEvidence, ...base } = row;
+    return { ...base, ...annotationLineage(row, parents.get(row.planId), args.parentDatasetRevisionId, nowMs, teacherReviewed),
+      ...(exclusionEvidence === undefined ? {} : { exclusionEvidence }) };
   });
   const record = {
     dataset_revision_id: commandId, snapshot_id: args.snapshotId, parent_dataset_revision_id: args.parentDatasetRevisionId,
     origin: 'NATIVE', feature_version: snapshot.feature_version, row_count: rows.length,
     eligible_count: rows.filter((row) => row.eligibility === 'ELIGIBLE').length, created_at: nowMs, imported_at: null,
+    provenance_json: JSON.stringify({ annotationsDigest: args.file.sha256,
+      ...(teacherReviewed ? { annotationsContract: document.contract } : {}) }),
   };
   record.dataset_digest = (await hashAtlmTextChunks(rowExport(datasetExportHeader(record), rows))).sha256;
   const value = { state: 'SAVED', ...datasetHeader(record) };
@@ -746,14 +759,15 @@ async function saveDataset(context, selector, { snapshot, parent }, text) {
     ' origin,schema_version,feature_version,created_at,dataset_digest,row_count,eligible_count,provenance_json)',
     " SELECT ?,?,?,?,'NATIVE',?,?,?,?,?,?,? WHERE EXISTS(" + PENDING_COMMAND_SQL + ') AND ' + ATLM_UPLOAD_READY_SQL,
   ].join('\n')).bind(ownerId, commandId, args.snapshotId, args.parentDatasetRevisionId, SCHEMA_VERSION, snapshot.feature_version,
-    nowMs, record.dataset_digest, record.row_count, record.eligible_count, JSON.stringify({ annotationsDigest: args.file.sha256 }),
+    nowMs, record.dataset_digest, record.row_count, record.eligible_count, record.provenance_json,
     ...pending, ...ready);
   const decisions = rows.map((row) => ({
     rowId: row.rowId,
     // The existing table requires a non-null group_id for native eligible rows.
     groupId: row.eligibility === 'ELIGIBLE' ? row.groupId ?? UNGROUPED_TEACHER_ROW : row.groupId,
     eligibility: row.eligibility, reasons: row.reasons,
-    annotation: { value: row.annotation, origin: row.annotationOrigin, recordedAt: row.annotationRecordedAt },
+    annotation: { value: row.annotation, origin: row.annotationOrigin, recordedAt: row.annotationRecordedAt,
+      ...(row.exclusionEvidence === undefined ? {} : { exclusionEvidence: row.exclusionEvidence }) },
     features: row.features,
   }));
   const rowStatement = db.prepare([
@@ -878,7 +892,7 @@ async function validateRollingModes(modes, protocol, fitRows, rowsById, perPlan)
 const MIN_PLANNED_PAIRS = 5;
 const MIN_PLANNED_HOLDOUT_GROUPS = 2;
 function activationPolicy(evaluation) {
-  if (evaluation?.protocolVersion === ATLM_TEACHER_PROTOCOL_V3) return { status: 'ELIGIBLE', reasons: [] };
+  if (atlmTeacherFitOnlyProtocol(evaluation?.protocolVersion)) return { status: 'ELIGIBLE', reasons: [] };
   const perPlan = evaluation?.protocolVersion === ATLM_TEACHER_PROTOCOL_V2;
   const mode = evaluation?.modes?.[perPlan ? 'ROLLING_PLAN_PLANNED' : 'INTERNAL_HOLDOUT_PLANNED'];
   const paired = mode?.paired;
@@ -897,7 +911,7 @@ function activationPolicy(evaluation) {
 }
 
 function teacherModes(protocolVersion) {
-  if (protocolVersion === ATLM_TEACHER_PROTOCOL_V3) return [];
+  if (atlmTeacherFitOnlyProtocol(protocolVersion)) return [];
   return protocolVersion === ATLM_TEACHER_PROTOCOL_V2 ? ATLM_TEACHER_MODES_V2 : ATLM_TEACHER_MODES;
 }
 
@@ -937,7 +951,7 @@ async function validateBundle(db, ownerId, datasetRecord, text) {
   const trainerVersion = provenance?.trainerVersion;
   const grouped = trainerVersion === ATLM_TEACHER_TRAINER_VERSION;
   const perPlan = trainerVersion === ATLM_TEACHER_PROTOCOL_V2;
-  const fitOnly = trainerVersion === ATLM_TEACHER_PROTOCOL_V3;
+  const fitOnly = atlmTeacherFitOnlyProtocol(trainerVersion);
   if ((!grouped && !perPlan && !fitOnly) || !isSnapshotDigest(provenance.recipeDigest))
     throw invalidArtifact('INVALID_PROVENANCE');
   const rosterFields = ['selectedRowIds', 'fitRowIds', 'trainCutoff'];
@@ -1038,7 +1052,7 @@ async function registerModel(context, selector, dataset, text) {
   ].join('\n')).bind(ownerId, commandId, args.datasetRevisionId, ownerId, ATLM_METHOD.version, ATLM_FEATURE_VERSION,
     nowMs, artifactJson, artifactDigest, JSON.stringify(artifact.manifest), dataset.dataset_digest, JSON.stringify(evaluation),
     JSON.stringify({ ...provenance, verificationLevel: 'STRUCTURE_AND_PROVENANCE',
-      ...(evaluation.protocolVersion !== ATLM_TEACHER_PROTOCOL_V3 ? { rollingEvidenceOrigin: 'LOCAL_TRAINER' } : {}) }),
+      ...(!atlmTeacherFitOnlyProtocol(evaluation.protocolVersion) ? { rollingEvidenceOrigin: 'LOCAL_TRAINER' } : {}) }),
     artifact.n, selected.length, protocol.trainCutoff, ...pending, ...ready, sources, ownerId);
   const sourceRows = db.prepare([
     'INSERT INTO estimation_model_revision_sources(owner_id,model_revision_id,plan_id,source_generation,ordinal,dataset_revision_id,row_id)',

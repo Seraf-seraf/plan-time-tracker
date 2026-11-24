@@ -20,7 +20,7 @@ import {
 import {
   ATLM_TEACHER_CODE_PATHS,
   ATLM_TEACHER_PROTOCOL_V2,
-  ATLM_TEACHER_PROTOCOL_V3,
+  atlmTeacherFitOnlyProtocol,
   atlmTeacherCase,
   atlmTeacherFitReference,
   atlmTeacherHoldoutCase,
@@ -185,17 +185,18 @@ function assertFitRoster(artifact, fitReference, trainCutoff) {
 
 async function trainFitOnly(fitRows, protocol, recipe, input, codeRef) {
   const { split, rowDecisions, selectedRowIds, fitRowIds, trainCutoff } = protocol;
+  const { protocolVersion } = split;
   progress('ROSTER', { selectedCount: selectedRowIds.length, fitCount: fitRows.length });
   const fitReference = await atlmTeacherFitReference(fitRows);
   progress('FIT', { sampleCount: fitRows.length });
   const fit = await fitHybridAtlm(fitRows, { cutoff: trainCutoff });
   assertFitRoster(fit.artifact, fitReference, trainCutoff);
   const evaluation = {
-    schemaVersion: 1, protocolVersion: ATLM_TEACHER_PROTOCOL_V3,
+    schemaVersion: 1, protocolVersion,
     metric: 'PLAN_ACTIVE', unit: 'ms', split, modes: {}, rowDecisions,
   };
   const provenance = {
-    trainerVersion: ATLM_TEACHER_PROTOCOL_V3,
+    trainerVersion: protocolVersion,
     codeRef,
     recipeDigest: 'sha256:' + (await hashCommandInput(recipe)),
     configuration: recipe,
@@ -209,7 +210,7 @@ async function trainFitOnly(fitRows, protocol, recipe, input, codeRef) {
 async function train(dataset, trainingRows, recipe, input, codeRef) {
   const protocol = buildAtlmTeacherSplit(dataset, trainingRows, recipe);
   const protocolVersion = atlmTeacherProtocolVersion(recipe);
-  if (protocolVersion === ATLM_TEACHER_PROTOCOL_V3) {
+  if (atlmTeacherFitOnlyProtocol(protocolVersion)) {
     return trainFitOnly(trainingRows, protocol, recipe, input, codeRef);
   }
   const fullFit = protocolVersion === ATLM_TEACHER_PROTOCOL_V2;

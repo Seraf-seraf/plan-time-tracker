@@ -7,7 +7,10 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { atlmArtifactValid, fitHybridAtlm, normalizeAgentTask, predictAtlm } from '../worker/atlm/model.js';
-import { ATLM_TEACHER_RECIPE_ID_V3, mergeAtlmTeacherAnnotations, readAtlmTeacherDataset } from '../worker/atlm/teacher-dataset.js';
+import {
+  ATLM_TEACHER_RECIPE_ID_V3, ATLM_TEACHER_RECIPE_ID_V4,
+  mergeAtlmTeacherAnnotations, readAtlmTeacherDataset,
+} from '../worker/atlm/teacher-dataset.js';
 import { canonical, hashCommandInput } from '../worker/shared/index.js';
 import { teacherAnnotation, teacherSource } from './fixtures/atlm-revisions.mjs';
 
@@ -118,7 +121,7 @@ function inputFiles(directory, name, dataset, changes = {}) {
     holdoutUseNote: 'История предыдущего просмотра неизвестна.',
     ...changes,
   };
-  if (recipe.recipeId === 'atlm-teacher-hybrid-v2' || recipe.recipeId === ATLM_TEACHER_RECIPE_ID_V3) {
+  if (['atlm-teacher-hybrid-v2', ATLM_TEACHER_RECIPE_ID_V3, ATLM_TEACHER_RECIPE_ID_V4].includes(recipe.recipeId)) {
     delete recipe.holdoutUse;
     delete recipe.holdoutUseNote;
   }
@@ -237,6 +240,76 @@ test('v3 preserves the full roster and solver reason when no model is available'
   assert.equal(existsSync(path.join(outputDir, 'registration.bundle.json')), false);
   assert.deepEqual(readJson(outputDir, 'evaluation.json').modes, {});
   assert.deepEqual(readJson(outputDir, 'manifest.json').provenance.fitRowIds, ['r-00']);
+});
+
+function teacherReviewFixture() {
+  const dataset = datasetFixture();
+  dataset.contract = 'atlm-teacher-dataset-v2';
+  for (const row of dataset.rows.filter(({ eligibility }) => eligibility === 'ELIGIBLE')) {
+    row.groupId = null;
+    row.annotationRecordedAt = 40_000_000;
+  }
+  const zero = dataset.rows[1];
+  zero.annotation.actualTime = { actualMs: 0, evidence: 'Verified zero-duration completed operation.' };
+  const recovered = dataset.rows[3];
+  recovered.annotation.actualTime = { actualMs: 240_000, evidence: 'Measured from verified work journal.' };
+  recovered.source = {
+    ...recovered.source, status: 'UNAVAILABLE', actualMs: null, capturedAt: null, sourceAvailableAt: null,
+    sourceGeneration: 0, sampleGeneration: null, sampleId: null, sourceDigest: null, sampleDigest: null,
+  };
+  dataset.rows.at(-1).reasons = ['ACTUAL_TIME_UNVERIFIED'];
+  return dataset;
+}
+
+test('v4 fits teacher time corrections and actual features on the entire eligible roster', async (t) => {
+  const directory = temporary(t);
+  const dataset = teacherReviewFixture();
+  const files = inputFiles(directory, 'training', dataset, { recipeId: ATLM_TEACHER_RECIPE_ID_V4 });
+  const outputDir = path.join(directory, 'run');
+  const { progress } = run(files, outputDir, 0);
+  assert.deepEqual(progress.map(({ stage }) => stage), ['VALIDATED', 'ROSTER', 'FIT', 'SAVED']);
+
+  const { artifact, evaluation, provenance } = readJson(outputDir, 'registration.bundle.json');
+  const fitRows = dataset.rows.filter(({ eligibility }) => eligibility === 'ELIGIBLE').map((row) => ({
+    sampleId: row.rowId, planId: row.planId, capturedAt: row.source.firstStartedAt,
+    sourceAvailableAt: 40_000_000, features: row.features,
+    actualMs: row.annotation.actualTime?.actualMs ?? row.source.actualMs,
+  }));
+  assert.equal(fitRows[1].actualMs, 0);
+  assert.equal(fitRows[3].actualMs, 240_000);
+  assert.equal(dataset.rows[1].source.actualMs, 60_000);
+  assert.equal(dataset.rows[3].source.actualMs, null);
+  assert.notDeepEqual(dataset.rows[1].features, dataset.rows[1].source.plannedFeatures);
+  const expected = await fitHybridAtlm(fitRows, { cutoff: 40_000_000 });
+  assert.equal(expected.status, 'AVAILABLE');
+  assert.deepEqual(artifact, expected.artifact);
+  assert.equal(artifact.n, fitRows.length);
+  assert.equal(provenance.trainerVersion, 4);
+  assert.equal(provenance.recipeDigest, 'sha256:' + await hashCommandInput(files.recipe));
+  assert.deepEqual(provenance.selectedRowIds, fitRows.map(({ sampleId }) => sampleId));
+  assert.deepEqual(provenance.fitRowIds, provenance.selectedRowIds);
+  assert.deepEqual(evaluation.split, { protocolVersion: 4 });
+  assert.deepEqual(evaluation.modes, {});
+  assert.deepEqual(evaluation.rowDecisions.map(({ role }) => role), [...fitRows.map(() => 'FIT'), 'EXCLUDED']);
+});
+
+test('CLI rejects pairing a v4 export or recipe with its legacy counterpart', (t) => {
+  const directory = temporary(t);
+  const v3WithV4Data = inputFiles(directory, 'legacy-recipe', teacherReviewFixture(), {
+    recipeId: ATLM_TEACHER_RECIPE_ID_V3,
+  });
+  const v4WithV3Data = inputFiles(directory, 'legacy-data', datasetFixture(), {
+    recipeId: ATLM_TEACHER_RECIPE_ID_V4,
+  });
+  for (const [index, files] of [v3WithV4Data, v4WithV3Data].entries()) {
+    const outputDir = path.join(directory, 'run-' + index);
+    const { result, progress } = run(files, outputDir, 1);
+    assert.equal(result.status, 'ERROR');
+    assert.equal(result.reason, 'INVALID_RECIPE');
+    assert.equal(result.registrationPath, null);
+    assert(!progress.some(({ stage }) => stage === 'FIT'));
+    assert.equal(existsSync(outputDir), false);
+  }
 });
 
 test('CLI freezes grouped development and holdout, evaluates separate feature bases and preserves the bundle', (t) => {

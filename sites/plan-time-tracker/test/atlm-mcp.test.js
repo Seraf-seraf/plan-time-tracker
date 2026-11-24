@@ -102,15 +102,18 @@ test("forecast and registry MCP discovery use the same strict branches as runtim
     assert.equal(atlm.predictionScope, "FULL_FROM_FIRST_START");
     assert.equal(atlm.registry.limits.partSize, 49152);
     assert.equal(atlm.registry.limits.maxPageSize, 50);
-    assert.equal(atlm.registry.defaultTeacherRecipeId, "atlm-teacher-hybrid-v3");
+    assert.equal(atlm.registry.defaultTeacherRecipeId, "atlm-teacher-hybrid-v4");
+    assert.equal(atlm.registry.teacherDataset.annotationContract, "atlm-teacher-annotations-v2");
+    assert.equal(atlm.registry.teacherDataset.exportContract, "atlm-teacher-dataset-v2");
     const snapshots = tools.get("CreateTrainingSnapshot");
     const repair = snapshots.inputSchema.oneOf.find(shape => shape.properties.mode?.enum.includes("repair"));
     assert.ok(repair.required.includes("planIds"));
     assert.equal(repair.properties.planIds.maxItems, 25);
-    assert.match(snapshots.description, /свежий снимок.*mode:"repair"/);
+    assert.match(snapshots.description, /свежего снимка.*mode:"repair"/);
     assert.match(snapshots.description, /по отдельному поручению на восстановление/);
     assert.match(tools.get("SaveDatasetRevision").description, /USER_REQUESTED_SKIP по planId/);
-    assert.match(tools.get("SaveDatasetRevision").description, /исключите удалённые планы и планы без подтверждённого факта/i);
+    assert.match(tools.get("SaveDatasetRevision").description, /annotation\.actualTime=\{actualMs,evidence\}/);
+    assert.match(tools.get("SaveDatasetRevision").description, /ELIGIBLE, даже если в исходном наблюдении была ошибка/);
     assert.equal(atlm.retrainEveryNewPlans, undefined);
   } finally { c.close(); }
 });

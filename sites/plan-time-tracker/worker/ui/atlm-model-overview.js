@@ -50,6 +50,7 @@ export const atlmModelOverviewScript = String.raw`
   const number = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1 });
   const signed = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 1, signDisplay: 'exceptZero' });
   const millisecondsPerMinute = 60_000;
+  const fullFitProtocols = [3, 4];
   const rollingPlanControls = ['ROLLING_PLAN_PLANNED', 'ROLLING_PLAN_ACTUAL'];
   const controls = [...rollingPlanControls, 'INTERNAL_HOLDOUT_PLANNED', 'INTERNAL_HOLDOUT_ACTUAL',
     'ROLLING_GROUPED_ACTUAL', 'ISSUED_FORECASTS'];
@@ -67,7 +68,7 @@ export const atlmModelOverviewScript = String.raw`
     ROLLING_GROUPED_ACTUAL: 'Модель переобучалась на каждом шаге. Ошибки измерены на следующих по времени задачах по восстановленным фактическим признакам.',
     INTERNAL_HOLDOUT_ACTUAL: 'Сохранённая модель проверена на отложенных группах по восстановленным фактическим признакам.',
     INTERNAL_HOLDOUT_PLANNED: 'Сохранённая модель проверена на отложенных планах с неизменившимся объёмом. Использованы исходные признаки до первого старта.',
-    ISSUED_FORECASTS: 'Сводка сравнивает зафиксированные до первого старта прогнозы выбранной ревизии с измеренным активным временем завершённых планов.',
+    ISSUED_FORECASTS: 'Сводка сравнивает прогнозы выбранной ревизии, сохранённые при первом старте, с активным временем завершённых планов по учёту трекера.',
   };
   const reasonText = {
     SOURCE_CHANGED: 'Изменились исходные наблюдения.',
@@ -308,7 +309,7 @@ export const atlmModelOverviewScript = String.raw`
   }
 
   function qualitySource() {
-    return detail?.revision?.protocolVersion === 3 ? 'issued' : source;
+    return fullFitProtocols.includes(detail?.revision?.protocolVersion) ? 'issued' : source;
   }
 
   function currentEvidence() {
@@ -361,7 +362,7 @@ export const atlmModelOverviewScript = String.raw`
       }
     }
     if (selectionMessage) selection.append(element('p', selectionMessage, 'model-muted'));
-    const fullFitOnly = detail?.revision?.protocolVersion === 3;
+    const fullFitOnly = fullFitProtocols.includes(detail?.revision?.protocolVersion);
     const displaySource = qualitySource();
     get('sources').hidden = !selectedId || fullFitOnly;
     get('sources').querySelectorAll('input').forEach((input) => { input.checked = input.value === displaySource; });
@@ -390,10 +391,10 @@ export const atlmModelOverviewScript = String.raw`
 
     if (detailFailed) {
       const box = element('div', null, 'model-notice');
-      notice(box, 'Не удалось загрузить проверку выбранной ревизии.', loadDetail);
+      notice(box, 'Не удалось загрузить данные выбранной ревизии.', loadDetail);
       report.append(box);
     } else if (!evidence) {
-      report.append(element('p', requests.has('detail') ? 'Загружаем проверку…' : emptyEvidence(), 'model-muted'));
+      report.append(element('p', requests.has('detail') ? 'Загружаем данные ревизии…' : emptyEvidence(), 'model-muted'));
     } else {
       const { summary } = evidence;
       const metrics = summary.metrics ?? {};

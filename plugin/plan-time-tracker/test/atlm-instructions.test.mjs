@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { parseAtlmTeacherRecipe } from '../../../sites/plan-time-tracker/worker/atlm/teacher-dataset.js';
-import { call, context, mcp, ok, PLAN } from '../../../sites/plan-time-tracker/test/fixtures/tracker-db.mjs';
+import {
+  mergeAtlmTeacherAnnotations, parseAtlmTeacherRecipe,
+} from '../../../sites/plan-time-tracker/worker/atlm/teacher-dataset.js';
+import { call, context, mcp, ok, PLAN, taskV4 } from '../../../sites/plan-time-tracker/test/fixtures/tracker-db.mjs';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const features = read('../skills/assess-task/references/features.md');
@@ -92,7 +94,7 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     assert.match(train, /registry\.teacherRecipeIds/u);
     const recipeSection = train.split('## Локальный рецепт и проверка\n')[1];
     const recipe = JSON.parse(recipeSection.match(/```json\n([\s\S]*?)```/u)[1]);
-    assert.equal(recipe.recipeId, 'atlm-teacher-hybrid-v3');
+    assert.equal(recipe.recipeId, 'atlm-teacher-hybrid-v4');
     assert.equal(registry.defaultTeacherRecipeId, recipe.recipeId);
     assert.ok(registry.teacherRecipeIds.includes(recipe.recipeId));
     assert.deepEqual(recipe.selection, { mode: 'ALL_ELIGIBLE' });
@@ -110,6 +112,33 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     assert.equal(repair.properties.planIds.maxItems, 25);
     assert.match(train, /\{schemaVersion:1,mode:'create',commandId\}[^\n]+новым UUID/u);
     assert.match(train, /mode:'repair'` выполняется по отдельному поручению/u);
+    assert.match(train, /contract:'atlm-teacher-annotations-v2'/u);
+    assert.match(train, /atlm-teacher-dataset-v2/u);
+    assert.match(train, /Перепроверьте \*\*каждый признак\*\*/u);
+    assert.match(train, /Ноль подходит, когда источник подтверждает/u);
+    const annotationsSection = train.split('## Снимок и преподавательская разметка\n')[1];
+    const annotations = annotationsSection.match(/```js\n([\s\S]*?)```/u)[1];
+    const readExample = new Function('agentTask', 'fieldEvidence', annotations + '\nreturn rows;');
+    const [eligible, excluded] = readExample(taskV4(), { verificationKinds: 'Проверки записаны в отчёте.' });
+    assert.equal(eligible.eligibility, 'ELIGIBLE');
+    assert.equal(eligible.annotation.actualTime.actualMs, 180000);
+    assert.ok(eligible.annotation.actualTime.evidence);
+    assert.equal(excluded.eligibility, 'EXCLUDED');
+    assert.deepEqual(excluded.reasons, ['ACTUAL_TIME_UNVERIFIED']);
+    assert.ok(excluded.exclusionEvidence);
+    const frozen = [eligible, excluded].map(({ rowId }, index) => ({
+      rowId, planId: rowId, rawReasons: ['SOURCE_REFRESH_FAILED'],
+      source: {
+        planId: rowId, planStatus: 'COMPLETED', deletedAt: null, sourceGeneration: 1,
+        ...(index === 0 ? { status: 'UNAVAILABLE', actualMs: null } : {
+          status: 'AVAILABLE', actualMs: 30_000, firstStartedAt: 0, finishedAt: 60_000, sourceAvailableAt: 60_000,
+        }),
+      },
+    }));
+    const reviewed = mergeAtlmTeacherAnnotations(frozen, [eligible, excluded], { teacherReviewed: true });
+    assert.equal(reviewed[0].annotation.actualTime.actualMs, 180000);
+    assert.equal(reviewed[0].source.actualMs, null);
+    assert.equal(reviewed[1].eligibility, 'EXCLUDED');
     assert.doesNotMatch(train, /backtestUse|holdoutUse|historicalAvailability/u);
     const saveDescription = listing.find((tool) => tool.name === 'SaveDatasetRevision').description;
     for (const term of ['ELIGIBLE', 'ACTUAL', 'EXCLUDED', 'snapshotId', 'parentDatasetRevisionId']) {

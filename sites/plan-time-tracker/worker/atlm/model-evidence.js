@@ -5,7 +5,7 @@ import { summarizeAtlmV4Metrics } from './model.js';
 import { readAtlmSampleRefreshStatus } from './sample-refresh.js';
 import { readAtlmServingState } from './serving.js';
 import {
-  ATLM_TEACHER_MODES, ATLM_TEACHER_MODES_V2, ATLM_TEACHER_PROTOCOL_V2, ATLM_TEACHER_PROTOCOL_V3,
+  ATLM_TEACHER_MODES, ATLM_TEACHER_MODES_V2, ATLM_TEACHER_PROTOCOL_V2, atlmTeacherFitOnlyProtocol,
 } from './teacher-dataset.js';
 
 const MODEL_EVIDENCE_PAGE_MAX = 50;
@@ -316,8 +316,9 @@ async function evaluationEntries(db, ownerId, revision) {
   const raw = row?.evaluation_json;
   if (!raw) return { entries: [], trainingEvaluation: null };
   const report = JSON.parse(raw);
-  if (report.protocolVersion === ATLM_TEACHER_PROTOCOL_V3) {
-    return { entries: [], trainingEvaluation: null, protocolVersion: ATLM_TEACHER_PROTOCOL_V3 };
+  const { protocolVersion } = report;
+  if (atlmTeacherFitOnlyProtocol(protocolVersion)) {
+    return { entries: [], trainingEvaluation: null, protocolVersion };
   }
   const digest = await hashCommandInput(raw);
   const et = [];
@@ -485,9 +486,9 @@ async function readAtlmModelRevisions(db, ownerId, args, nowMs) {
       readDataSummary(db, ownerId, revision, nowMs),
     ]);
     const issued = await issuedEvidence(ownerId, revision.modelRevisionId, null, watermark, cases);
-    const detailRevision = evaluation.protocolVersion === ATLM_TEACHER_PROTOCOL_V3
-      ? { ...revision, protocolVersion: ATLM_TEACHER_PROTOCOL_V3 }
-      : revision;
+    const detailRevision = evaluation.protocolVersion === undefined
+      ? revision
+      : { ...revision, protocolVersion: evaluation.protocolVersion };
     return { ...state, revision: detailRevision, dataSummary, evidence: [issued, ...evaluation.entries.map(entry => entry.evidence)],
       trainingEvaluation: evaluation.trainingEvaluation };
   }
