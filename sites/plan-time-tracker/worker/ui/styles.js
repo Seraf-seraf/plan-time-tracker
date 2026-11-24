@@ -205,8 +205,23 @@ export const UI_ATLM_MODEL_OVERVIEW_CSS = String.raw`
 .atlm-model-overview .model-sources legend { margin-bottom: 4px; font-size: var(--text-sm); }
 .atlm-model-overview .model-sources label { display: flex; align-items: center; gap: 8px; min-height: 32px; }
 .atlm-model-overview input[type="radio"] { accent-color: var(--blue); margin: 0; }
-.atlm-model-overview .model-report-field { display: grid; gap: 4px; justify-items: start; margin-bottom: 12px; }
-.atlm-model-overview select { max-width: 100%; }
+.atlm-model-overview .model-report-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  gap: 4px;
+  margin-bottom: 12px;
+}
+.atlm-model-overview #atlm-model-report-picker {
+  inline-size: 100%;
+  min-inline-size: 0;
+  max-inline-size: 36rem;
+  padding: .55rem .65rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--paper-2);
+  color: var(--ink);
+}
 .atlm-model-overview details > div { min-width: 0; }
 .atlm-model-overview details > summary {
   min-height: 32px;

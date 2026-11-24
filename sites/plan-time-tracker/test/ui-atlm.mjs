@@ -434,12 +434,49 @@ try {
   assert.match(await reportPicker.locator('option:checked').textContent(), /по исходным признакам/);
   await cases.getByRole('table').waitFor();
   assert.match(await cases.getByRole('table').innerText(), /1,5 мин/);
+  const holdoutReportTitle = 'Проверка на отложенной выборке';
+  const savedForecastsTitle = 'Выданные прогнозы в сохранённом отчёте';
   await reportPicker.focus();
-  await reportPicker.selectOption({ label: 'Проверка на отложенной выборке' });
+  await reportPicker.selectOption({ label: holdoutReportTitle });
   await cases.getByText('2,5 мин', { exact: true }).waitFor();
   assert.equal(await isFocused(reportPicker), true);
   assert.match(await current.innerText(), /atlm-11-r2/);
-  await reportPicker.selectOption({ label: 'Выданные прогнозы в сохранённом отчёте' });
+  const quality = settings.getByRole('region', { name: 'Качество' });
+  const mobileWidthsCssPx = [320, 360, 375, 390];
+  const desktopWidthCssPx = 1440;
+  const minTouchHeightCssPx = 44;
+  await page.evaluate(async () => { await document.fonts.ready; });
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Shift+Tab');
+  for (const title of [holdoutReportTitle, savedForecastsTitle]) {
+    if (title === savedForecastsTitle) await reportPicker.press('End');
+    await quality.getByRole('heading', { name: title, exact: true }).waitFor();
+    for (const width of [...mobileWidthsCssPx, desktopWidthCssPx]) {
+      await page.setViewportSize({ width, height: 1100 });
+      const layout = await reportPicker.evaluate(picker => {
+        const field = picker.getBoundingClientRect();
+        const section = picker.closest('section').getBoundingClientRect();
+        const panel = picker.closest('.atlm-model-overview').getBoundingClientRect();
+        const style = getComputedStyle(picker);
+        const outline = parseFloat(style.outlineWidth);
+        const focusOutset = outline + parseFloat(style.outlineOffset);
+        return {
+          fitsSection: field.left >= section.left && field.right <= section.right,
+          focusVisible: picker.matches(':focus-visible') && style.outlineStyle !== 'none' && outline > 0,
+          focusFitsPanel: field.left - focusOutset >= panel.left && field.right + focusOutset <= panel.right,
+          height: field.height,
+        };
+      });
+      assert.ok(layout.fitsSection, 'report picker fits the quality section at ' + width + ' CSS px');
+      assert.ok(layout.focusVisible && layout.focusFitsPanel, 'picker focus stays visible at ' + width + ' CSS px');
+      if (mobileWidthsCssPx.includes(width)) {
+        assert.ok(layout.height >= minTouchHeightCssPx, 'report picker has a mobile touch target at ' + width + ' CSS px');
+      }
+      if (title === savedForecastsTitle && (width === 375 || width === desktopWidthCssPx)) {
+        await quality.screenshot({ path: resolve(artifacts, 'model-quality-' + width + '.png') });
+      }
+    }
+  }
   await methodology.locator('summary').click();
   await methodology.getByText(/историческая медиана/).waitFor();
   await methodology.locator('summary').click();
