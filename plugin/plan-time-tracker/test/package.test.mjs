@@ -58,13 +58,23 @@ test("runtime package survives a tar roundtrip with one manifest and its skills"
     assert.ok(entries.every(entry => !entry.split("/").includes(".codex-plugin")));
     mkdirSync(unpacked);
     runTar(["-xzf", archive, "-C", unpacked]);
-    const trainingSkill = readFileSync(join(unpacked, "skills/train-model/SKILL.md"), "utf8");
+    const trainingEntry = "skills/train-model/SKILL.md";
+    const trainingSkill = readFileSync(join(unpacked, trainingEntry), "utf8");
     assert.match(trainingSkill, /^---\nname: train-model\ndescription: [^\n]+\n---\n/u);
-    assert.match(trainingSkill, /^node scripts\/train-atlm\.mjs --dataset \S+ --recipe \S+ --out \S+$/mu);
+    const trainingReference = readFileSync(join(unpacked, "skills/train-model/references/training.md"), "utf8");
+    assert.match(trainingReference, /^node scripts\/train-atlm\.mjs --dataset \S+ --recipe \S+ --out \S+$/mu);
+
     const files = readdirSync(unpacked, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile());
     for (const entry of files) {
       const path = join(entry.parentPath, entry.name);
-      assert.deepEqual(readFileSync(path), readFileSync(join(pluginRoot, relative(unpacked, path))));
+      const contents = readFileSync(path);
+      assert.deepEqual(contents, readFileSync(join(pluginRoot, relative(unpacked, path))));
+      if (!entry.name.endsWith(".md")) continue;
+      for (const [, link] of contents.toString("utf8").matchAll(/\]\(([^\s():#]+\.md)(?:#[^)]*)?\)/gu)) {
+        const target = resolve(entry.parentPath, link);
+        assert.ok(target.startsWith(join(unpacked, "skills") + "/"), link + " must stay in the packaged skills");
+        assert.ok(existsSync(target), relative(unpacked, path) + " links to missing " + link);
+      }
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });

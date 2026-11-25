@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import test from 'node:test';
 import {
   mergeAtlmTeacherAnnotations, parseAtlmTeacherRecipe,
@@ -8,10 +8,17 @@ import { call, context, mcp, ok, PLAN, taskV4 } from '../../../sites/plan-time-t
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const features = read('../skills/assess-task/references/features.md');
+const assessmentExamples = read('../skills/assess-task/references/examples.md');
 const assess = read('../skills/assess-task/SKILL.md');
 const track = read('../skills/track-plan/SKILL.md');
 const train = read('../skills/train-model/SKILL.md');
-const embedded = read('../../../sites/plan-time-tracker/skill/plan-time-tracker/SKILL.md');
+const execution = read('../skills/track-plan/references/execution.md');
+const blockedStep = read('../skills/track-plan/references/blocked-step.md');
+const dataset = read('../skills/train-model/references/dataset.md');
+const transfer = read('../skills/train-model/references/transfer.md');
+const training = read('../skills/train-model/references/training.md');
+const registryGuide = read('../skills/train-model/references/registry.md');
+const embedded = '../../../sites/plan-time-tracker/skill/plan-time-tracker/';
 const catalog = read('../../../docs/mcp-naming-review.md');
 
 async function invoke(c, name, args = {}) {
@@ -22,11 +29,17 @@ async function invoke(c, name, args = {}) {
 }
 
 test('the standalone and packaged tracker skills describe the same workflow', () => {
-  assert.equal(embedded, track.replace('name: track-plan\n', 'name: plan-time-tracker\n'));
+  assert.equal(read(embedded + 'SKILL.md'), track.replace('name: track-plan\n', 'name: plan-time-tracker\n'));
+  const references = new URL('../skills/track-plan/references/', import.meta.url);
+  const names = readdirSync(references).sort();
+  assert.deepEqual(readdirSync(new URL(embedded + 'references/', import.meta.url)).sort(), names);
+  for (const name of names) {
+    assert.equal(read(embedded + 'references/' + name), readFileSync(new URL(name, references), 'utf8'), name);
+  }
 });
 
 test('the tracker skill pauses when its confirmed BLOCKED command stops the whole plan', () => {
-  const section = track.match(/^### Пауза после BLOCKED\n\n([\s\S]*?)(?=^## )/m)?.[1];
+  const section = blockedStep;
   assert.ok(section, 'the BLOCKED workflow must have explicit instructions');
   assert.match(section, /SetStepStatus[^\n]+BLOCKED[^\n]+верси[а-я]+ этапа/u);
   assert.match(section, /`GetCommandResult` с тем же `commandId` или повторите исходный запрос без изменений/u);
@@ -36,7 +49,7 @@ test('the tracker skill pauses when its confirmed BLOCKED command stops the whol
   assert.match(section, /ваша блокировка остановила весь план[^\n]+BLOCKED[^\n]+на подтверждённой версии[^\n]+RUNNING[^\n]+PausePlan[^\n]+новым UUID[^\n]+payload:\{planId,reason\}/u);
   assert.match(section, /VERSION_CONFLICT[^\n]+заново проверьте условия шага 3[^\n]+новым UUID/u);
   assert.match(section, /При отказе сообщите фактические статусы и причину/u);
-  assert.deepEqual([...track.matchAll(/^- ([A-Z_]+) —/gmu)].map((match) => match[1]),
+  assert.deepEqual([...execution.matchAll(/^- ([A-Z_]+) —/gmu)].map((match) => match[1]),
     ['PENDING', 'RUNNING', 'BLOCKED', 'DONE']);
 });
 
@@ -95,12 +108,11 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     assert.equal(featureSchemaPath.split('.').reduce((value, key) => value[key], info), info.assessments.atlm.agentTaskSchema);
     for (const key of ['featureSchemaPath', 'featureSource', 'featurePolicies', 'whenUnconfirmed.value',
       'whenUnconfirmed.evidencePath', featureSource + '.unknownReasons']) {
-      assert.ok(train.includes(key), key);
+      assert.ok(dataset.includes(key), key);
     }
     assert.ok(features.includes('registry.teacherDataset.featurePolicies'));
     assert.match(train, /registry\.teacherRecipeIds/u);
-    const recipeSection = train.split('## Локальный рецепт и проверка\n')[1];
-    const recipe = JSON.parse(recipeSection.match(/```json\n([\s\S]*?)```/u)[1]);
+    const recipe = JSON.parse(training.match(/```json\n([\s\S]*?)```/u)[1]);
     assert.equal(recipe.recipeId, 'atlm-teacher-hybrid-v4');
     assert.equal(registry.defaultTeacherRecipeId, recipe.recipeId);
     assert.ok(registry.teacherRecipeIds.includes(recipe.recipeId));
@@ -108,7 +120,7 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     assert.deepEqual(parseAtlmTeacherRecipe(recipe, recipe.datasetRevisionId, recipe.datasetDigest), recipe);
     const listing = (await call(c, '/mcp', { jsonrpc: '2.0', id: 1, method: 'tools/list' }))
       .value.result.tools;
-    const entries = [...train.matchAll(/^\| `([^`]+)` \|/gm)].map(([, name]) => name);
+    const entries = [...registryGuide.matchAll(/^\| `([^`]+)` \|/gm)].map(([, name]) => name);
     assert.equal(entries.length, 6);
     assert.deepEqual(entries.sort(), Object.keys(registry.tools).sort());
     for (const name of entries) {
@@ -117,14 +129,13 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     const repair = registry.tools.CreateTrainingSnapshot.oneOf.find((branch) => branch.properties.mode.enum.includes('repair'));
     assert.deepEqual([...repair.required].sort(), ['commandId', 'mode', 'planIds', 'schemaVersion']);
     assert.equal(repair.properties.planIds.maxItems, 25);
-    assert.match(train, /\{schemaVersion:1,mode:'create',commandId\}[^\n]+новым UUID/u);
-    assert.match(train, /mode:'repair'` выполняется по отдельному поручению/u);
-    assert.match(train, /contract:'atlm-teacher-annotations-v2'/u);
-    assert.match(train, /atlm-teacher-dataset-v2/u);
-    assert.match(train, /Перепроверьте \*\*каждый признак\*\*/u);
-    assert.match(train, /Ноль подходит, когда источник подтверждает/u);
-    const annotationsSection = train.split('## Снимок и преподавательская разметка\n')[1];
-    const annotations = annotationsSection.match(/```js\n([\s\S]*?)```/u)[1];
+    assert.match(dataset, /\{schemaVersion:1,mode:'create',commandId\}[^\n]+новым UUID/u);
+    assert.match(dataset, /mode:'repair'` выполняется по отдельному поручению/u);
+    assert.match(dataset, /contract:'atlm-teacher-annotations-v2'/u);
+    assert.match(dataset, /atlm-teacher-dataset-v2/u);
+    assert.match(dataset, /Перепроверьте \*\*каждый признак\*\*/u);
+    assert.match(dataset, /Ноль подходит, когда источник подтверждает/u);
+    const annotations = dataset.match(/```js\n([\s\S]*?)```/u)[1];
     const readExample = new Function('agentTask', 'fieldEvidence', annotations + '\nreturn rows;');
     const [eligible, excluded] = readExample(taskV4(), { verificationKinds: 'Проверки записаны в отчёте.' });
     assert.equal(eligible.eligibility, 'ELIGIBLE');
@@ -149,7 +160,9 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     const silentSkip = { ...excluded, reasons: ['ACTUAL_FEATURES_UNVERIFIED'], exclusionEvidence: undefined };
     assert.throws(() => mergeAtlmTeacherAnnotations(frozen, [eligible, silentSkip], { teacherReviewed: true }),
       (error) => error.details?.reason === 'USER_DECISION_REQUIRED' && error.details.rowId === excluded.rowId);
-    assert.doesNotMatch(train, /backtestUse|holdoutUse|historicalAvailability/u);
+    for (const guide of [train, dataset, training, registryGuide]) {
+      assert.doesNotMatch(guide, /backtestUse|holdoutUse|historicalAvailability/u);
+    }
     const saveDescription = listing.find((tool) => tool.name === 'SaveDatasetRevision').description;
     for (const term of ['ELIGIBLE', 'ACTUAL', 'EXCLUDED', 'snapshotId', 'parentDatasetRevisionId']) {
       assert.ok(saveDescription.includes(term), 'SaveDatasetRevision must describe ' + term);
@@ -167,7 +180,7 @@ test('training skill uses the discovered revision tools and keeps assessment ind
 });
 
 test('the documented transfer code forwards complete parts, rejects truncation and accepts final replays', async () => {
-  const example = train.split('## Передача файлов\n')[1]?.match(/```js\n([\s\S]*?)```/u)?.[1];
+  const example = transfer.match(/```js\n([\s\S]*?)```/u)?.[1];
   assert(example);
   const init = new Function('tools', 'callTool', 'site', example + '\nreturn { receivePart, sendPart };');
   const partSize = 49_152;
@@ -222,7 +235,7 @@ for (const withBoundary of [false, true]) {
     + (withBoundary ? 'with an operation' : 'with no system boundaries'), async () => {
     const c = context();
     try {
-      const [agentTask, boundary, request] = [...features.matchAll(/```json\s*([\s\S]*?)```/g)]
+      const [agentTask, boundary, request] = [...assessmentExamples.matchAll(/```json\s*([\s\S]*?)```/g)]
         .map((match) => JSON.parse(match[1]));
       if (withBoundary) {
         agentTask.systemBoundaries = [boundary];
