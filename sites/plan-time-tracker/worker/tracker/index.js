@@ -1497,6 +1497,7 @@ async function readTrackerCapabilities(db, ownerId) {
             annotationContract: TEACHER_REVIEWED_ANNOTATIONS_CONTRACT,
             exportContract: TEACHER_REVIEWED_DATASET_CONTRACT,
             featureSource: 'annotation.agentTask',
+            featureSchemaPath: 'assessments.atlm.agentTaskSchema',
             measuredTimeOverride: 'annotation.actualTime',
             timeUnit: 'milliseconds',
             completedPlanExclusion: {
@@ -1513,6 +1514,7 @@ async function readTrackerCapabilities(db, ownerId) {
             featurePolicies: {
               'execution.plannedParallelAgents': {
                 scope: 'ACTUAL',
+                description: 'Пиковое число агентов, одновременно работавших над этим планом, включая основного.',
                 whenConfirmed: 'USE_EXACT',
                 whenUnconfirmed: {
                   value: 1,
@@ -1521,7 +1523,7 @@ async function readTrackerCapabilities(db, ownerId) {
                 },
               },
             },
-            instructions: 'Проверьте каждый завершённый неудалённый план. По коду и материалам плана уточните все признаки. Для исправления или добавления фактического активного времени запишите actualMs и evidence в annotation.actualTime. Подтверждённый ноль допустим. Исходные замечания снимка служат подсказками для проверки. Учтите явные уточнения пользователя.',
+            instructions: 'Для каждого завершённого неудалённого плана заполните признаки по схеме из featureSchemaPath. Используйте подтверждённые значения и явные уточнения пользователя. При нехватке сведений примените подстановку из featurePolicies или допустимое неизвестное значение по схеме. Запишите основание. Если обязательное поле или фактическое активное время всё ещё неизвестно, запросите уточнение. Для подтверждённой правки времени используйте annotation.actualTime.',
           },
           trainingExecution: 'LOCAL',
           activation: 'EXPLICIT',

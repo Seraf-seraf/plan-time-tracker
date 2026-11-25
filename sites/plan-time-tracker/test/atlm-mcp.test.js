@@ -116,9 +116,12 @@ test("forecast and registry MCP discovery use the same strict branches as runtim
       unfinished: "PLAN_NOT_COMPLETED",
       missingStatusReason: "PLAN_STATUS_REASON_REQUIRED",
     });
+    const { featureSchemaPath } = atlm.registry.teacherDataset;
+    assert.equal(featureSchemaPath, "assessments.atlm.agentTaskSchema");
     const agentCountPath = "execution.plannedParallelAgents";
     assert.deepEqual(atlm.registry.teacherDataset.featurePolicies[agentCountPath], {
       scope: "ACTUAL",
+      description: "Пиковое число агентов, одновременно работавших над этим планом, включая основного.",
       whenConfirmed: "USE_EXACT",
       whenUnconfirmed: {
         value: 1,
@@ -140,9 +143,8 @@ test("forecast and registry MCP discovery use the same strict branches as runtim
     assert.match(tools.get("SaveDatasetRevision").description, /USER_REQUESTED_SKIP по planId/);
     assert.match(tools.get("SaveDatasetRevision").description, /annotation\.actualTime=\{actualMs,evidence\}/);
     assert.match(tools.get("SaveDatasetRevision").description, /ELIGIBLE, даже если в исходном наблюдении была ошибка/);
-    assert.match(tools.get("SaveDatasetRevision").description, /точное подтверждённое число.*включая основного/);
     assert.match(tools.get("SaveDatasetRevision").description,
-      /если точное число неизвестно, укажите 1 как нижнюю границу.*annotation\.agentTask\.evidence\["execution\.plannedParallelAgents"\]/i);
+      /registry\.teacherDataset.*схеме из featureSchemaPath.*подстановку из featurePolicies/u);
     assert.equal(atlm.retrainEveryNewPlans, undefined);
   } finally { c.close(); }
 });

@@ -91,11 +91,13 @@ test('training skill uses the discovered revision tools and keeps assessment ind
     assert.equal(registry.schemaVersion, 1);
     assert.equal(registry.trainingExecution, 'LOCAL');
     assert.equal(registry.activation, 'EXPLICIT');
-    const agentCount = registry.teacherDataset.featurePolicies['execution.plannedParallelAgents'];
-    for (const guide of [train, features]) {
-      assert.ok(guide.includes(agentCount.whenUnconfirmed.evidencePath));
-      assert.ok(guide.includes(`\`${agentCount.whenUnconfirmed.basis}\``));
+    const { featureSchemaPath, featureSource } = registry.teacherDataset;
+    assert.equal(featureSchemaPath.split('.').reduce((value, key) => value[key], info), info.assessments.atlm.agentTaskSchema);
+    for (const key of ['featureSchemaPath', 'featureSource', 'featurePolicies', 'whenUnconfirmed.value',
+      'whenUnconfirmed.evidencePath', featureSource + '.unknownReasons']) {
+      assert.ok(train.includes(key), key);
     }
+    assert.ok(features.includes('registry.teacherDataset.featurePolicies'));
     assert.match(train, /registry\.teacherRecipeIds/u);
     const recipeSection = train.split('## Локальный рецепт и проверка\n')[1];
     const recipe = JSON.parse(recipeSection.match(/```json\n([\s\S]*?)```/u)[1]);
