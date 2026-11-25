@@ -10,8 +10,8 @@ description: Сохранить исходный план и текущие ст
 ## Обычный ход работы
 
 1. Для нового плана передайте исходный Markdown в `CreatePlan`. Сохраните `planId` и прочитайте этапы через `GetPlanProgress`. При продолжении найдите существующий план. [Сохранение и правка плана](references/plan-document.md)
-2. Перед первым запуском сохраните оценку с признаками ATLM и дождитесь `assessmentReadiness.status=READY` в `GetSavedEstimate`. [Оценка до запуска](references/assessment-before-start.md)
-3. По поручению работать вызовите `StartPlan` для `PLANNED` или `ResumePlan` для `PAUSED`. Для `RUNNING` продолжайте работу с открытым интервалом. Само составление плана оставляет его в `PLANNED`. Начало этапа и его итог подтверждайте через `SetStepStatus`. [Выполнение и учёт времени](references/execution.md)
+2. Перед первым запуском неудалённого плана сохраните оценку с признаками ATLM и дождитесь `assessmentReadiness.status=READY` в `GetSavedEstimate`. [Оценка до запуска](references/assessment-before-start.md)
+3. По поручению работать проверьте `deletedAt:null`. Вызовите `StartPlan` для `PLANNED` или `ResumePlan` для `PAUSED`. Для `RUNNING` продолжайте работу с открытым интервалом. Само составление плана оставляет его в `PLANNED`. Начало этапа и его итог подтверждайте через `SetStepStatus`. [Выполнение и учёт времени](references/execution.md)
 4. Проверьте результат работы и завершите план по поручению пользователя. [Условия завершения](references/execution.md)
 
 В полях трекера не сохраняйте секреты, полные логи инструментов или исходники проекта.
